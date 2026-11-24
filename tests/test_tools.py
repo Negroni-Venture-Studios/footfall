@@ -1181,3 +1181,38 @@ async def test_a_thrown_password_with_quotes_and_backslashes_leaves_no_trace(
     for place in places:
         for run in runs:
             assert run not in place, (run, place[:200])
+
+
+async def test_a_password_thrown_while_focus_is_read_never_reaches_the_log(
+    session: MakeSession,
+    app_server: AppServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    # Reading which element has focus runs script in the page, which reads
+    # document.activeElement. This page replaces it with a getter that throws what was typed,
+    # escaped by JSON and cut by a character, so that no search for the password finds it.
+    app_server.page(
+        "/throws-focus",
+        '<input type="password" aria-label="Secret field" style="width:300px;height:40px">'
+        "<script>const real = Object.getOwnPropertyDescriptor("
+        "Document.prototype, 'activeElement').get;"
+        "Object.defineProperty(document, 'activeElement', { configurable: true, get() {"
+        " const typed = document.querySelector('input').value;"
+        f" if (typed.length >= {len(QUOTED_SECRET)})"
+        "  throw new Error('leak ' + JSON.stringify(typed) + ' ' + typed.slice(1));"
+        " return real.call(document); } });</script>",
+    )
+    s = await session("/throws-focus", redact=frozenset({QUOTED_SECRET}))
+    await tap_name(s, s.first, "Secret field")
+    typed = await s.executor.run("type", {"text": QUOTED_SECRET})
+    assert typed.error is False
+    again = await s.executor.run("type", {"text": "more"})
+    assert again.error is True
+    assert "nothing that takes text has focus" in again.text
+    messages = [record.getMessage() for record in caplog.records]
+    assert "could not read which element has focus (Error)" in messages
+    runs = {QUOTED_SECRET[i : i + 4] for i in range(len(QUOTED_SECRET) - 3)}
+    for place in [caplog.text, again.text, str(s.trace.steps()), *messages]:
+        for run in runs:
+            assert run not in place, (run, place[:200])

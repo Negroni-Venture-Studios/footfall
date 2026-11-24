@@ -390,7 +390,8 @@ class Executor:
 
     `touch` says whether taps use the touchscreen, as the device does. Each string in
     `redact`, such as the throwaway password the tester types to sign in, is replaced by
-    "[password]" in the trace, the report from `finish` and the log.
+    "[password]" in the trace, the report from `finish` and any `CaptureError`. The log
+    holds no error's message at all, only its class.
     """
 
     def __init__(
@@ -607,7 +608,7 @@ class Executor:
         try:
             await self._page.mouse.wheel(dx, dy)
         except PlaywrightError as error:  # some mobile emulations have no wheel
-            self._debug("the mouse wheel failed, so the page is scrolled directly: %s", error)
+            self._debug("the mouse wheel failed, so the page is scrolled directly", error)
             await self._page.evaluate("([x, y]) => window.scrollBy(x, y)", [dx, dy])
 
     async def _go(self, data: Mapping[str, Any]) -> _Action:
@@ -667,7 +668,7 @@ class Executor:
 
     def _browser_error(self, error: PlaywrightError) -> str:
         """Say what went wrong in the browser without passing on any text from the page."""
-        self._debug("the browser reported an error: %s", error)
+        self._debug("the browser reported an error", error)
         if isinstance(error, PlaywrightTimeoutError):
             return "The page did not finish loading in time."
         code = _NET_ERROR.search(str(error))
@@ -684,7 +685,7 @@ class Executor:
                 f"the page did not answer within {ACTION_TIMEOUT:g} s while its focus was read"
             ) from None
         except PlaywrightError as error:
-            self._debug("could not read which element has focus: %s", error)
+            self._debug("could not read which element has focus", error)
             return False
         return answer is True
 
@@ -727,7 +728,7 @@ class Executor:
             )
             if not (moved or self._page.url != before):
                 raise
-            self._debug("the page moved while it was read, so it is read again: %s", error)
+            self._debug("the page moved while it was read, so it is read again", error)
             # Where the navigation ended may be off the app; the model only ever sees the app.
             notes = await self._settle_on_app()
             screen = await capture(self._page, timeout=CAPTURE_TIMEOUT)
@@ -772,8 +773,14 @@ class Executor:
         """
         return CaptureError(self._redact(str(error)))
 
-    def _debug(self, message: str, error: BaseException) -> None:
-        LOG.debug(message, self._redact(str(error)))
+    @staticmethod
+    def _debug(what: str, error: BaseException) -> None:
+        """Log what went wrong and the error's class, never its message.
+
+        A browser error's message can quote what the page threw, and a page can throw the
+        password typed a moment before, escaped or cut so that no redaction would find it.
+        """
+        LOG.debug("%s (%s)", what, type(error).__name__)
 
     # ------------------------------------------------------------------ results
 
