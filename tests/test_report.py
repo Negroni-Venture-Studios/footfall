@@ -188,7 +188,7 @@ def test_dropped_note_fits_inside_the_summary_cap() -> None:
 
 def test_one_dropped_finding_is_still_counted() -> None:
     data = many(["minor"] * 26)
-    assert parse(data)[0].endswith("(1 further findings were dropped.)")
+    assert parse(data)[0].endswith("(1 further finding was dropped.)")
 
 
 def test_every_finding_is_validated_even_if_dropped() -> None:

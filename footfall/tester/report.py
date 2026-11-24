@@ -212,7 +212,11 @@ def parse_finish(
     dropped = len(found) - CAPS["findings"]
     if dropped > 0:
         found = sorted(found, key=lambda f: _RANK[f.severity])[: CAPS["findings"]]
-        note = f"({dropped} further findings were dropped.)"
+        note = (
+            "(1 further finding was dropped.)"
+            if dropped == 1
+            else f"({dropped} further findings were dropped.)"
+        )
         if len(summary) + 1 + len(note) > CAPS["summary"]:
             summary = _clean(summary, CAPS["summary"] - 1 - len(note))
         summary = f"{summary} {note}"
