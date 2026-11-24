@@ -20,6 +20,7 @@ from footfall.personas import DEVICES, PERSONAS, Device, Persona, load_devices, 
 from footfall.tester import loop
 from footfall.tester.guard import Guard
 from footfall.tester.loop import (
+    ACCOUNT,
     BEGIN,
     DECLINED,
     FINISH_NOW,
@@ -141,6 +142,20 @@ def finish(*, summary: str = "All fine.", findings: list[dict[str, Any]] | None 
     ]
 
 
+class SystemsFake(FakeModel):
+    """A fake that also keeps every system prompt it was sent."""
+
+    def __init__(self, script: list[list[dict[str, Any]]]) -> None:
+        super().__init__(script)
+        self.systems: list[str] = []
+
+    async def turn(
+        self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    ) -> ModelTurn:
+        self.systems.append(system)
+        return await super().turn(system, tools, messages)
+
+
 class Turns:
     """A model that gives the turns it was made with, and keeps every list it is sent."""
 
@@ -249,6 +264,29 @@ async def test_the_first_message_is_the_first_look(world: MakeWorld) -> None:
     }
     assert begin == {"type": "text", "text": BEGIN}
     assert [s.tool for s in w.trace.steps()] == ["finish"]  # the first look is not traced
+
+
+async def test_the_account_goes_in_the_first_message_not_the_system_prompt(
+    world: MakeWorld,
+) -> None:
+    username, password = "tester-Qm4v", "Hk2-pZ7_wR9xL3nB"  # gitleaks:allow
+    w = await world(redact=frozenset({password}))
+    model = SystemsFake([finish(summary=f"I signed in with {password}.")])
+    report = await run(w, model, account=(username, password))
+    plain = SystemsFake([finish()])
+    await run(await world(), plain)
+
+    (first,) = model.calls[0]
+    screen, image, account, begin = first["content"]
+    assert screen["text"].startswith(FIRST_LOOK + "\n")
+    assert image["type"] == "image"
+    assert account == {"type": "text", "text": ACCOUNT.format(username=username, password=password)}
+    assert begin == {"type": "text", "text": BEGIN}
+    assert model.systems == plain.systems  # the prompt stays the same, so it can be cached
+    assert password not in model.systems[0]
+    assert username not in model.systems[0]
+    assert password not in report.summary
+    assert "[password]" in report.summary
 
 
 async def test_history_is_append_only(world: MakeWorld) -> None:
