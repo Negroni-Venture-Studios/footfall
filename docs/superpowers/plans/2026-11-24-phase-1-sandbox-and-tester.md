@@ -77,7 +77,7 @@ docs/architecture.md, docs/security.md, docs/diagrams/run-network.svg
 ### Task 1: Python project, tooling and CI
 
 **Files:**
-- Create: `pyproject.toml`, `uv.lock`, `.editorconfig`, `.gitattributes`, `.gitignore`, `.dockerignore`, `.pre-commit-config.yaml`, `scripts/check_licences.py`, `footfall/__init__.py`, `tests/__init__.py`, `tests/conftest.py`, `tests/test_diagrams.py`, `tests/test_package.py`, `.github/workflows/ci.yml`, `.github/workflows/codeql.yml`, `.github/dependabot.yml`, `.github/CODEOWNERS`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/{bug_report.md,feature_request.md,config.yml}`
+- Create: `README.md`, `pyproject.toml`, `uv.lock`, `.editorconfig`, `.gitattributes`, `.gitignore`, `.dockerignore`, `.pre-commit-config.yaml`, `scripts/check_licences.py`, `footfall/__init__.py`, `tests/__init__.py`, `tests/conftest.py`, `tests/test_diagrams.py`, `tests/test_package.py`, `.github/workflows/ci.yml`, `.github/workflows/codeql.yml`, `.github/dependabot.yml`, `.github/CODEOWNERS`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/{bug_report.md,feature_request.md,config.yml}`
 
 **Interfaces:**
 - Produces: the `footfall` package (`footfall.__version__ = "0.1.0"`), the `isolation` pytest marker, the network-blocking fixture every later test relies on.
@@ -101,13 +101,15 @@ def test_network_is_blocked() -> None:
 - [ ] **Step 3: Create the project files.** `pyproject.toml` as Snug's with `[project.scripts] footfall = "footfall.__main__:main"`, `markers = ["isolation: needs Docker, gVisor and the dev stack"]`, `addopts = "-ra --strict-markers --strict-config -m 'not isolation'"`, `asyncio_mode = "auto"`. `tests/conftest.py` patches `socket.socket.connect` to raise `OSError("network blocked in tests")` for any address other than loopback and Unix sockets.
 - [ ] **Step 4: Run `uv lock`, `uv run pytest`, `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`, `uv run python scripts/check_licences.py`.** All pass.
 - [ ] **Step 5: Create the workflows.** `ci.yml` copies Snug's jobs `lint`, `typecheck`, `test` (Python 3.12 and 3.14; installs browsers with `uv run playwright install --with-deps chromium webkit`), `security` (gitleaks), `dependency-audit`, `sbom`; actions pinned by full SHA with the version in a comment, `permissions: contents: read`, `persist-credentials: false`, `ubuntu-24.04`. `codeql.yml` and `dependabot.yml` (ecosystems `uv`, `github-actions`, `docker` for `images/*`) as Snug's.
+- [ ] **Step 5a: Write the first `README.md`**, modelled on Snug's: a short account of what Footfall is and why, its status ("phase 1 of the [design](docs/design.md): the sandbox and the tester"), the overview diagram in a `<picture>` element, links to the design and the licence, and a "Trying phase 1" section that Task 18 completes. Run `voice_audit.py --register report` on it and read it back for AI-isms.
 - [ ] **Step 6: Commit and push the branch; open a draft pull request** titled "Phase 1: the sandbox and the tester". CI must be green.
 - [ ] **Step 7: Ask Alasdair to protect `main`** (required checks: the CI job names; no direct pushes; squash or merge commits), as Snug's CONTRIBUTING describes. This needs his admin rights.
 
 ### Task 2: Community files and the first README
 
 **Files:**
-- Create: `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `TRADEMARKS.md`, `THIRD_PARTY_LICENCES.md`, `CHANGELOG.md`, `README.md`, `tests/test_doc_links.py`
+- Create: `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `TRADEMARKS.md`, `THIRD_PARTY_LICENCES.md`, `CHANGELOG.md`, `tests/test_doc_links.py`
+- Modify: `README.md` (link the new files)
 
 **Interfaces:**
 - Produces: the rules every later task follows (`AGENTS.md`), and `tests/test_doc_links.py`, which every later documentation change must keep green.
@@ -125,7 +127,7 @@ def test_network_is_blocked() -> None:
     8. no test reaches the internet.
   - `CLAUDE.md` is `@AGENTS.md` plus any Claude Code specifics.
   - `THIRD_PARTY_LICENCES.md` lists Geist and Geist Mono (OFL), mobile-agent-testers (MIT, with its copyright line, for the screen format, accessibility check, rules and personas adapted from it), and the runtime packages.
-  - `README.md` gives a short account of what Footfall is and its status ("phase 1 of the [design](docs/design.md): the sandbox and the tester"), shows the overview diagram, and has a "Trying phase 1" section that Task 18 completes.
+  - `README.md`, written in Task 1, gains a "Contributing and security" section linking these files.
 - [ ] **Step 3: Run `voice_audit.py --register report`** on each Markdown file, fix every warning that is not code, and read each file back for AI-isms.
 - [ ] **Step 4: Run `uv run pytest tests/test_doc_links.py`.** It passes.
 - [ ] **Step 5: Commit.**
