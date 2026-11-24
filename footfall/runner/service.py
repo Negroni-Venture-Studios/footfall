@@ -102,8 +102,9 @@ class _OverBudget(Exception):
 class ProxyControl(Protocol):
     """What the runner needs from the egress proxy: an allow list for each container's address.
 
-    `allow` replaces any list already held for the address, and `revoke_run` revokes every list
-    held for a run. Implementations raise OSError when the proxy cannot be reached.
+    `allow` replaces any list the same run already holds for the address, and refuses, with a
+    ValueError, an address another run still holds. `revoke_run` revokes every list held for a
+    run. Implementations raise OSError when the proxy cannot be reached.
     """
 
     def allow(self, ip: str, run_id: str, hosts: Sequence[str]) -> None: ...

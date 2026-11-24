@@ -74,13 +74,25 @@ def test_revoke(policy: Policy) -> None:
     policy.revoke(BROWSERS)  # never allowed
 
 
-def test_allow_replaces_the_earlier_list(policy: Policy) -> None:
-    policy.allow(APP, OTHER, ["fonts.gstatic.com"])
+def test_allow_replaces_the_earlier_list_of_the_same_run(policy: Policy) -> None:
+    policy.allow(APP, RUN, ["fonts.gstatic.com"])
     assert not policy.decide(APP, "api.example.com", 443).allowed
-    assert policy.decide(APP, "fonts.gstatic.com", 443) == Decision(True, "allowed", OTHER)
-    policy.allow(APP, OTHER, [])
+    assert policy.decide(APP, "fonts.gstatic.com", 443) == Decision(True, "allowed", RUN)
+    policy.allow(APP, RUN, [])
     assert not policy.decide(APP, "fonts.gstatic.com", 443).allowed
-    assert policy.decide(APP, "fonts.gstatic.com", 443).run_id == OTHER
+    assert policy.decide(APP, "fonts.gstatic.com", 443).run_id == RUN
+
+
+def test_allow_never_takes_an_address_from_another_run(policy: Policy) -> None:
+    with pytest.raises(ValueError, match="another run"):
+        policy.allow(APP, OTHER, ["fonts.gstatic.com"])
+    with pytest.raises(ValueError, match="another run"):
+        policy.allow(f"::ffff:{APP}", OTHER, [])
+    assert policy.decide(APP, "api.example.com", 443) == Decision(True, "allowed", RUN)
+    assert not policy.decide(APP, "fonts.gstatic.com", 443).allowed
+    policy.revoke(APP)  # once revoked, the address may go to any run
+    policy.allow(APP, OTHER, ["fonts.gstatic.com"])
+    assert policy.decide(APP, "fonts.gstatic.com", 443) == Decision(True, "allowed", OTHER)
 
 
 def test_revoke_run_revokes_every_list_of_that_run(policy: Policy) -> None:

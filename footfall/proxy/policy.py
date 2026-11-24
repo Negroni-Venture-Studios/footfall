@@ -1,7 +1,8 @@
 """Which hosts each container may reach through the egress proxy.
 
 The runner gives the proxy an allow list for each container's address on a run's network, and
-revokes it when the container goes. A list names hosts exactly: no wildcards, no subdomains, and
+revokes it when the container goes. An address another run still holds is never handed over:
+it must be revoked first. A list names hosts exactly: no wildcards, no subdomains, and
 no addresses. Only ports 80 and 443 are ever allowed. A client address with no list is refused
 everything.
 
@@ -72,9 +73,11 @@ class Policy:
         self._reached: dict[str, set[str]] = {}  # in the order each run first reached a host
 
     def allow(self, ip: str, run_id: str, hosts: Iterable[str]) -> None:
-        """Give an address its allow list, replacing any list it had; it never merges.
+        """Give an address its allow list, replacing any list the same run gave it; it never
+        merges.
 
-        Raises ValueError, changing nothing, for a bad address, run id or host name.
+        Raises ValueError, changing nothing, for a bad address, run id or host name, or for an
+        address that holds another run's list.
         """
         key = _address(ip)
         _run_id(run_id)
@@ -82,6 +85,9 @@ class Policy:
             raise ValueError("hosts must be a list of host names, not a string")
         names = frozenset(validate_host_name(host) for host in hosts)
         with self._lock:
+            current = self._lists.get(key)
+            if current is not None and current[0] != run_id:
+                raise ValueError(f"{key} already has an allow list for another run")
             self._lists[key] = (run_id, names)
 
     def revoke(self, ip: str) -> None:

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from footfall.proxy.control import ProxyRefused
 from footfall.runner.engine import EngineError
 from footfall.runner.service import RunnerService
 
@@ -199,6 +200,9 @@ class FakeProxy:
         self.calls.append(("allow", ip, run_id, tuple(hosts)))
         if "allow" in self.failures:
             raise self.failures["allow"]
+        owner = self.allowed.get(ip, (run_id, ()))[0]
+        if owner != run_id:
+            raise ProxyRefused(f"{ip} already has an allow list for another run")
         self.allowed[ip] = (run_id, tuple(hosts))
 
     def revoke(self, ip: str) -> None:

@@ -112,11 +112,18 @@ async def test_allow_revoke_and_reached_round_trip(live: Live) -> None:
     await call(client.revoke, APP)  # twice is harmless
 
 
-async def test_allow_replaces_the_earlier_list(live: Live) -> None:
+async def test_allow_replaces_the_earlier_list_of_the_same_run(live: Live) -> None:
     await call(live.client.allow, APP, RUN, ["api.example.com"])
-    await call(live.client.allow, APP, OTHER, ["fonts.gstatic.com"])
+    await call(live.client.allow, APP, RUN, ["fonts.gstatic.com"])
     assert not live.policy.decide(APP, "api.example.com", 443).allowed
-    assert live.policy.decide(APP, "fonts.gstatic.com", 443).run_id == OTHER
+    assert live.policy.decide(APP, "fonts.gstatic.com", 443).allowed
+
+
+async def test_allow_for_another_run_is_refused(live: Live) -> None:
+    await call(live.client.allow, APP, RUN, ["api.example.com"])
+    with pytest.raises(ProxyRefused, match="another run"):
+        await call(live.client.allow, APP, OTHER, ["fonts.gstatic.com"])
+    assert live.policy.decide(APP, "api.example.com", 443).run_id == RUN
 
 
 async def test_revoke_run_round_trip(live: Live) -> None:

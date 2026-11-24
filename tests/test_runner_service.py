@@ -1401,6 +1401,21 @@ def test_a_stray_with_an_unreadable_address_loses_its_list_by_run(h: Harness) ->
     assert h.service.status(RUN) == NEVER_PREPARED  # and nothing left to finish
 
 
+def test_an_allow_refused_for_another_runs_address_fails_the_start_closed(h: Harness) -> None:
+    prepare(h)
+    taken = f"10.89.0.{h.engine._count + 1}"  # the address the next container will get
+    h.proxy.allowed[taken] = (OTHER, ("api.example.com",))
+    with pytest.raises(RunnerError, match="another run"):
+        h.service.start_app(RUN, "anna", "python3 serve.py", 8000, ["api.example.com"])
+    assert h.engine.ips[app_name("anna")] == taken
+    assert app_name("anna") not in h.engine.live
+    assert not (h.runs / RUN / "copies" / "anna").exists()
+    assert all(owner != RUN for owner, _ in h.proxy.allowed.values())
+    assert ("revoke", taken) in h.proxy.calls  # failing closed takes the stale list too
+    assert h.proxy.allowed == {}
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])  # the copy name is free
+
+
 def test_relaunch_revokes_an_address_kept_after_a_failed_revoke(h: Harness) -> None:
     prepare(h)
     name = f"footfall-{RUN}-browsers-browsers"
