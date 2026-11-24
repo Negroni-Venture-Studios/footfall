@@ -139,3 +139,24 @@ jobs:
           name: sbom
           path: sbom.json
           retention-days: 90
+
+  images:
+    name: images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # Built, not pushed: this proves the Dockerfiles build and their pinned
+      # digests exist.
+      - name: Build the four images
+        run: |
+          for name in footfall python3.13 node22 browsers; do
+            case "$name" in
+              python3.13) dir=python ;;
+              node22) dir=node ;;
+              *) dir="$name" ;;
+            esac
+            docker build -t "footfall-${name}:dev" -f "images/${dir}/Dockerfile" .
+          done

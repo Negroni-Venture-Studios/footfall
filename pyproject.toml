@@ -19,7 +19,8 @@ classifiers = [
 ]
 dependencies = [
     "anthropic>=2.13,<3",
-    "playwright>=1.65.2,<2",
+    # Must move together with images/browsers/Dockerfile, and only to a version MCR has published.
+    "playwright==1.65.1",
 ]
 
 [project.scripts]
