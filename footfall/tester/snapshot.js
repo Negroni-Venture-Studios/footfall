@@ -8,18 +8,21 @@
   const MAX_TEXT = 400; // characters of any string sent back; the caller cuts them shorter
   const TEXT_BLOCK = 120;
 
-  // A block a person can type into, whatever role it claims.
-  const EDITABLE = '[contenteditable]:not([contenteditable="false" i])';
   const INTERACTIVE = [
     "a[href]", "button", "input:not([type=hidden])", "select", "textarea",
     "[role=button]", "[role=link]", "[role=checkbox]", "[role=radio]", "[role=tab]",
-    "[role=menuitem]", "[role=switch]", "[role=option]", EDITABLE,
+    "[role=menuitem]", "[role=switch]", "[role=option]",
   ].join(",");
+  // A block a person can type into, whatever role it claims. The attribute alone is not
+  // enough: a value such as "foo" is invalid, and the block is then not editable.
+  const EDITABLE = "[contenteditable]";
+  const isEditable = (el) => el.matches(EDITABLE) && el.isContentEditable === true;
   const TEXT = "h1,h2,h3,h4,h5,h6,p,td,th";
-  const SELECTOR = INTERACTIVE + ",[tabindex]," + TEXT + ",iframe,frame";
+  const SELECTOR = INTERACTIVE + "," + EDITABLE + ",[tabindex]," + TEXT + ",iframe,frame";
   // Elements that join the tab order only because of tabindex="0" or more.
   const isInteractive = (el) =>
-    el.matches(INTERACTIVE) || (el.hasAttribute("tabindex") && el.tabIndex >= 0);
+    el.matches(INTERACTIVE) || isEditable(el) ||
+    (el.hasAttribute("tabindex") && el.tabIndex >= 0);
   const EXPLICIT_ROLES = new Set([
     "button", "link", "checkbox", "radio", "tab", "menuitem", "switch", "option",
   ]);
@@ -69,7 +72,7 @@
   };
 
   const interactiveRole = (el) => {
-    if (el.matches(EDITABLE)) return "textbox";
+    if (isEditable(el)) return "textbox";
     const first = (el.getAttribute("role") || "").trim().toLowerCase().split(/\s+/)[0];
     if (EXPLICIT_ROLES.has(first)) return first;
     const role = implicitRole(el);
@@ -110,7 +113,7 @@
     let own = "";
     if (el.localName === "input" && BUTTON_INPUTS.has(inputType(el)) && inputType(el) !== "image") {
       own = squash(el.value, MAX_TEXT);
-    } else if (el.localName !== "input" && el.localName !== "textarea" && !el.matches(EDITABLE)) {
+    } else if (el.localName !== "input" && el.localName !== "textarea" && !isEditable(el)) {
       own = textOf(el) || imageAlts(el);
     }
     return (
@@ -128,7 +131,7 @@
       return squash(el.value, MAX_TEXT);
     }
     if (el.localName === "textarea") return squash(el.value, MAX_TEXT);
-    if (el.matches(EDITABLE)) return textOf(el);
+    if (isEditable(el)) return textOf(el);
     if (el.localName === "select") {
       return squash(Array.from(el.selectedOptions).map((o) => o.text).join(", "), MAX_TEXT);
     }
