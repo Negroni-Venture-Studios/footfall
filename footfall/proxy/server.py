@@ -150,10 +150,16 @@ def _headers(lines: list[str]) -> tuple[tuple[str, str], ...]:
     return tuple(headers)
 
 
+def _canonical(name: str) -> str:
+    """A header name as a server might read it: in lower case, with `_` as `-`, as CGI-style
+    servers read it. Every check of a header name uses this form."""
+    return name.lower().replace("_", "-")
+
+
 def _content_length(headers: Iterable[tuple[str, str]]) -> int | None:
     """The request's Content-Length, refusing any framing that could be read two ways."""
-    names = [name.lower() for name, _ in headers]
-    lengths = [value for name, value in headers if name.lower() == "content-length"]
+    names = [_canonical(name) for name, _ in headers]
+    lengths = [value for name, value in headers if _canonical(name) == "content-length"]
     if "transfer-encoding" in names:
         if lengths:
             raise _Refusal(
@@ -232,8 +238,8 @@ def _upstream_head(request: _Request) -> bytes:
     """The one request sent upstream: origin form, the checked Host, and `Connection: close`."""
     lines = [f"{request.method} {request.target} {request.version}", f"Host: {request.host}"]
     for name, value in request.headers:
-        lower = name.lower()
-        if lower not in _DROPPED and not lower.startswith("proxy-"):
+        canonical = _canonical(name)
+        if canonical not in _DROPPED and not canonical.startswith("proxy-"):
             lines.append(f"{name}: {value}")
     if request.length is not None:
         lines.append(f"Content-Length: {request.length}")

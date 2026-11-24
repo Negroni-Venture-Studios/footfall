@@ -646,6 +646,26 @@ async def test_http_body_forwarded_by_its_content_length(live: Live) -> None:
     ]
 
 
+async def test_underscores_in_header_names_count_as_hyphens(live: Live) -> None:
+    # Some servers read Content_Length as Content-Length, so the proxy does too, and writes
+    # the one length it checked.
+    request = get(
+        f"http://{ALLOWED}/form",
+        "Content_Length: 5",
+        "Proxy_Authorization: Basic bm90LWEtcmVhbC1zZWNyZXQ=",  # gitleaks:allow
+        "Keep_Alive: timeout=5",
+        "X_Custom: kept",
+        method="POST",
+        body=b"hello",
+    )
+    assert await exchange(live.port, request) == RESPONSE
+    await live.upstream.wait_for(1)
+    assert live.upstream.received == [
+        b"POST /form HTTP/1.1\r\nHost: api.example.com\r\nX_Custom: kept\r\n"
+        b"Content-Length: 5\r\nConnection: close\r\n\r\nhello"
+    ]
+
+
 async def test_http_second_request_is_not_forwarded(live: Live) -> None:
     first = get(f"http://{ALLOWED}/one", "Content-Length: 5", method="POST", body=b"hello")
     second = get("http://evil.example.com/two", "Host: evil.example.com")
@@ -673,6 +693,9 @@ async def test_http_large_response_is_relayed() -> None:
     ("headers", "code"),
     [
         (("Transfer-Encoding: chunked",), 411),
+        (("Transfer_Encoding: chunked", "Content-Length: 5"), 400),
+        (("transfer_encoding: chunked",), 411),
+        (("Content_Length: 5", "Content-Length: 5"), 400),
         (("Transfer-Encoding: chunked", "Content-Length: 5"), 400),
         (("Content-Length: 5", "Content-Length: 5"), 400),
         (("Content-Length: 5, 5",), 400),
