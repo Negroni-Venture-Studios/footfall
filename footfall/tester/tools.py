@@ -27,7 +27,14 @@ from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from footfall.tester.guard import Guard, GuardEvent
-from footfall.tester.report import CAPS, PAGE_CAP, ToolError, clean_text, parse_finish
+from footfall.tester.report import (
+    CAPS,
+    PAGE_CAP,
+    ToolError,
+    clean_text,
+    map_report_text,
+    parse_finish,
+)
 from footfall.tester.screen import (
     SNAPSHOT_TIMEOUT,
     CaptureError,
@@ -390,8 +397,8 @@ class Executor:
 
     `touch` says whether taps use the touchscreen, as the device does. Each string in
     `redact`, such as the throwaway password the tester types to sign in, is replaced by
-    "[password]" in the trace, the report from `finish` and any `CaptureError`. The log
-    holds no error's message at all, only its class.
+    "[password]" in the trace, the free text of the report from `finish` and any
+    `CaptureError`. The log holds no error's message at all, only its class.
     """
 
     def __init__(
@@ -487,7 +494,7 @@ class Executor:
             if action.finish is not None:
                 traced = True
                 self._append(draft, self._guard.drain())
-                report = self._scrub(action.finish)
+                report = map_report_text(action.finish, self._redact)
                 return ToolOutcome("Your report was received.", None, report, False)
             notes = await self._settle_on_app()
             events = self._guard.drain()

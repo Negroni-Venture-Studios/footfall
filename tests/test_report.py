@@ -8,6 +8,7 @@ from footfall.tester.report import (
     Finding,
     PersonaReport,
     ToolError,
+    map_report_text,
     parse_finish,
 )
 
@@ -305,3 +306,43 @@ def test_report_to_json_is_plain_json() -> None:
     assert out["findings"][0]["steps"] == ["Open /cart", "Tap the coupon box"]
     assert out["findings"][0]["screenshots"] == ["s7"]
     assert out["actions"] == 17 and out["cost_usd"] == 0.41 and out["score"] == 6
+
+
+def test_map_report_text_changes_free_text_and_nothing_else() -> None:
+    data = {
+        "summary": "s",
+        "score": 5,
+        "goal_reached": "partly",
+        "findings": [
+            {
+                "title": "t",
+                "severity": "minor",
+                "page": "/p",
+                "steps": ["a", 3],
+                "expected": "e",
+                "actual": "x",
+                "screenshots": ["01"],
+            },
+            "not a finding",
+        ],
+    }
+    before = repr(data)
+    changed = map_report_text(data, str.upper)
+    assert repr(data) == before  # a copy; the input is untouched
+    assert changed["summary"] == "S"
+    assert (changed["score"], changed["goal_reached"]) == (5, "partly")
+    finding, odd = changed["findings"]
+    assert odd == "not a finding"
+    assert finding == {
+        "title": "T",
+        "severity": "minor",
+        "page": "/P",
+        "steps": ["A", 3],
+        "expected": "E",
+        "actual": "X",
+        "screenshots": ["01"],
+    }
+    assert map_report_text({"summary": 1, "findings": "none"}, str.upper) == {
+        "summary": 1,
+        "findings": "none",
+    }

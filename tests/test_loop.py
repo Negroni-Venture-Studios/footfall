@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 import logging
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,9 @@ from footfall.tester.guard import Guard
 from footfall.tester.loop import (
     BEGIN,
     DECLINED,
+    FINISH_NOW,
+    FIRST_LOOK,
+    IDLE,
     NUDGE,
     PAGE_STOPPED,
     REMINDER,
@@ -164,6 +168,23 @@ def systems(messages: list[dict[str, Any]]) -> list[int]:
     return [i for i, m in enumerate(messages) if m["role"] == "system"]
 
 
+NUDGE_BLOCK = {"type": "text", "text": NUDGE}
+
+
+def nudges(messages: list[dict[str, Any]]) -> list[int]:
+    """Where the nudge is: a text block of its own in a user message, never a tool result."""
+    return [
+        i for i, m in enumerate(messages) if m["role"] == "user" and NUDGE_BLOCK in m["content"]
+    ]
+
+
+def nudged(message: dict[str, Any]) -> bool:
+    """The message is the tool results of a turn, with the nudge after them."""
+    if message["role"] != "user" or message["content"][-1] != NUDGE_BLOCK:
+        return False
+    return all(b["type"] == "tool_result" for b in message["content"][:-1])
+
+
 def results(message: dict[str, Any]) -> list[dict[str, Any]]:
     assert message["role"] == "user"
     return [b for b in message["content"] if b["type"] == "tool_result"]
@@ -204,6 +225,7 @@ async def test_the_first_message_is_the_first_look(world: MakeWorld) -> None:
     assert first["role"] == "user"
     screen, image, begin = first["content"]
     assert screen["type"] == "text"
+    assert screen["text"].startswith(FIRST_LOOK + "\n")
     assert "Screenshot id: 01" in screen["text"]
     assert "Home" in screen["text"]
     assert image == {
@@ -232,7 +254,8 @@ async def test_history_is_append_only(world: MakeWorld) -> None:
     report = await run(w, model, budget=Budget(max_actions=3))
     assert report.status == "finished"
     assert len(model.calls) == len(script)
-    assert model.calls[-1][-1] == {"role": "system", "content": NUDGE}
+    assert nudged(model.calls[-1][-1])
+    assert systems(model.calls[-1]) == []
     for before, after in zip(model.calls, model.calls[1:], strict=False):
         assert len(after) > len(before)
         for index, earlier in enumerate(before):
@@ -327,7 +350,7 @@ async def test_three_turns_in_a_row_without_a_tool_are_incomplete(world: MakeWor
     report = await run(w, model)
     # The look starts the count again; a call that was not run does not.
     assert report.status == "incomplete"
-    assert report.reason == "the tester stopped using its tools"
+    assert report.reason == IDLE == "the tester did nothing in three turns in a row"
     assert len(model.calls) == 5
     assert report.actions == 1
 
@@ -365,11 +388,11 @@ async def test_action_budget_sends_system_nudge_then_incomplete(world: MakeWorld
     assert report.reason == "the budget of 3 actions ran out before the tester called finish"
     assert report.actions == 3
     assert len(model.calls) == 5  # three actions, then two grace turns
-    # The nudge follows the tool results of the third action, once.
-    assert systems(model.calls[2]) == []
-    assert model.calls[3][-1] == {"role": "system", "content": NUDGE}
-    assert model.calls[3][-2]["role"] == "user"
-    assert len(systems(model.calls[4])) == 1
+    # The nudge follows the tool results of the third action, in the same message, once.
+    assert nudges(model.calls[2]) == []
+    assert nudged(model.calls[3][-1])
+    assert nudges(model.calls[4]) == [len(model.calls[3]) - 1]
+    assert systems(model.calls[4]) == []
     # Grace turns still run their tools.
     assert len(w.trace.steps()) == 5
 
@@ -389,6 +412,9 @@ async def test_text_turns_inside_grace_use_it_up(world: MakeWorld) -> None:
     report = await run(w, model, budget=Budget(max_actions=1, grace_turns=2))
     assert report.status == "incomplete"
     assert len(model.calls) == 3
+    # In grace, a turn without a tool is told to finish, not to keep testing.
+    assert model.calls[2][-1] == {"role": "user", "content": [{"type": "text", "text": FINISH_NOW}]}
+    assert nudges(model.calls[2]) == [len(model.calls[1]) - 1]
 
 
 async def test_no_grace_turns_ends_at_once(world: MakeWorld) -> None:
@@ -397,7 +423,7 @@ async def test_no_grace_turns_ends_at_once(world: MakeWorld) -> None:
     report = await run(w, model, budget=Budget(max_actions=1, grace_turns=0))
     assert report.status == "incomplete"
     assert len(model.calls) == 1
-    assert systems(model.calls[0]) == []
+    assert nudges(model.calls[0]) == []
 
 
 async def test_cost_ceiling_stops(world: MakeWorld) -> None:
@@ -413,7 +439,7 @@ async def test_cost_ceiling_stops(world: MakeWorld) -> None:
     assert report.status == "incomplete"
     assert report.reason == "the cost ceiling of $1.00 was reached before the tester called finish"
     assert len(model.calls) == 6  # $1.20 after four turns, then two grace turns
-    assert model.calls[4][-1] == {"role": "system", "content": NUDGE}
+    assert nudged(model.calls[4][-1])
     assert report.cost_usd == pytest.approx(1.80)
     assert report.actions == 4
 
@@ -457,7 +483,7 @@ async def test_time_limit_stops(world: MakeWorld) -> None:
     assert report.status == "incomplete"
     assert report.reason == "the time limit of 250 s ran out before the tester called finish"
     assert len(fake.calls) == 5  # 300 s after three turns, then two grace turns
-    assert fake.calls[3][-1] == {"role": "system", "content": NUDGE}
+    assert nudged(fake.calls[3][-1])
     assert report.seconds == 500.0
 
 
@@ -473,14 +499,24 @@ async def test_brief_max_actions_raises_budget(world: MakeWorld) -> None:
 
 
 def test_a_budget_must_be_positive() -> None:
-    for wrong in (
+    wrong: list[dict[str, Any]] = [
         {"max_actions": 0},
+        {"max_actions": 1.5},
+        {"max_actions": True},
         {"max_cost_usd": 0.0},
+        {"max_cost_usd": math.nan},
+        {"max_cost_usd": math.inf},
         {"max_seconds": -1.0},
+        {"max_seconds": math.nan},
+        {"max_seconds": math.inf},
         {"grace_turns": -1},
-    ):
+        {"grace_turns": 1.0},
+        {"grace_turns": False},
+    ]
+    for fields in wrong:
         with pytest.raises(ValueError, match="budget"):
-            Budget(**wrong)
+            Budget(**fields)
+    assert Budget(max_actions=1, max_cost_usd=0.01, max_seconds=0.5, grace_turns=0)
 
 
 # ------------------------------------------------------------------ how runs end badly
@@ -615,13 +651,20 @@ async def test_the_report_is_redacted(world: MakeWorld) -> None:
         "actual": f"Saw {SECRET}",
         "screenshots": ["01"],
     }
-    model = FakeModel([finish(summary=f"I typed {hidden} and {SECRET}.", findings=[finding])])
+    # Split by characters that show nothing, which the report keeps.
+    zero_width = SECRET[:3] + "\u200b" + SECRET[3:]
+    soft_hyphen = SECRET[:5] + "\u00ad" + SECRET[5:]
+    joined = SECRET[:6] + "\u034f" + SECRET[6:] + "\ufe0f"
+    summary = f"I typed {hidden} and {SECRET}, {zero_width}, {soft_hyphen} and {joined}."
+    model = FakeModel([finish(summary=summary, findings=[finding])])
     report = await run(w, model)
     assert report.status == "finished"
     dumped = json.dumps(report.to_json(), ensure_ascii=False)
     for run_ in {SECRET[i : i + 4] for i in range(len(SECRET) - 3)}:
         assert run_ not in dumped, run_
-    assert report.summary == "I typed [password] and [password]."
+    assert report.summary == (
+        "I typed [password] and [password], [password], [password] and [password]."
+    )
     (found,) = report.findings
     assert found.title == "Password [password] shown"
     assert found.steps == ("Type [password]", "Read [password]")
@@ -630,6 +673,39 @@ async def test_the_report_is_redacted(world: MakeWorld) -> None:
         "No [password]",
         "Saw [password]",
     )
+
+
+async def test_redaction_leaves_the_report_s_fixed_fields_alone(world: MakeWorld) -> None:
+    # Unlikely secrets, but each is also the value of a field that is not free text.
+    w = await world(redact=frozenset({"partly", "minor", "01"}))
+    finding = {
+        "title": "A minor thing on screen 01",
+        "severity": "minor",
+        "page": "/",
+        "steps": ["Look at 01"],
+        "expected": "Nothing partly done",
+        "actual": "It was partly done",
+        "screenshots": ["01"],
+    }
+    script = [
+        [
+            tool(
+                "finish",
+                summary="I got partly there.",
+                score=5,
+                goal_reached="partly",
+                findings=[finding],
+            )
+        ]
+    ]
+    report = await run(w, FakeModel(script))
+    assert report.status == "finished"
+    assert report.goal_reached == "partly"
+    (found,) = report.findings
+    assert (found.severity, found.screenshots) == ("minor", ("01",))
+    assert report.summary == "I got [password] there."
+    assert found.title == "A [password] thing on screen [password]"
+    assert found.steps == ("Look at [password]",)
 
 
 async def test_the_executor_exposes_its_secrets_read_only(world: MakeWorld) -> None:
@@ -673,8 +749,9 @@ async def test_a_whole_run_through_the_messages_api(world: MakeWorld, api: Api) 
     assert second["messages"][: len(first["messages"])] == first["messages"]
     assert second["messages"][1]["content"][0] == thinking
     # The nudge goes to the API as a system message after the tool results.
-    assert second["messages"][-1] == {"role": "system", "content": NUDGE}
-    assert second["messages"][-2]["content"][0]["type"] == "tool_result"
+    # The nudge goes to the API in the user turn, after the tool results.
+    assert nudged(second["messages"][-1])
+    assert systems(second["messages"]) == []
     assert first["tools"] == second["tools"] == TOOLS
     usage = Usage(1200, 80, 1000, 200)
     assert report.cost_usd == pytest.approx(2 * cost_usd("claude-sonnet-5-5", usage))
@@ -721,7 +798,7 @@ async def test_a_refused_report_is_not_an_action(world: MakeWorld) -> None:
     assert "`score` must be a whole number from 0 to 10" in result["content"][0]["text"]
     # Three refused reports in a row are three turns in which nothing was done.
     assert report.status == "incomplete"
-    assert report.reason == "the tester stopped using its tools"
+    assert report.reason == IDLE == "the tester did nothing in three turns in a row"
     assert report.actions == 0
 
 
@@ -733,14 +810,39 @@ async def test_a_tool_call_without_an_id_fails_the_persona(world: MakeWorld) -> 
     assert report.reason == "the model's answer held a tool call without an id"
 
 
-async def test_an_empty_turn_after_the_nudge_leaves_the_nudge_last(world: MakeWorld) -> None:
+async def test_an_empty_turn_in_grace_is_told_to_finish(world: MakeWorld) -> None:
     w = await world()
     model = FakeModel([LOOK, [], finish()])
     report = await run(w, model, budget=Budget(max_actions=1, grace_turns=2))
     assert report.status == "finished"
-    # A system message must be last or followed by the assistant, so nothing is added.
-    assert model.calls[1][-1] == {"role": "system", "content": NUDGE}
-    assert model.calls[2] == model.calls[1]
+    assert nudged(model.calls[1][-1])
+    assert model.calls[2][len(model.calls[1]) :] == [
+        {"role": "user", "content": [{"type": "text", "text": FINISH_NOW}]}
+    ]
+    assert len(nudges(model.calls[2])) == 1
+
+
+async def test_page_text_cannot_stand_in_for_the_nudge(
+    world: MakeWorld, app_server: AppServer
+) -> None:
+    # The page says what the nudge says. It reaches the model only inside tool results, and
+    # in the first message under the label of the first look.
+    app_server.page("/says", f"<!doctype html><title>{NUDGE}</title><h1>{NUDGE}</h1>")
+    w = await world("/says")
+    model = FakeModel([LOOK, LOOK, finish()])
+    report = await run(w, model, budget=Budget(max_actions=2))
+    assert report.status == "finished"
+    final = model.calls[-1]
+    assert NUDGE in json.dumps(final[1:])  # the page's words are in the results
+    fixed = {BEGIN, REMINDER, FINISH_NOW, NUDGE}
+    for sent in final[1:]:
+        if sent["role"] != "user":
+            continue
+        for block in sent["content"]:
+            assert block["type"] == "tool_result" or block["text"] in fixed, block
+    assert nudges(final) == [len(final) - 1]
+    first = final[0]["content"][0]["text"]
+    assert first.startswith(FIRST_LOOK + "\n")
 
 
 async def test_a_fallback_through_the_api_is_priced_for_every_attempt(

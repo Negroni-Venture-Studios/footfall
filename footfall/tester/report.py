@@ -6,7 +6,7 @@ before it goes anywhere (AGENTS.md rule 6).
 """
 
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal, get_args
 
@@ -188,6 +188,39 @@ def _finding(
         source=source,
         device=device,
     )
+
+
+FINDING_TEXT: Final = ("title", "page", "expected", "actual")
+
+
+def map_report_text(data: Mapping[str, Any], change: Callable[[str], str]) -> dict[str, Any]:
+    """A copy of a `finish` input with `change` applied to its free text, and to nothing else.
+
+    The free text is the summary and each finding's title, page, steps, expected and actual.
+    The score, the goal, each severity and the screenshot ids are left as they are, so that
+    redaction can never turn a valid value into an invalid one. Anything of the wrong type
+    is left for `parse_finish` to refuse.
+    """
+    copied = dict(data)
+    if isinstance(copied.get("summary"), str):
+        copied["summary"] = change(copied["summary"])
+    findings = copied.get("findings")
+    if isinstance(findings, list):
+        copied["findings"] = [_map_finding(item, change) for item in findings]
+    return copied
+
+
+def _map_finding(item: object, change: Callable[[str], str]) -> object:
+    if not isinstance(item, Mapping):
+        return item
+    copied = dict(item)
+    for field in FINDING_TEXT:
+        if isinstance(copied.get(field), str):
+            copied[field] = change(copied[field])
+    steps = copied.get("steps")
+    if isinstance(steps, list):
+        copied["steps"] = [change(s) if isinstance(s, str) else s for s in steps]
+    return copied
 
 
 def parse_finish(
