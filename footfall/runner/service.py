@@ -30,6 +30,7 @@ import functools
 import logging
 import os
 import re
+import secrets
 import shutil
 import stat
 import threading
@@ -54,7 +55,9 @@ MAX_DEPTH: Final = 100  # folders below a workspace or prepared app
 BROWSERS_PORT: Final = 3000
 
 # The browsers listen on every interface of their own container, which is on the run's internal
-# network alone.
+# network alone. The app containers share that network, and run-server lets any client that
+# reaches it launch a browser, so it answers only on a path made fresh for each run, which only
+# the orchestrator is told. The image's own command is a default this always replaces.
 _BROWSERS_COMMAND: Final = (
     "playwright",
     "run-server",
@@ -62,7 +65,9 @@ _BROWSERS_COMMAND: Final = (
     str(BROWSERS_PORT),
     "--host",
     "0.0.0.0",  # noqa: S104
+    "--path",
 )
+_BROWSERS_PATH_BYTES: Final = 24
 _RUN_ID: Final = re.compile(r"r_[a-z2-7]{26}")
 _COPY: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _PREPARE: Final = "prepare"  # the copy name of the install and seed containers
@@ -558,7 +563,10 @@ class RunnerService:
                 return f"{address}:{port}"
 
     def start_browsers(self, run_id: str, assets: Sequence[str]) -> str:
-        """Start the run's browser container and return its Playwright endpoint."""
+        """Start the run's browser container and return its Playwright endpoint.
+
+        The endpoint holds the server's secret path, so it goes to the caller and nowhere else.
+        """
         with _as_runner_error():
             _check_run_id(run_id)
             hosts = _hosts(assets, "assets")
@@ -568,12 +576,13 @@ class RunnerService:
                 if run.browsers:
                     raise RunnerError(f"the browsers are already started for run {run_id}")
                 name = _container_name(run_id, "browsers", "browsers")
+                path = "/" + secrets.token_urlsafe(_BROWSERS_PATH_BYTES)
                 config = container_config(
                     role="browsers",
                     run_id=run_id,
                     copy="browsers",
                     image=self._browsers_image,
-                    command=_BROWSERS_COMMAND,
+                    command=(*_BROWSERS_COMMAND, path),
                     workspace=None,
                     network=run.network,
                     proxy_url=run.proxy_url,
@@ -587,7 +596,7 @@ class RunnerService:
                         self._forget_locked(run, name)
                     raise
                 run.browsers = True
-                return f"ws://{address}:{BROWSERS_PORT}/"
+                return f"ws://{address}:{BROWSERS_PORT}{path}"
 
     def logs(self, run_id: str, copy: str) -> str:
         """Return the last lines an app copy wrote, with the run's password taken out."""

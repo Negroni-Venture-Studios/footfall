@@ -96,7 +96,10 @@ async def test_round_trip_prepare(live: Live) -> None:
     address = await client.start_app(RUN, "anna", "python3 serve.py", 8000, ["api.example.com"])
     assert address == f"{h.engine.ips[f'footfall-{RUN}-app-anna']}:8000"
     endpoint = await client.start_browsers(RUN, ["fonts.gstatic.com"])
-    assert endpoint == f"ws://{h.engine.ips[f'footfall-{RUN}-browsers-browsers']}:3000/"
+    browsers = h.engine.configs[f"footfall-{RUN}-browsers-browsers"]
+    address = h.engine.ips[f"footfall-{RUN}-browsers-browsers"]
+    assert endpoint == f"ws://{address}:3000{browsers['Cmd'][-1]}"
+    assert len(browsers["Cmd"][-1]) == 33
     h.engine.output["app"] = "listening on 8000\n"
     assert await client.logs(RUN, "anna") == "listening on 8000\n"
     assert await client.status(RUN) is None

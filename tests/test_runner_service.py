@@ -2,6 +2,7 @@
 
 import inspect
 import os
+import re
 import shutil
 import threading
 import time
@@ -288,14 +289,23 @@ def test_bad_start_command_refused(h: Harness, start: str) -> None:
     assert h.engine.names("create") == []
 
 
+def browsers_path(config: Mapping[str, Any]) -> str:
+    """The secret path a browser container's run-server was started with."""
+    command: list[str] = config["Cmd"]
+    assert command[:6] == ["playwright", "run-server", "--port", "3000", "--host", "0.0.0.0"]  # noqa: S104
+    assert command[6] == "--path"
+    assert len(command) == 8
+    return command[7]
+
+
 def test_start_browsers_runs_run_server_with_the_assets_hosts(h: Harness) -> None:
     prepare(h, egress=["api.example.com"])
     endpoint = h.service.start_browsers(RUN, ["fonts.gstatic.com", "Tiles.Example.org"])
     name = f"footfall-{RUN}-browsers-browsers"
-    assert endpoint == f"ws://{h.engine.ips[name]}:3000/"
     config = h.engine.configs[name]
+    path = browsers_path(config)
+    assert endpoint == f"ws://{h.engine.ips[name]}:3000{path}"
     assert config["Image"] == BROWSERS_IMAGE
-    assert config["Cmd"] == ["playwright", "run-server", "--port", "3000", "--host", "0.0.0.0"]  # noqa: S104
     assert config["Labels"] == {
         "footfall.run": RUN,
         "footfall.role": "browsers",
@@ -306,6 +316,23 @@ def test_start_browsers_runs_run_server_with_the_assets_hosts(h: Harness) -> Non
     assert h.proxy.allowed[h.engine.ips[name]] == (RUN, ("fonts.gstatic.com", "tiles.example.org"))
     with pytest.raises(RunnerError, match="already"):
         h.service.start_browsers(RUN, [])
+
+
+def test_each_run_server_gets_a_fresh_secret_path(h: Harness) -> None:
+    # Code under test shares the run's network with the browsers, so the server answers only
+    # on a path that the orchestrator alone is told.
+    paths = []
+    for run_id in (RUN, OTHER):
+        prepare(h, run_id=run_id)
+        endpoint = h.service.start_browsers(run_id, [])
+        name = f"footfall-{run_id}-browsers-browsers"
+        path = browsers_path(h.engine.configs[name])
+        assert re.fullmatch(r"/[A-Za-z0-9_-]{32}", path)
+        assert endpoint == f"ws://{h.engine.ips[name]}:3000{path}"
+        paths.append(path)
+    assert paths[0] != paths[1]
+    for config in h.engine.configs.values():
+        assert not any(path in " ".join(config["Env"]) for path in paths)
 
 
 def test_logs_returns_the_copy_tail_with_the_password_redacted(h: Harness) -> None:
