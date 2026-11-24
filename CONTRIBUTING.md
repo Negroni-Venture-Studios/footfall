@@ -55,7 +55,7 @@ Merge with a squash or a merge commit. Branches are deleted after merging.
 ## Standards
 
 - **Test first.** Write the test that proves your change, watch it fail for the reason you expect, then make it pass. A test that passes both before and after a change proves nothing about it.
-- **Keep to the security requirements.** [AGENTS.md](AGENTS.md) lists them: only the runner talks to Docker, container settings come from one file, no secrets in containers, tools that take paths and never URLs, an append-only conversation, tester text labelled as observations, no secrets in logs, and no test on the internet. Each has tests; keep them passing and extend them.
+- **Keep to the security requirements.** [AGENTS.md](AGENTS.md) lists them: only the runner talks to Docker, container settings come from one file, no secrets in containers, tools that take paths and never URLs, an append-only conversation, tester text labelled as observations, no secrets in logs, and no test on the internet. Each gets tests as it is built; keep them passing and extend them.
 - **Type hints throughout**, checked by mypy in strict mode.
 - **British English** in documentation and interface text, in sentence case, with no em or en dashes.
 - **Commit messages** use the imperative mood ("Add the egress proxy", not "Added …"), with a first line under 72 characters.
