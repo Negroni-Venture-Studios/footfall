@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>Mockup: run summary report</title>
+<style>
+:root{--text-primary:#1f1f1e;--text-secondary:#6b6a66;--text-muted:#8a8984;--surface-1:#ffffff;--surface-2:#ffffff;--page:#f5f4ef;--bg-neutral:rgba(0,0,0,.05);--border:rgba(0,0,0,.1);--border-strong:rgba(0,0,0,.22);--bg-danger:#fcebeb;--text-danger:#a32d2d;--bg-success:#eaf3de;--text-success:#3b6d11;--bg-warning:#faeeda;--text-warning:#854f0b;--fill-accent:#378add;--radius:8px;--font-sans:system-ui,-apple-system,"Segoe UI",sans-serif;--font-mono:ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--text-primary:#ededec;--text-secondary:#a3a29d;--text-muted:#7d7c78;--surface-1:#191919;--surface-2:#1f1f1f;--page:#111;--bg-neutral:rgba(255,255,255,.06);--border:rgba(255,255,255,.1);--border-strong:rgba(255,255,255,.25);--bg-danger:#4a1b1b;--text-danger:#f09595;--bg-success:#1d3008;--text-success:#97c459;--bg-warning:#412402;--text-warning:#ef9f27}}
+body{margin:0;padding:2rem;background:var(--page);color:var(--text-primary);font:14px/1.6 var(--font-sans)}
+main{max-width:980px;margin:0 auto;background:var(--surface-2);border:0.5px solid var(--border);border-radius:12px;padding:1.25rem 1.5rem}
+h1{font-size:20px;font-weight:500;margin:0}
+.note{font-size:12px;color:var(--text-muted);margin:1rem 0 0}
+</style>
+<style>
+section{margin:0 0 1.5rem}
+.lab{font-size:12px;color:var(--text-secondary);margin:0 0 8px}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.m{background:var(--bg-neutral);border-radius:var(--radius);padding:.7rem .9rem}
+.m p{margin:0}.m .v{font-size:22px;font-weight:500}
+.chip{font-size:12px;border-radius:var(--radius);padding:1px 8px}
+.row{border-top:0.5px solid var(--border);padding:10px 0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center}
+.sub{font-size:12px;color:var(--text-secondary)}
+.th{width:34px;height:58px;border:0.5px solid var(--border-strong);border-radius:6px;background:var(--bg-neutral)}
+.replay{display:flex;gap:8px;align-items:flex-end;background:var(--bg-neutral);border-radius:var(--radius);padding:10px}
+table{width:100%;font-size:13px;border-collapse:collapse}
+td,th{text-align:left;padding:6px;border-top:0.5px solid var(--border);font-weight:400}
+th{color:var(--text-secondary)}
+pre{font-family:var(--font-mono);font-size:13px;background:var(--bg-neutral);border-radius:var(--radius);padding:8px 10px;margin:0;white-space:pre-wrap}
+.bars{display:flex;align-items:flex-end;gap:14px;height:90px}
+.bars div{text-align:center;font-size:12px;color:var(--text-secondary)}
+.bars span{display:block;width:34px;background:var(--fill-accent);border-radius:3px 3px 0 0}
+</style>
+</head>
+<body>
+<main>
+<section>
+<h1>tawriver.watch on 12 devices</h1>
+<p class="sub" style="margin:2px 0 0">Commit a1b2c3d on branch gauge-cards · requested by the agent token &quot;laptop&quot; · brief: default</p>
+</section>
+
+<section class="metrics">
+<div class="m"><p class="lab">Distinct problems</p><p class="v">18</p></div>
+<div class="m"><p class="lab">Blocker and major</p><p class="v">1 · 5</p></div>
+<div class="m"><p class="lab">Goals reached</p><p class="v">10 of 12</p></div>
+<div class="m"><p class="lab">Start to last report</p><p class="v">7 min</p></div>
+<div class="m"><p class="lab">Model usage</p><p class="v">$1.84</p></div>
+</section>
+
+<section>
+<p class="lab">Replay of the device wall</p>
+<div class="replay">
+<div class="th" style="width:38px;height:72px"></div><div class="th" style="width:42px;height:82px"></div><div class="th" style="width:80px;height:58px"></div><div class="th" style="width:38px;height:72px"></div><div class="th" style="width:100px;height:62px"></div><div class="th" style="width:42px;height:82px"></div>
+<div style="flex:1;display:flex;align-items:center;gap:8px;margin-left:10px">
+<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2l10 6-10 6z" fill="currentColor"/></svg>
+<div style="flex:1;height:4px;border-radius:2px;background:var(--border-strong)"></div></div>
+</div>
+</section>
+
+<section>
+<p class="lab">How many testers saw each problem</p>
+<div class="bars">
+<div><span style="height:72px"></span>1</div><div><span style="height:26px"></span>2</div><div><span style="height:16px"></span>3</div><div><span style="height:8px"></span>6</div><div><span style="height:8px"></span>12</div>
+<p class="sub" style="align-self:center;margin:0 0 0 10px">11 problems seen by one tester only; one seen by all 12</p>
+</div>
+</section>
+
+<section>
+<p class="lab">Problems, most severe first</p>
+<div class="row"><div><span class="chip" style="background:var(--bg-danger);color:var(--text-danger)">blocker</span> Can't open a gauge from the map on a small phone<div class="sub">/map · sven, anna · expands to each tester's steps, expected and actual</div></div><div style="display:flex;gap:4px"><div class="th"></div><div class="th"></div></div></div>
+<div class="row"><div><span class="chip" style="background:var(--bg-warning);color:var(--text-warning)">major</span> Level chart cut off at 200% text<div class="sub">/gauges/umberleigh · grace, giulia, noah</div></div><div style="display:flex;gap:4px"><div class="th"></div><div class="th"></div><div class="th"></div></div></div>
+<div class="row"><div><span class="chip" style="background:var(--bg-neutral);color:var(--text-secondary)">scripted</span> Three buttons under 44 px<div class="sub">every page · all 12 devices</div></div><div style="display:flex;gap:4px"><div class="th"></div></div></div>
+</section>
+
+<section>
+<p class="lab">The 12 devices</p>
+<table>
+<tr><th>Tester</th><th>Device</th><th>Engine</th><th>Language</th><th>Text</th><th>Theme</th><th>Goal</th><th>Model usage</th><th>Found</th></tr>
+<tr><td>sven</td><td>iPhone SE</td><td>WebKit</td><td>sv-SE</td><td>largest</td><td>dark</td><td>no</td><td>$0.14</td><td>6</td></tr>
+<tr><td>grace</td><td>Pixel 7</td><td>Chromium</td><td>en-US</td><td>200%</td><td>light</td><td>yes</td><td>$0.17</td><td>4</td></tr>
+<tr><td>jonas</td><td>iPad</td><td>WebKit</td><td>de-DE</td><td>100%</td><td>dark</td><td>yes</td><td>$0.15</td><td>0</td></tr>
+</table>
+</section>
+
+<section style="margin:0">
+<p class="lab">Run it again</p>
+<pre>start_run(repo="…/tawriver.watch", ref="a1b2c3d", personas="default")</pre>
+</section>
+<p class="note">Figures and findings are illustrative.</p>
+</main>
+</body>
+</html>

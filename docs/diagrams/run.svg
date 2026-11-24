@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 448" width="1000" height="448" role="img" aria-labelledby="t d">
+<title id="t">A run, start to finish: seven steps, with the agent told the run's state at every poll and the live wall fed from the moment the checks begin</title>
+<desc id="d">A run starts when an agent or a person asks for one; Footfall checks and queues it and answers at once. It clones the commit with a short-lived token, prepares the app (install and seed once, then start a copy for each persona), runs scripted checks on every page and device without a model, runs the personas in parallel, merges their findings and finishes by removing the containers and keeping the results. Polling the run reports queued, then preparing, then running, then finished. Quick mode stops after the scripted checks. Every screenshot goes to the live wall as it is taken, and the results are kept for 14 days by default.</desc>
+<defs>
+  <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker>
+</defs>
+<rect class="bg" width="1000" height="448"/>
+
+<text class="heading" x="20" y="56">WHAT HAPPENS</text>
+
+<!-- Steps -->
+<rect class="box" x="20" y="76" width="122" height="122" rx="8"/>
+<text class="heading" x="34" y="98">STEP 1</text>
+<text class="title" x="34" y="122">Start</text>
+<text class="label" x="34" y="144">checks, queues,</text>
+<text class="label" x="34" y="162">answers at once</text>
+
+<rect class="box" x="159" y="76" width="122" height="122" rx="8"/>
+<text class="heading" x="173" y="98">STEP 2</text>
+<text class="title" x="173" y="122">Clone</text>
+<text class="label" x="173" y="144">the commit, with</text>
+<text class="label" x="173" y="162">a one-hour token</text>
+
+<rect class="box" x="298" y="76" width="122" height="122" rx="8"/>
+<text class="heading" x="312" y="98">STEP 3</text>
+<text class="title" x="312" y="122">Prepare</text>
+<text class="label" x="312" y="144">install and seed,</text>
+<text class="label" x="312" y="162">then start a copy</text>
+<text class="label" x="312" y="180">for each persona</text>
+
+<rect class="box" x="437" y="76" width="122" height="122" rx="8"/>
+<text class="heading" x="451" y="98">STEP 4</text>
+<text class="title" x="451" y="122">Checks</text>
+<text class="label" x="451" y="144">every page, every</text>
+<text class="label" x="451" y="162">device, no model</text>
+
+<rect class="key" x="576" y="76" width="122" height="122" rx="8"/>
+<text class="heading" x="590" y="98">STEP 5</text>
+<text class="title" x="590" y="122">Personas</text>
+<text class="label" x="590" y="144">in parallel, one</text>
+<text class="label" x="590" y="162">device each</text>
+
+<rect class="box" x="715" y="76" width="122" height="122" rx="8"/>
+<text class="heading" x="729" y="98">STEP 6</text>
+<text class="title" x="729" y="122">Merge</text>
+<text class="label" x="729" y="144">group duplicates,</text>
+<text class="label" x="729" y="162">write the summary</text>
+
+<rect class="box" x="854" y="76" width="126" height="122" rx="8"/>
+<text class="heading" x="868" y="98">STEP 7</text>
+<text class="title" x="868" y="122">Finish</text>
+<text class="label" x="868" y="144">remove containers</text>
+<text class="label" x="868" y="162">and keep results</text>
+
+<path class="line" d="M142,137 H157" marker-end="url(#tip)"/>
+<path class="line" d="M281,137 H296" marker-end="url(#tip)"/>
+<path class="line" d="M420,137 H435" marker-end="url(#tip)"/>
+<path class="line" d="M559,137 H574" marker-end="url(#tip)"/>
+<path class="line" d="M698,137 H713" marker-end="url(#tip)"/>
+<path class="line" d="M837,137 H852" marker-end="url(#tip)"/>
+
+<!-- What polling says -->
+<text class="heading" x="20" y="244">WHAT POLLING THE RUN SAYS</text>
+<rect class="zone" x="20" y="258" width="122" height="30" rx="6"/>
+<text class="mono" x="34" y="278">queued</text>
+<rect class="zone" x="159" y="258" width="261" height="30" rx="6"/>
+<text class="mono" x="173" y="278">preparing</text>
+<rect class="zone" x="437" y="258" width="400" height="30" rx="6"/>
+<text class="mono" x="451" y="278">running, with each persona's step</text>
+<rect class="zone" x="854" y="258" width="126" height="30" rx="6"/>
+<text class="mono" x="868" y="278">finished</text>
+
+<!-- Notes -->
+<path class="line-dashed" d="M498,198 V250"/>
+<path class="line-dashed" d="M498,290 V324"/>
+<text class="title" x="451" y="344">Quick mode stops here</text>
+<text class="label" x="451" y="364">scripted findings in a minute</text>
+<text class="label" x="451" y="382">or two, with no model use</text>
+
+<path class="line-dashed" d="M637,290 V404"/>
+<text class="title" x="649" y="418">To the live wall</text>
+<text class="label" x="649" y="438">each screenshot as it is taken</text>
+
+<path class="line-dashed" d="M917,290 V324"/>
+<text class="title" x="854" y="344">Kept 14 days</text>
+<text class="label" x="854" y="364">findings, screenshots,</text>
+<text class="label" x="854" y="382">every tester's steps</text>
+</svg>

@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 680" width="1000" height="680" role="img" aria-labelledby="t d">
+<title id="t">Footfall on one droplet: the parts that hold secrets never touch the code under test, and the parts that touch it hold nothing</title>
+<desc id="d">Agents and people reach Footfall through Caddy. The web process serves the pages, sign-in, the MCP endpoint and live updates. The orchestrator runs the queue, clones repositories, runs the testers and merges their findings; it alone talks to the Anthropic API and fetches code from GitHub. Both share the database and screenshots. Only the runner holds the Docker socket, and for each run it starts an app container for every persona and one browser container, all under gVisor with no secrets. The orchestrator drives the browsers through Playwright; the browsers reach the app; anything else either container fetches goes through the egress proxy, which allows only the hosts the run's manifest names.</desc>
+<defs>
+  <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker>
+  <marker id="tip-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-accent"/></marker>
+</defs>
+<rect class="bg" width="1000" height="680"/>
+
+<!-- Callers -->
+<text class="heading" x="20" y="66">CALLERS</text>
+<rect class="box" x="20" y="140" width="160" height="64" rx="8"/>
+<text class="title" x="36" y="167">Agents</text>
+<text class="mono" x="36" y="189">MCP, a token</text>
+<rect class="box" x="20" y="236" width="160" height="64" rx="8"/>
+<text class="title" x="36" y="263">People</text>
+<text class="mono" x="36" y="285">web pages</text>
+
+<!-- The droplet -->
+<rect class="zone-dashed" x="210" y="40" width="580" height="620" rx="12"/>
+<text class="heading" x="230" y="66">YOUR DROPLET</text>
+
+<rect class="box" x="230" y="180" width="120" height="72" rx="8"/>
+<text class="title" x="246" y="208">Caddy</text>
+<text class="label" x="246" y="230">HTTPS</text>
+
+<rect class="key" x="390" y="96" width="170" height="76" rx="8"/>
+<text class="title" x="406" y="124">Web</text>
+<text class="label" x="406" y="146">pages, sign-in, MCP,</text>
+<text class="label" x="406" y="162">live updates</text>
+
+<rect class="key" x="390" y="230" width="170" height="76" rx="8"/>
+<text class="title" x="406" y="258">Orchestrator</text>
+<text class="label" x="406" y="280">queue, clone,</text>
+<text class="label" x="406" y="296">testers, merge</text>
+
+<!-- Database, drawn as a cylinder -->
+<path class="box" d="M610,104 v58 a80,14 0 0 0 160,0 v-58"/>
+<ellipse class="box" cx="690" cy="104" rx="80" ry="14"/>
+<text class="title" x="630" y="142">Database</text>
+<text class="label" x="630" y="162">and screenshots</text>
+
+<rect class="key" x="610" y="258" width="160" height="64" rx="8"/>
+<text class="title" x="626" y="284">Runner</text>
+<text class="label" x="626" y="306">the only Docker access</text>
+
+<!-- One zone per run -->
+<rect class="zone" x="390" y="360" width="380" height="170" rx="10"/>
+<text class="heading" x="406" y="384">FOR EACH RUN, UNDER GVISOR</text>
+<rect class="box" x="412" y="394" width="164" height="112" rx="8"/>
+<rect class="box" x="406" y="400" width="164" height="112" rx="8"/>
+<text class="title" x="422" y="428">App containers</text>
+<text class="label" x="422" y="450">one per persona</text>
+<text class="label" x="422" y="468">your app at the commit</text>
+<text class="label" x="422" y="486">no secrets</text>
+<rect class="box" x="590" y="400" width="164" height="112" rx="8"/>
+<text class="title" x="606" y="428">Browsers</text>
+<text class="label" x="606" y="450">Chromium and WebKit</text>
+<text class="label" x="606" y="468">one per run</text>
+<text class="label" x="606" y="486">no secrets</text>
+
+<rect class="box" x="390" y="576" width="380" height="64" rx="8"/>
+<text class="title" x="406" y="602">Egress proxy</text>
+<text class="label" x="406" y="624">the run's allow list; everything else is refused</text>
+
+<!-- Outside -->
+<text class="heading" x="820" y="66">OUTSIDE</text>
+<rect class="box" x="820" y="180" width="160" height="64" rx="8"/>
+<text class="title" x="836" y="206">Anthropic API</text>
+<text class="label" x="836" y="228">the testers' model</text>
+<rect class="box" x="820" y="262" width="160" height="64" rx="8"/>
+<text class="title" x="836" y="288">GitHub</text>
+<text class="label" x="836" y="310">sign-in, cloning</text>
+<rect class="box" x="820" y="576" width="160" height="64" rx="8"/>
+<text class="title" x="836" y="602">Allowed hosts</text>
+<text class="label" x="836" y="624">named in the manifest</text>
+
+<!-- Callers to Caddy to web -->
+<path class="line-accent" d="M180,172 H205 V204 H230" marker-end="url(#tip-accent)"/>
+<path class="line-accent" d="M180,268 H205 V228 H230" marker-end="url(#tip-accent)"/>
+<path class="line-accent" d="M350,216 H370 V134 H390" marker-end="url(#tip-accent)"/>
+
+<!-- Web and orchestrator -->
+<path class="line" d="M475,174 V228" marker-start="url(#tip)" marker-end="url(#tip)"/>
+<text class="small" x="465" y="205" text-anchor="end">local socket</text>
+<path class="line" d="M560,134 H608" marker-end="url(#tip)"/>
+<path class="line" d="M545,230 V196 H660 V178" marker-end="url(#tip)"/>
+
+<!-- Orchestrator to runner and the outside -->
+<path class="line" d="M560,290 H608" marker-end="url(#tip)"/>
+<path class="line" d="M560,238 H800 V212 H818" marker-end="url(#tip)"/>
+<path class="line" d="M800,238 V294 H818" marker-end="url(#tip)"/>
+
+<!-- Runner starts the containers -->
+<path class="line-dashed" d="M690,322 V358" marker-end="url(#tip)"/>
+<text class="small" x="700" y="345">starts, stops</text>
+
+<!-- Orchestrator drives the browsers, which reach the app -->
+<path class="line" d="M500,306 V330 H650 V398" marker-end="url(#tip)"/>
+<text class="small" x="512" y="324">Playwright</text>
+<path class="line" d="M590,456 H578" marker-end="url(#tip)"/>
+
+<!-- Through the proxy -->
+<path class="line" d="M490,512 V574" marker-end="url(#tip)"/>
+<path class="line" d="M672,512 V574" marker-end="url(#tip)"/>
+<path class="line" d="M770,608 H818" marker-end="url(#tip)"/>
+
+<!-- Key -->
+<rect class="key" x="20" y="574" width="22" height="14" rx="3"/>
+<text class="small" x="52" y="586">holds a secret, or the</text>
+<text class="small" x="52" y="602">Docker socket</text>
+<path class="line-dashed" d="M20,628 H42"/>
+<text class="small" x="52" y="632">starts and stops</text>
+</svg>

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>Mockup: live run page (device wall)</title>
+<style>
+:root{--text-primary:#1f1f1e;--text-secondary:#6b6a66;--text-muted:#8a8984;--surface-1:#ffffff;--surface-2:#ffffff;--page:#f5f4ef;--bg-neutral:rgba(0,0,0,.05);--border:rgba(0,0,0,.1);--border-strong:rgba(0,0,0,.22);--bg-danger:#fcebeb;--text-danger:#a32d2d;--bg-success:#eaf3de;--text-success:#3b6d11;--bg-warning:#faeeda;--text-warning:#854f0b;--fill-accent:#378add;--radius:8px;--font-sans:system-ui,-apple-system,"Segoe UI",sans-serif;--font-mono:ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--text-primary:#ededec;--text-secondary:#a3a29d;--text-muted:#7d7c78;--surface-1:#191919;--surface-2:#1f1f1f;--page:#111;--bg-neutral:rgba(255,255,255,.06);--border:rgba(255,255,255,.1);--border-strong:rgba(255,255,255,.25);--bg-danger:#4a1b1b;--text-danger:#f09595;--bg-success:#1d3008;--text-success:#97c459;--bg-warning:#412402;--text-warning:#ef9f27}}
+body{margin:0;padding:2rem;background:var(--page);color:var(--text-primary);font:14px/1.6 var(--font-sans)}
+main{max-width:980px;margin:0 auto;background:var(--surface-2);border:0.5px solid var(--border);border-radius:12px;padding:1.25rem 1.5rem}
+h1{font-size:20px;font-weight:500;margin:0}
+.note{font-size:12px;color:var(--text-muted);margin:1rem 0 0}
+</style>
+<style>
+.bar{display:flex;gap:18px;font-size:13px;color:var(--text-secondary);background:var(--bg-neutral);border-radius:var(--radius);padding:8px 12px;margin:12px 0 16px;flex-wrap:wrap}
+.wall{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
+.dev{border:0.5px solid var(--border-strong);border-radius:14px;padding:5px;background:var(--surface-1);display:flex;flex-direction:column;cursor:pointer}
+.scr{flex:1;border-radius:9px;background:var(--bg-neutral);padding:6px;display:flex;flex-direction:column;gap:5px}
+.ln{height:6px;border-radius:3px;background:var(--border-strong)}
+.blk{border-radius:5px;background:var(--border)}
+.lbl{font-size:12px;color:var(--text-secondary);line-height:1.35;margin-top:4px}
+.st{font-size:12px;color:var(--text-muted)}
+.badge{font-size:12px;border-radius:var(--radius);padding:1px 8px;display:inline-block;margin-top:2px}
+.issues{background:var(--bg-danger);color:var(--text-danger)}
+.clean{background:var(--bg-success);color:var(--text-success)}
+</style>
+</head>
+<body>
+<main>
+<h1>tawriver.watch on 12 devices</h1>
+<div class="bar"><span>Commit a1b2c3d · branch gauge-cards</span><span>8 of 12 testers done</span><span>14 findings so far</span><span>Model usage $1.12</span></div>
+<div class="wall">
+<div style="width:96px"><div class="dev" style="height:184px"><div class="scr"><div class="ln" style="width:70%"></div><div class="ln"></div><div class="ln" style="width:50%"></div><div class="blk" style="flex:1"></div></div></div><div class="lbl">sven · iPhone SE<br>sv-SE · largest text · dark</div><span class="badge issues">6 issues</span></div>
+<div style="width:104px"><div class="dev" style="height:212px"><div class="scr"><div class="ln" style="width:60%"></div><div class="blk" style="height:64px"></div><div class="ln"></div><div class="ln" style="width:40%"></div></div></div><div class="lbl">grace · Pixel 7<br>en-US · 200% text · light</div><span class="st">Step 14 of 30 · tap "Gauges"</span></div>
+<div style="width:188px"><div class="dev" style="height:144px"><div class="scr"><div class="ln" style="width:40%"></div><div style="flex:1;display:flex;gap:5px"><div class="blk" style="flex:2"></div><div class="blk" style="flex:1"></div></div></div></div><div class="lbl">jonas · iPad<br>de-DE · 100% · dark</div><span class="badge clean">No issues</span></div>
+<div style="width:96px"><div class="dev" style="height:184px"><div class="scr"><div class="ln" style="width:70%;margin-left:auto"></div><div class="ln"></div><div class="blk" style="flex:1"></div></div></div><div class="lbl">layla · Pixel 6<br>ar-EG · right to left</div><span class="st">Step 9 of 30 · scroll down</span></div>
+<div style="width:236px"><div class="dev" style="height:150px"><div class="scr"><div class="ln" style="width:30%"></div><div style="flex:1;display:flex;gap:5px"><div class="blk" style="flex:1"></div><div class="blk" style="flex:3"></div></div></div></div><div class="lbl">noah · laptop<br>en-GB · 100% · light</div><span class="badge issues">2 issues</span></div>
+</div>
+<p class="note">Each device frame shows the tester's latest screenshot at the device's real proportions and updates as it acts. Clicking a device opens a larger view of that tester with its recent actions.</p>
+</main>
+</body>
+</html>
