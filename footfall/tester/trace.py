@@ -2,7 +2,7 @@
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,8 @@ class Step:
     screenshot_before: str
     screenshot_after: str | None
     error: str | None
+    # What the guard stopped or saw since the step before, as the tester was told it.
+    events: list[str] = field(default_factory=list)
 
 
 class Trace:

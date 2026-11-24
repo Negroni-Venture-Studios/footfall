@@ -30,6 +30,7 @@ __all__ = [
     "Screen",
     "capture",
     "describe",
+    "quote",
 ]
 
 Kind = Literal["button", "link", "field", "text"]
@@ -252,7 +253,7 @@ async def capture(
         ) from None
     except PlaywrightError as error:
         LOG.debug("the page could not be read: %s", error)
-        raise CaptureError(f"the page could not be read: {_quote(str(error), 200)}") from error
+        raise CaptureError(f"the page could not be read: {quote(str(error), 200)}") from error
     if not isinstance(data, dict):
         raise _unexpected(type(data).__name__)
     entries, title, total = data.get("entries"), data.get("title"), data.get("total")
@@ -308,7 +309,7 @@ async def capture(
     except PlaywrightError as error:
         LOG.debug("the screenshot could not be taken: %s", error)
         raise CaptureError(
-            f"the screenshot could not be taken: {_quote(str(error), 200)}"
+            f"the screenshot could not be taken: {quote(str(error), 200)}"
         ) from error
 
     return Screen(
@@ -324,8 +325,8 @@ async def capture(
     )
 
 
-def _quote(text: str, cap: int = TEXT_CAP) -> str:
-    """Make `text` one line and put it in quotes that it cannot close early."""
+def quote(text: str, cap: int = TEXT_CAP) -> str:
+    """Make page text one line, cut it to `cap`, and put it in quotes it cannot close early."""
     flat = clean_text(text, cap, single_line=True)
     return '"' + flat.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -336,7 +337,7 @@ def describe(screen: Screen) -> str:
     title = clean_text(screen.title, TITLE_CAP, single_line=True)
     lines = [f"Page: {path} | {title}"]
     for e in screen.elements:
-        value = f" value {_quote(e.value)}" if e.value else ""
+        value = f" value {quote(e.value)}" if e.value else ""
         role = e.role if _ROLE.fullmatch(e.role) else "generic"
         states = "".join(
             f" {word}"
@@ -348,7 +349,7 @@ def describe(screen: Screen) -> str:
             if on
         )
         lines.append(
-            f"[{e.number}] {role} {_quote(e.name)}{value} "
+            f"[{e.number}] {role} {quote(e.name)}{value} "
             f"centre=({e.centre[0]},{e.centre[1]}){states}"
         )
     if screen.omitted:

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -102,3 +103,15 @@ def test_non_json_input_is_a_trace_error_and_writes_nothing(tmp_path: Path) -> N
     with pytest.raises(TraceError, match=r"step 3.*input"):
         trace.append(step(3, input={"bad": float("nan")}))
     assert path.read_bytes() == before
+
+
+def test_guard_events_round_trip_and_default_to_none(tmp_path: Path) -> None:
+    path = tmp_path / "t.jsonl"
+    with_events = step(1, events=['the app redirected the browser to "evil.test"'])
+    Trace(path).append(with_events)
+    # A line written before steps carried events reads back with none.
+    old = {k: v for k, v in step(2).__dict__.items() if k != "events"}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(old) + "\n")
+    assert Trace(path).steps() == [with_events, step(2)]
+    assert step(2).events == []
