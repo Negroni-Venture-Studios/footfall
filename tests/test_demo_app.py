@@ -7,6 +7,7 @@ nobody fixes the demo by accident; `demo-app/BUGS.md` lists all twelve.
 
 import http.client
 import re
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -85,6 +86,7 @@ class Demo:
     port: int
     db: Path
     folder: Path
+    process: "subprocess.Popen[bytes] | None" = None
 
     def seed(self, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -118,6 +120,7 @@ def start(demo: Demo) -> Iterator[Demo]:
         stdout=log,
         stderr=subprocess.STDOUT,
     )
+    demo.process = process
     try:
         deadline = time.monotonic() + 15
         while True:
@@ -276,7 +279,14 @@ def test_empty_list_has_no_empty_state(client: Client) -> None:
     page = client.get("/?q=zzzz").body
     assert task_texts(page) == []
     assert "No tasks" not in page
-    assert "<ul" not in page or '<li class="task"' not in page
+    # Nothing at all sits between the count and the end of the page's content.
+    bare = r'<p class="count">\d+ tasks left</p>\s*<ul class="tasks">\s*</ul>\s*</main>'
+    assert re.search(bare, page)
+    for number in range(1, 13):
+        client.post(f"/tasks/{number}/delete")
+    emptied = client.get("/").body
+    assert re.search(bare, emptied)
+    assert "0 tasks left" in emptied
 
 
 def test_toggle_and_delete(client: Client) -> None:
@@ -366,7 +376,7 @@ def test_planted_markup_bugs(client: Client) -> None:
     assert not re.search(r'class="icon-button"[^>]*aria-label', page)
     assert re.search(r'class="delete"[^>]*aria-label="Delete task', page)  # 8
     css = client.get("/static/app.css").body
-    assert re.search(r"\.app-header\s*{[^}]*height:\s*48px", css)  # 4
+    assert re.search(r"\.app-header\s*{[^}]*height:\s*40px", css)  # 4
     assert re.search(r"\.toolbar\s*{[^}]*width:\s*420px", css)  # 10
     assert re.search(r"\.task-text\s*{[^}]*color:\s*#333", css)  # 7
     assert re.search(r"\.delete\s*{[^}]*width:\s*16px[^}]*height:\s*16px", css)  # 8
@@ -419,3 +429,41 @@ def test_a_second_session_does_not_log_the_first_out(demo: Demo) -> None:
     assert first.get("/").status == 200
     assert second.get("/").status == 200
     assert first.cookie != second.cookie
+
+
+def rule(css: str, selector: str) -> str:
+    match = re.search(re.escape(selector) + r"\s*{([^}]*)}", css)
+    assert match, selector
+    return match.group(1)
+
+
+def test_header_title_is_clearly_clipped_at_200_percent() -> None:
+    """Bug 4, by arithmetic: the CSS is read, not rendered.
+
+    A root font size of 16px is scaled by the persona's text scale. At 1.0 the title's
+    line box must fit the header. At 2.0 it must overflow by at least half the header's
+    height, on a 412px phone as well as a 320px one, so that the clip cuts into the
+    letters and not only a descender.
+    """
+    css = (DEMO / "static" / "app.css").read_text()
+    header = rule(css, ".app-header")
+    title = rule(css, ".app-title")
+    assert re.search(r"overflow:\s*hidden", header)
+    height = float(re.search(r"(?<![-\w])height:\s*([\d.]+)px", header).group(1))  # type: ignore[union-attr]
+    size = float(re.search(r"font-size:\s*([\d.]+)rem", title).group(1))  # type: ignore[union-attr]
+    line = float(re.search(r"line-height:\s*([\d.]+)\s*;", title).group(1))  # type: ignore[union-attr]
+
+    def line_box(scale: float) -> float:
+        return size * 16 * scale * line
+
+    assert line_box(1.0) <= height
+    assert line_box(2.0) - height >= height / 2
+
+
+def test_sigterm_stops_the_server_cleanly(demo: Demo) -> None:
+    """As PID 1 in a container, Python ignores SIGTERM unless a handler is installed."""
+    assert demo.process is not None
+    started = time.monotonic()
+    demo.process.send_signal(signal.SIGTERM)
+    assert demo.process.wait(timeout=5) == 0
+    assert time.monotonic() - started < 5

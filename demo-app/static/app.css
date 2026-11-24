@@ -32,12 +32,13 @@ body {
   font: 1rem/1.4 system-ui, sans-serif;
 }
 
-/* Planted bug 4: a fixed height in pixels, so the title is cut when the text is larger. */
+/* Planted bug 4: a fixed height in pixels. At 1.0 the title fits; at 200% text its line is
+   about twice the header, so the letters are cut top and bottom on any phone. */
 .app-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 48px;
+  height: 40px;
   overflow: hidden;
   padding: 0 1rem;
   background: #1b4965;
@@ -47,7 +48,7 @@ body {
 .app-title {
   margin: 0;
   font-size: 1.5rem;
-  line-height: 1.2;
+  line-height: 1.6;
 }
 
 .icon-button {

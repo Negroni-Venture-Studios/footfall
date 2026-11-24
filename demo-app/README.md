@@ -19,6 +19,8 @@ Then open http://127.0.0.1:8080 and sign in with that username and password. `se
 
 `serve.py` listens on 127.0.0.1, so nobody else on your network can reach it. It takes its port from `PORT` and its database file from `TINY_TASKS_DB`, which defaults to `tiny-tasks.sqlite3` in this folder. `--host 0.0.0.0` listens on every interface, which the Footfall container needs and a local run does not.
 
+The session cookie has no `Secure` flag only because Footfall's sandbox serves plain http. A real deployment behind https should set it.
+
 ## Run Footfall against it
 
 `footfall.toml` is the app's manifest, and `footfall/briefs/default.md` is the brief the testers read. Footfall makes a username and password for each run and passes them to `seed.py`, as it does for any app with its own sign-in.

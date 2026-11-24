@@ -2,11 +2,11 @@
 
 Tiny Tasks has twelve planted bugs. Each one is a usability or accessibility problem that a person on a particular device would meet. Footfall's phase 1 is done when its testers find most of them. The default brief does not mention any of them.
 
-Personas are named by their ids in `footfall/data/personas.toml`. "The accessibility check" means the accessibility warnings that the tester's `look` tool is meant to give for each screen, such as controls with no name and targets that are too small. "The scripted checks" are phase 2's, which load `test.pages` and read the browser's console.
+Personas are named by their ids in `footfall/data/personas.toml`. The manifest runs `sven`, `grace`, `malik`, `clara`, `layla` and `anna` by default. Any other persona is marked "when run", meaning it can catch the bug if someone adds it to `test.personas` or names it for a run. "The accessibility check" means the accessibility warnings that the tester's `look` tool is meant to give for each screen, such as controls with no name and targets that are too small. "The scripted checks" are phase 2's, which load `test.pages` and read the browser's console.
 
 ## Bug 1: every sign-in error says "Something went wrong"
 
-A wrong password, an unknown username and two empty fields all give the same message, with no hint about which field to fix. It lives in `Handler._login` in `serve.py`, with the text in `templates/error.html`. Anyone who mistypes should catch it. The brief tells testers that only the given username and password work, so a tester can reach the error by mistyping on purpose, as `jonas` and `mehmet` tend to.
+A wrong password, an unknown username and two empty fields all give the same message, with no hint about which field to fix. It lives in `Handler._login` in `serve.py`, with the text in `templates/error.html`. Anyone who mistypes should catch it. The brief tells testers that only the given username and password work, so a tester can reach the error by mistyping on purpose, as `mehmet` (when run) tends to.
 
 ## Bug 2: search is case-sensitive
 
@@ -14,11 +14,11 @@ Searching for `milk` finds "Buy oat milk" and searching for `Milk` finds nothing
 
 ## Bug 3: empty tasks can be added
 
-Pressing "Add task" with nothing typed adds a blank row. It lives in `Handler._add`, which does not check the text. `malik` taps fast and skips fields, and `mehmet` tries odd input, so both should catch it. `tests/test_demo_app.py` pins this bug.
+Pressing "Add task" with nothing typed adds a blank row. It lives in `Handler._add`, which does not check the text. `malik` taps fast and skips fields, and `mehmet` (when run) tries odd input, so both should catch it. Only `malik` is run by default. `tests/test_demo_app.py` pins this bug.
 
 ## Bug 4: the header is cut off at 200% text
 
-The header's height is fixed at 48 px and it hides anything that overflows, so at 200% text the title "Tiny Tasks" is clipped. The cause is the `.app-header` rule in `static/app.css`. `sven` and `grace` both use 200% text.
+The header's height is fixed at 40 px and it hides anything that overflows. The title's line is 38 px high at normal size and about 77 px at 200% text, so the letters are cut top and bottom whatever the phone's width. The cause is the `.app-header` rule in `static/app.css`. `sven` and `grace` both use 200% text.
 
 ## Bug 5: "1 tasks left"
 
@@ -30,11 +30,11 @@ When the list is empty, or a search finds nothing, the page shows a blank space 
 
 ## Bug 7: task text is unreadable in dark mode
 
-Task text has a fixed dark grey colour, while the card behind it turns dark. The cause is the `.task-text` rule in `static/app.css`. Every persona with a dark colour scheme should catch it, which is `sven`, `jonas`, `kenji`, `malik`, `olga` and `mehmet`.
+Task text has a fixed dark grey colour, while the card behind it turns dark. The cause is the `.task-text` rule in `static/app.css`. Every persona with a dark colour scheme should catch it, which is `sven`, `malik`, `jonas` (when run), `kenji` (when run), `olga` (when run) and `mehmet` (when run). Of those, the demo runs `sven` and `malik` by default.
 
 ## Bug 8: the delete control is tiny and permanent
 
-The delete button is 16 by 16 px, it asks for no confirmation and there is no undo. The size is the `.delete` rule in `static/app.css`, and the permanence is in `Handler._change`. The button does have an accessible name, so only its size and its permanence are the bug. Phone personas such as `sven`, `malik` and `kenji` should catch it, and so should the accessibility check.
+The delete button is 16 by 16 px, it asks for no confirmation and there is no undo. The size is the `.delete` rule in `static/app.css`, and the permanence is in `Handler._change`. The button does have an accessible name, so only its size and its permanence are the bug. Phone personas such as `sven` and `malik`, and `kenji` when run, should catch it, and so should the accessibility check.
 
 ## Bug 9: the settings button has no accessible name
 
@@ -46,7 +46,7 @@ The search toolbar is a fixed 420 px wide, so a 320 px phone scrolls sideways to
 
 ## Bug 11: due dates always show the month first
 
-A due date of 15 December reads 12/15/2026 whatever the reader's language or region. It lives in `show_due` in `serve.py`, which ignores the browser's locale. `layla` (Egypt), `olga` (Russia) and `jonas` (Germany) all expect the day first. The seed data has due dates on days 13 to 30 so that a day-first reader cannot take a date as a month.
+A due date of 15 December reads 12/15/2026 whatever the reader's language or region. It lives in `show_due` in `serve.py`, which ignores the browser's locale. `layla` (Egypt) expects the day first and is run by default, and so do `olga` (Russia) and `jonas` (Germany) when run. The seed data has due dates on days 13 to 30 so that a day-first reader cannot take a date as a month.
 
 ## Bug 12: the settings page throws a JavaScript error
 

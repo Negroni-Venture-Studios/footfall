@@ -18,6 +18,7 @@ import html
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import string
 import sys
@@ -389,6 +390,12 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write(f"{self.log_date_time_string()} {format % args}\n")
 
 
+def stop(signum: int, frame: object) -> None:
+    """Turn SIGTERM into the same clean exit as Ctrl-C. As PID 1 in a container, Python
+    ignores SIGTERM unless a handler is installed, and `docker stop` would wait to kill it."""
+    raise KeyboardInterrupt
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Tiny Tasks, the Footfall demo app.")
     parser.add_argument(
@@ -405,6 +412,7 @@ def main() -> None:
     args = parser.parse_args()
     with closing(connect()):
         pass  # create the tables so that /healthz is honest about the database
+    signal.signal(signal.SIGTERM, stop)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Tiny Tasks listening on http://{args.host}:{args.port}", flush=True)
     try:
