@@ -21,6 +21,13 @@ The design follows [Snug](https://github.com/Negroni-Venture-Studios/snug), Negr
 
 There is nothing to run yet. This section will be filled in when phase 1 has a command to try.
 
+## Contributing and security
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) explains how to set up, test and propose changes.
+- Please report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
+- Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
+- [AGENTS.md](AGENTS.md) holds the working rules for AI coding agents.
+
 ## Licence
 
-Footfall is published by [Negroni Venture Studios](https://negroniventurestudios.com/) under the [MIT licence](LICENSE).
+Footfall is published by [Negroni Venture Studios](https://negroniventurestudios.com/) under the [MIT licence](LICENSE). The Footfall name identifies this project; if you ship a fork as your own product, please see [TRADEMARKS.md](TRADEMARKS.md). The third-party software and assets Footfall uses are listed in [THIRD_PARTY_LICENCES.md](THIRD_PARTY_LICENCES.md).
