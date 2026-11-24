@@ -37,13 +37,14 @@ MAX_MANIFEST_BYTES = 64 * 1024
 MAX_BRIEF_BYTES = 256 * 1024
 MAX_COMMAND_LENGTH = 2000
 MAX_LABEL_LENGTH = 200
+MAX_FOLDER_LENGTH = 200
 MAX_NAME_LENGTH = 200
 MIN_PORT, MAX_PORT = 1024, 65535
 MAX_READY_TIMEOUT = 600
 MAX_ACTIONS_CEILING = 120
 
 _BRIEF_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
-_PERSONA_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+_PERSONA_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")  # becomes a copy name later
 _BAD_PATH_CHARACTER = re.compile(r"[\s\\]")
 _LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t]*\r?\n)+")
 
@@ -273,6 +274,8 @@ def _login_section(table: Mapping[str, Any], problems: list[str]) -> LoginSectio
 
 
 def _briefs_folder_problem(value: str) -> str | None:
+    if len(value) > MAX_FOLDER_LENGTH:
+        return f"must be at most {MAX_FOLDER_LENGTH} characters, not {len(value)}"
     parts = value.split("/")
     if value.startswith("/") or "\\" in value or "\0" in value or ".." in parts:
         return f"must be a folder inside the repository, not {value!r}"
@@ -305,8 +308,14 @@ def _test_section(table: Mapping[str, Any], problems: list[str]) -> TestSection:
         for field, item in entries:
             if not _PERSONA_NAME.fullmatch(item):
                 problems.append(
-                    f"{field}: must be lower-case letters, digits and hyphens, not {item!r}"
+                    f"{field}: must start with a lower-case letter and then use lower-case "
+                    f"letters, digits and hyphens, at most 32 characters in all, not {item!r}"
                 )
+        seen_ids: set[str] = set()
+        for field, item in entries:
+            if item in seen_ids:
+                problems.append(f"{field}: {item!r} is listed more than once")
+            seen_ids.add(item)
         personas = tuple(item for _, item in entries)
     reader.finish()
     return TestSection(
@@ -314,12 +323,22 @@ def _test_section(table: Mapping[str, Any], problems: list[str]) -> TestSection:
     )
 
 
+def _parse_toml(text: str, subject: str) -> dict[str, Any]:
+    """Parse TOML from an untrusted file, turning every parser failure into a problem.
+
+    Beyond `TOMLDecodeError`, the parser raises `ValueError` for integers over Python's
+    digit limit and `RecursionError` for very deep nesting.
+    """
+    try:
+        return tomllib.loads(text)
+    except (ValueError, RecursionError) as error:
+        detail = "too deeply nested" if isinstance(error, RecursionError) else str(error)
+        raise ManifestError([f"{subject} not valid TOML ({detail})"]) from error
+
+
 def parse_manifest(text: str) -> Manifest:
     """Check a manifest's text, raising `ManifestError` with every problem found."""
-    try:
-        data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as error:
-        raise ManifestError([f"{MANIFEST_FILE}: not valid TOML ({error})"]) from error
+    data = _parse_toml(text, f"{MANIFEST_FILE}:")
 
     problems: list[str] = []
     root = _Reader(data, "", problems)
@@ -346,12 +365,21 @@ def parse_manifest(text: str) -> Manifest:
     )
 
 
-def _read_repo_file(repo: Path, path: Path, label: str, limit: int) -> str:
-    """Read a UTF-8 file that must lie inside the repository, within a size limit."""
+def _why(error: Exception) -> str:
+    return error.strerror or "error" if isinstance(error, OSError) else str(error)
+
+
+def _read_repo_file(repo: Path, path: Path, label: str, limit: int, missing: str) -> str:
+    """Read a UTF-8 file that must lie inside the repository, within a size limit.
+
+    `missing` is the problem to report if the file does not exist.
+    """
     try:
         resolved = path.resolve(strict=True)
-    except OSError as error:
-        raise ManifestError([f"{label}: not found"]) from error
+    except FileNotFoundError as error:
+        raise ManifestError([f"{label}: {missing}"]) from error
+    except (OSError, RuntimeError) as error:  # RuntimeError: a symlink loop
+        raise ManifestError([f"{label}: cannot be resolved ({_why(error)})"]) from error
     if not resolved.is_relative_to(repo.resolve()):
         raise ManifestError([f"{label}: is outside the repository"])
     try:
@@ -370,9 +398,8 @@ def _read_repo_file(repo: Path, path: Path, label: str, limit: int) -> str:
 def load_manifest(repo: Path) -> Manifest:
     """Read `footfall.toml` from the root of a repository."""
     path = repo / MANIFEST_FILE
-    if not path.exists() and not path.is_symlink():
-        raise ManifestError([f"{MANIFEST_FILE}: not found at the root of the repository"])
-    return parse_manifest(_read_repo_file(repo, path, MANIFEST_FILE, MAX_MANIFEST_BYTES))
+    missing = "not found at the root of the repository"
+    return parse_manifest(_read_repo_file(repo, path, MANIFEST_FILE, MAX_MANIFEST_BYTES, missing))
 
 
 def _split_front_matter(text: str, label: str) -> tuple[dict[str, Any], str]:
@@ -381,12 +408,7 @@ def _split_front_matter(text: str, label: str) -> tuple[dict[str, Any], str]:
         return {}, text
     for index in range(1, len(lines)):
         if lines[index].rstrip("\r\n") == "+++":
-            try:
-                front = tomllib.loads("".join(lines[1:index]))
-            except tomllib.TOMLDecodeError as error:
-                raise ManifestError(
-                    [f"{label}: front matter is not valid TOML ({error})"]
-                ) from error
+            front = _parse_toml("".join(lines[1:index]), f"{label}: front matter is")
             return front, "".join(lines[index + 1 :])
     raise ManifestError([f"{label}: front matter is not closed by a +++ line"])
 
@@ -403,9 +425,7 @@ def load_brief(repo: Path, manifest: Manifest, name: str = "default") -> Brief:
     label = f"{name}.md"
     folder = manifest.test.briefs
     path = repo / folder / label
-    if not path.exists() and not path.is_symlink():
-        raise ManifestError([f"{label}: not found in {folder}"])
-    raw = _read_repo_file(repo, path, label, MAX_BRIEF_BYTES)
+    raw = _read_repo_file(repo, path, label, MAX_BRIEF_BYTES, f"not found in {folder}")
     front, body = _split_front_matter(raw, label)
 
     problems: list[str] = []

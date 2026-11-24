@@ -372,3 +372,81 @@ def test_brief_missing_oversized_and_undecodable(tmp_path: Path) -> None:
     with pytest.raises(ManifestError) as bad:
         load_brief(repo, manifest, "bad")
     assert bad.value.problems == ["bad.md: is not valid UTF-8"]
+
+
+# ------------------------------------------------- hostile input never crashes
+
+
+def test_huge_integer_is_a_problem() -> None:
+    problems = problems_of(MINIMAL.replace("port = 8080", "port = " + "9" * 5000))
+    assert len(problems) == 1
+    assert problems[0].startswith("footfall.toml: not valid TOML")
+
+
+def test_huge_integer_in_front_matter_is_a_problem(tmp_path: Path) -> None:
+    repo, manifest = make_repo(tmp_path, "+++\nmax_actions = " + "9" * 5000 + "\n+++\nBody\n")
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest)
+    assert len(caught.value.problems) == 1
+    assert caught.value.problems[0].startswith("default.md: front matter is not valid TOML")
+
+
+@pytest.mark.parametrize(
+    "nested", ["[" * 30000 + "]" * 30000, "{a=" * 5000 + "1" + "}" * 5000], ids=["array", "table"]
+)
+def test_deep_nesting_is_a_problem(tmp_path: Path, nested: str) -> None:
+    problems = problems_of(MINIMAL + f"[test]\npages = {nested}\n")
+    assert len(problems) == 1
+    assert problems[0].startswith("footfall.toml: not valid TOML")
+    repo, manifest = make_repo(tmp_path, f"+++\nmax_actions = {nested}\n+++\nBody\n")
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest)
+    assert caught.value.problems[0].startswith("default.md: front matter is not valid TOML")
+
+
+@pytest.mark.parametrize("briefs", ["a" * 300, "/".join(["a" * 50] * 5)])
+def test_briefs_folder_length_limit(briefs: str) -> None:
+    problems = problems_of(MINIMAL + f'[test]\nbriefs = "{briefs}"\n')
+    assert len(problems) == 1
+    assert problems[0].startswith("test.briefs: must be at most 200 characters")
+
+
+def test_overlong_path_component_is_a_problem(tmp_path: Path) -> None:
+    repo, _ = make_repo(tmp_path)
+    manifest = parse_manifest(MINIMAL + f'[test]\nbriefs = "{"a" * 200}"\n')
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest)
+    assert len(caught.value.problems) == 1
+    assert caught.value.problems[0].startswith("default.md: ")
+
+
+def test_symlink_loops_are_problems(tmp_path: Path) -> None:
+    repo, manifest = make_repo(tmp_path)
+    (repo / "footfall" / "briefs" / "loop.md").symlink_to("loop.md")
+    with pytest.raises(ManifestError) as brief:
+        load_brief(repo, manifest, "loop")
+    assert brief.value.problems[0].startswith("loop.md: cannot be resolved")
+    (repo / "footfall.toml").unlink()
+    (repo / "footfall.toml").symlink_to("footfall.toml")
+    with pytest.raises(ManifestError) as caught:
+        load_manifest(repo)
+    assert caught.value.problems[0].startswith("footfall.toml: cannot be resolved")
+
+
+@pytest.mark.parametrize("persona", ["1", "-a", "Sven", "a" * 33, "a_b"])
+def test_persona_ids_must_be_copy_names(persona: str) -> None:
+    problems = problems_of(MINIMAL + f'[test]\npersonas = ["{persona}"]\n')
+    assert len(problems) == 1
+    assert problems[0].startswith("test.personas[0]: ")
+
+
+def test_persona_copy_name_limits_accepted() -> None:
+    ids = ("a", "a" + "b" * 31)
+    manifest = parse_manifest(MINIMAL + f'[test]\npersonas = ["{ids[0]}", "{ids[1]}"]\n')
+    assert manifest.test.personas == ids
+
+
+def test_duplicate_personas_are_refused() -> None:
+    assert problems_of(MINIMAL + '[test]\npersonas = ["sven", "grace", "sven"]\n') == [
+        "test.personas[2]: 'sven' is listed more than once"
+    ]
