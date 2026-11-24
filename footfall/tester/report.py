@@ -108,7 +108,7 @@ def _drop(ch: str) -> bool:
     return code in _BIDI or code in _TAGS or unicodedata.category(ch) in ("Cc", "Cs")
 
 
-def _clean(text: str, cap: int, *, single_line: bool = False) -> str:
+def clean_text(text: str, cap: int, *, single_line: bool = False) -> str:
     """Strip control, surrogate, bidirectional and tag characters, then cut to `cap`.
 
     A single-line field also has each run of whitespace made one space.
@@ -139,7 +139,7 @@ def _text(
     value = _get(data, field, where)
     if not isinstance(value, str):
         raise ToolError(f"{where}`{field}` must be a string")
-    cleaned = _clean(value, cap, single_line=single_line)
+    cleaned = clean_text(value, cap, single_line=single_line)
     if required and not cleaned.strip():
         raise ToolError(f"{where}`{field}` must not be empty")
     return cleaned
@@ -166,7 +166,7 @@ def _finding(
     severity = _get(item, "severity", where)
     if not isinstance(severity, str) or severity not in SEVERITIES:
         raise ToolError(f"{where}`severity` must be one of {', '.join(sorted(SEVERITIES))}")
-    steps = [_clean(s, CAPS["step"], single_line=True) for s in _strings(item, "steps", where)]
+    steps = [clean_text(s, CAPS["step"], single_line=True) for s in _strings(item, "steps", where)]
     if len(steps) > CAPS["steps"]:
         kept = CAPS["steps"] - 1
         steps = [*steps[:kept], f"…and {len(steps) - kept} more steps"]
@@ -174,7 +174,7 @@ def _finding(
     for shot in shots:
         if shot not in screenshots:
             raise ToolError(
-                f"{where}`screenshots` names {_clean(shot, 40)!r}, which was never taken"
+                f"{where}`screenshots` names {clean_text(shot, 40)!r}, which was never taken"
             )
     shots = list(dict.fromkeys(shots))[:MAX_SCREENSHOTS]
     return Finding(
@@ -218,6 +218,6 @@ def parse_finish(
             else f"({dropped} further findings were dropped.)"
         )
         if len(summary) + 1 + len(note) > CAPS["summary"]:
-            summary = _clean(summary, CAPS["summary"] - 1 - len(note))
+            summary = clean_text(summary, CAPS["summary"] - 1 - len(note))
         summary = f"{summary} {note}"
     return summary, score, reached, found
