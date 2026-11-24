@@ -11,7 +11,8 @@ this code does not know about go back exactly as they came.
 
 The SDK holds the API key; nothing here reads it. The SDK logs each request's options at
 debug level, and those hold the whole conversation, including any password the tester has
-typed, so that one record is dropped (AGENTS.md rule 7).
+typed, so that one record is dropped (AGENTS.md rule 7). For the same reason, the client
+`make_client` builds never puts content on an OpenTelemetry span.
 """
 
 import copy
@@ -32,6 +33,8 @@ from footfall.tester.pricing import Usage
 
 __all__ = [
     "BETAS",
+    "CLIENT_RETRIES",
+    "CLIENT_TIMEOUT",
     "DEFAULT_MODEL",
     "FAKE_MODEL",
     "MAX_TOKENS",
@@ -43,6 +46,7 @@ __all__ = [
     "ModelSpecError",
     "ModelTurn",
     "ScriptError",
+    "make_client",
     "model_from_spec",
 ]
 
@@ -51,6 +55,8 @@ DEFAULT_EFFORT: Final = "medium"
 MAX_TOKENS: Final = 16_000
 BETAS: Final = ("server-side-fallback-2026-07-01",)
 FAKE_MODEL: Final = "fake"
+CLIENT_TIMEOUT: Final = 300.0  # seconds for one request; the loop also bounds each turn
+CLIENT_RETRIES: Final = 2
 NO_USAGE: Final = Usage(0, 0, 0, 0)
 # The models a run may ask for. The price table also holds their fallbacks, which serve a
 # turn the model asked for declines, but which Footfall never asks for itself.
@@ -101,11 +107,26 @@ if not any(isinstance(f, _NoRequestOptions) for f in _SDK_LOG.filters):
     _SDK_LOG.addFilter(_NoRequestOptions())
 
 
+def make_client() -> anthropic.AsyncAnthropic:
+    """The client Footfall reaches the Messages API through, and the only one it builds.
+
+    The SDK finds the API key in the environment. A request gives up after `CLIENT_TIMEOUT`
+    seconds and is tried `CLIENT_RETRIES` more times. Spans carry metadata only: the
+    OpenTelemetry option is set here, so the SDK ignores the ANTHROPIC_OPEN_TELEMETRY_*
+    variables, one of which would put every prompt and reply, typed password included, on
+    a span (the SDK's OpenTelemetry notes, read on 24 November 2026).
+    """
+    return anthropic.AsyncAnthropic(
+        timeout=CLIENT_TIMEOUT,
+        max_retries=CLIENT_RETRIES,
+        open_telemetry={"traces": {"content_mode": "metadata_only"}},
+    )
+
+
 class AnthropicModel:
     """Claude, through `client.beta.messages.create`.
 
-    Without a `client`, one is made on the first turn, and the SDK finds the API key in
-    the environment as it always does.
+    Without a `client`, `make_client` makes one on the first turn.
     """
 
     def __init__(
@@ -125,7 +146,7 @@ class AnthropicModel:
         self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
     ) -> ModelTurn:
         if self._client is None:
-            self._client = anthropic.AsyncAnthropic()
+            self._client = make_client()
         response = await self._client.beta.messages.create(
             model=self.model,
             max_tokens=MAX_TOKENS,

@@ -525,6 +525,32 @@ class Executor:
         # the original error and whatever the page put in it.
         raise hidden from None
 
+    def refuse(self, name: object, reason: str) -> None:
+        """Trace a tool call the loop would not run: its name, redacted, and the reason.
+
+        Nothing of its input is kept, and nothing happens in the browser.
+        """
+        if self._screen is None or self._shot is None:
+            raise RuntimeError("call first_look before refuse")
+        self._steps += 1
+        path = self._scrub(self._screen.path)
+        self._trace.append(
+            Step(
+                number=self._steps,
+                tool=self._redact(clean_text(str(name), 40, single_line=True)),
+                input={},
+                target_role=None,
+                target_name=None,
+                x=None,
+                y=None,
+                path_before=path,
+                path_after=path,
+                screenshot_before=self._shot,
+                screenshot_after=None,
+                error=reason,
+            )
+        )
+
     # ------------------------------------------------------------------ the tools
 
     async def _perform(self, name: str, data: Mapping[str, Any]) -> _Action:

@@ -12,8 +12,9 @@ the end of the run are decided here. A turn that breaks the rules (no tool call,
 one, an unknown tool, a call cut off at the token limit) gets a reply that keeps the
 conversation valid and counts as a turn in which nothing was done.
 
-Each persona has a budget of actions, cost and time, checked after every turn. Once one
-runs out, a line after that turn's tool results tells the tester to finish, and it has
+Each persona has a budget of actions, cost and time, checked after every turn. A model call
+that hangs is cut off when the time runs out, which ends the run as incomplete. Once any
+of the three runs out, a line after that turn's tool results tells the tester to finish, and it has
 `grace_turns` more turns to do so. In those turns a `finish` is honoured, and any other tool
 still runs but adds nothing to the count of actions in the report. The line is a text block
 of the user's turn, which every model accepts and which keeps the conversation append-only.
@@ -27,6 +28,7 @@ The report's free text is redacted with the executor's secrets after it is clean
 stripped of characters that show nothing, so that a password split by them is caught too.
 """
 
+import asyncio
 import base64
 import copy
 import logging
@@ -100,6 +102,11 @@ DECLINED: Final = "the model declined"
 CONTEXT_FULL: Final = "the conversation outgrew the model's context window"
 IDLE: Final = "the tester did nothing in three turns in a row"
 PAGE_STOPPED: Final = "the page stopped answering"
+NOT_A_TOOL: Final = "not run: there is no tool of that name"
+TOO_MANY: Final = "not run: more than one tool call in one turn"
+CUT_SHORT: Final = "not run: the call was cut off at the token limit"
+# Read when used, so that a test can shorten it.
+TURN_FLOOR = 60.0  # seconds any model call may take, even once the time limit has passed
 LOG = logging.getLogger(__name__)
 
 _TOOL_NAMES: Final = frozenset(t["name"] for t in TOOLS)
@@ -254,7 +261,16 @@ class _Run:
         look = _screen_blocks(first, heading=FIRST_LOOK)
         self.messages.append({"role": "user", "content": [*look, _text(BEGIN)]})
         while True:
-            turn = await self.model.turn(self.system, TOOLS, list(self.messages))
+            # The time limit holds even when a call hangs. A call made after it has passed,
+            # in the grace turns, still gets TURN_FLOOR seconds.
+            remaining = self.budget.max_seconds - (self.clock() - self.started)
+            try:
+                async with asyncio.timeout(max(remaining, TURN_FLOOR)) as deadline:
+                    turn = await self.model.turn(self.system, TOOLS, list(self.messages))
+            except TimeoutError:
+                if not deadline.expired():
+                    raise  # the model's own timeout, which fails the persona
+                return self.report("incomplete", self._out_of_time())
             self._charge(turn)
             if turn.content:
                 # Appended as it came, and never touched again.
@@ -307,17 +323,21 @@ class _Run:
         if not uses:
             return [], False, None
         problem: str | None = None
+        why = ""
         name = uses[0][1].get("name")
         if turn.stop_reason == "max_tokens":
-            problem = CUT_OFF
+            problem, why = CUT_OFF, CUT_SHORT
         elif len(uses) > 1:
-            problem = ONE_AT_A_TIME
+            problem, why = ONE_AT_A_TIME, TOO_MANY
         elif not isinstance(name, str) or name not in _TOOL_NAMES:
-            problem = (
+            problem, why = (
                 f"There is no tool called {quote(str(name), 40)}, so nothing was run. The "
-                "tools are look, tap, type, scroll, go and finish."
+                "tools are look, tap, type, scroll, go and finish.",
+                NOT_A_TOOL,
             )
         if problem is not None:
+            for _, block in uses:
+                self.executor.refuse(block.get("name"), why)
             return [_refused(ident, problem) for ident, _ in uses], False, None
         ident, block = uses[0]
         tool = str(name)  # one of the tool names, checked above
@@ -359,8 +379,12 @@ class _Run:
         if self.cost >= self.budget.max_cost_usd:
             return f"the cost ceiling of ${self.budget.max_cost_usd:.2f} was reached {after}"
         if self.clock() - self.started >= self.budget.max_seconds:
-            return f"the time limit of {self.budget.max_seconds:g} s ran out {after}"
+            return self._out_of_time()
         return None
+
+    def _out_of_time(self) -> str:
+        limit = f"{self.budget.max_seconds:g} s"
+        return f"the time limit of {limit} ran out before the tester called finish"
 
     # ------------------------------------------------------------------ the report
 

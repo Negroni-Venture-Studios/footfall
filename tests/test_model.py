@@ -8,7 +8,10 @@ from typing import Any
 import anthropic
 import pytest
 
+from footfall.tester import model as model_module
 from footfall.tester.model import (
+    CLIENT_RETRIES,
+    CLIENT_TIMEOUT,
     FAKE_MODEL,
     MAX_TOKENS,
     REQUESTABLE,
@@ -17,6 +20,7 @@ from footfall.tester.model import (
     ModelSpecError,
     ModelTurn,
     ScriptError,
+    make_client,
     model_from_spec,
 )
 from footfall.tester.pricing import PRICES, Usage
@@ -422,7 +426,7 @@ async def test_a_model_made_without_a_client_makes_one_when_first_used(
         made.append(client)
         return client
 
-    monkeypatch.setattr(anthropic, "AsyncAnthropic", make)
+    monkeypatch.setattr(model_module, "make_client", make)
     model = AnthropicModel()
     assert made == []
     api.answer(message([LOOK]))
@@ -431,3 +435,19 @@ async def test_a_model_made_without_a_client_makes_one_when_first_used(
     await model.turn(SYSTEM, TOOLS, FIRST)
     assert len(made) == 1
     assert len(api.requests) == 2
+
+
+async def test_the_one_client_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    # Set in the environment, this would put prompts and replies on every span.
+    monkeypatch.setenv("ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE", "content")
+    bare = anthropic.AsyncAnthropic()
+    client = make_client()
+    try:
+        assert bare.open_telemetry["traces"]["content_mode"] == "content"
+        assert client.open_telemetry["traces"]["content_mode"] == "metadata_only"
+        assert client.timeout == CLIENT_TIMEOUT == 300.0
+        assert client.max_retries == CLIENT_RETRIES == 2
+    finally:
+        await bare.close()
+        await client.close()

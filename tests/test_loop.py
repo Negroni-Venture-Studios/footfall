@@ -1,10 +1,12 @@
 """One persona's run: the loop between the model and the executor, on a real local Chromium."""
 
+import asyncio
 import base64
 import copy
 import json
 import logging
 import math
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,7 @@ from playwright.async_api import Browser, BrowserContext, ViewportSize
 
 from footfall.manifest import Brief
 from footfall.personas import DEVICES, PERSONAS, Device, Persona, load_devices, load_personas
+from footfall.tester import loop
 from footfall.tester.guard import Guard
 from footfall.tester.loop import (
     BEGIN,
@@ -310,7 +313,13 @@ async def test_an_unknown_tool_gets_an_error_and_runs_nothing(world: MakeWorld) 
     assert result["is_error"] is True
     assert 'There is no tool called "click"' in result["content"][0]["text"]
     assert report.actions == 0
-    assert [s.tool for s in w.trace.steps()] == ["finish"]
+    (refused, _) = w.trace.steps()
+    assert (refused.tool, refused.input, refused.error) == (
+        "click",
+        {},
+        "not run: there is no tool of that name",
+    )
+    assert refused.screenshot_after is None
 
 
 async def test_two_tool_uses_in_one_turn_get_an_error_each(world: MakeWorld) -> None:
@@ -323,7 +332,10 @@ async def test_two_tool_uses_in_one_turn_get_an_error_each(world: MakeWorld) -> 
     assert first["is_error"] is second["is_error"] is True
     assert "one tool at a time" in first["content"][0]["text"]
     assert report.actions == 0
-    assert [s.tool for s in w.trace.steps()] == ["finish"]
+    first_step, second_step, last = w.trace.steps()
+    assert [first_step.tool, second_step.tool, last.tool] == ["look", "go", "finish"]
+    assert first_step.error == second_step.error == "not run: more than one tool call in one turn"
+    assert first_step.input == second_step.input == {}
 
 
 async def test_a_text_only_turn_gets_a_reminder(world: MakeWorld) -> None:
@@ -366,7 +378,11 @@ async def test_max_tokens_mid_tool_is_a_failed_turn(world: MakeWorld) -> None:
     assert result["is_error"] is True
     assert "length limit" in result["content"][0]["text"]
     assert report.actions == 0
-    assert [s.tool for s in w.trace.steps()] == ["finish"]
+    (refused, _) = w.trace.steps()
+    assert (refused.tool, refused.error) == (
+        "tap",
+        "not run: the call was cut off at the token limit",
+    )
 
 
 async def test_max_tokens_with_no_tool_gets_a_reminder(world: MakeWorld) -> None:
@@ -506,6 +522,8 @@ def test_a_budget_must_be_positive() -> None:
         {"max_cost_usd": 0.0},
         {"max_cost_usd": math.nan},
         {"max_cost_usd": math.inf},
+        {"max_cost_usd": True},
+        {"max_seconds": "600"},
         {"max_seconds": -1.0},
         {"max_seconds": math.nan},
         {"max_seconds": math.inf},
@@ -869,3 +887,47 @@ async def test_a_fallback_through_the_api_is_priced_for_every_attempt(
         + cost_usd("claude-sonnet-5", Usage(1200, 80, 1000, 200))
     )
     assert report.cost_usd == pytest.approx(expected)
+
+
+async def test_a_refused_call_is_traced_without_its_secret(world: MakeWorld) -> None:
+    w = await world(redact=frozenset({SECRET}))
+    model = FakeModel([[tool(f"x{SECRET}", text=SECRET)], finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    raw = w.trace.path.read_text(encoding="utf-8")
+    for run_ in {SECRET[i : i + 4] for i in range(len(SECRET) - 3)}:
+        assert run_ not in raw, run_
+    assert w.trace.steps()[0].input == {}
+
+
+class Hung:
+    """A model whose call never comes back."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def turn(
+        self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    ) -> ModelTurn:
+        self.calls += 1
+        await asyncio.sleep(60)
+        raise AssertionError("the call should have been cut short")
+
+
+async def test_a_hung_model_call_ends_at_the_time_limit(
+    world: MakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = await world()
+    monkeypatch.setattr(loop, "TURN_FLOOR", 0.2)
+    started = time.monotonic()
+    report = await run(w, Hung(), budget=Budget(max_seconds=0.5), pricing=free)
+    assert time.monotonic() - started < 10
+    assert report.status == "incomplete"
+    assert report.reason == "the time limit of 0.5 s ran out before the tester called finish"
+
+
+async def test_a_timeout_raised_by_the_model_itself_fails_the_persona(world: MakeWorld) -> None:
+    w = await world()
+    report = await run(w, Turns(TimeoutError("its own")), pricing=free)
+    assert report.status == "failed"
+    assert report.reason == "TimeoutError"
