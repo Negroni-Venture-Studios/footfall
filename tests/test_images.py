@@ -84,3 +84,116 @@ def test_browsers_image_has_the_gate_and_the_ech_policy() -> None:
     ):
         assert f"COPY {policy} {folder}/footfall.json" in text
     assert json.loads((ROOT / policy).read_text()) == {"EncryptedClientHelloEnabled": False}
+
+
+def test_footfall_image_installs_git_from_its_own_release() -> None:
+    # footfall test lists the files git would commit; the base image's Debian release
+    # supplies git, with its security updates, and nothing it merely recommends.
+    text = (ROOT / "images" / "footfall" / "Dockerfile").read_text()
+    runtime = text.split(
+        "# ---------------------------------------------------------------- runtime"
+    )[1]
+    install = re.search(r"apt-get install --yes --no-install-recommends git\b", runtime)
+    assert install is not None
+    assert "rm -rf /var/lib/apt/lists/*" in runtime
+    assert re.search(r"^FROM python:[^ ]+-trixie@sha256:", runtime, re.MULTILINE)
+
+
+# ---------------------------------------------------------------- the build context
+
+
+def _pattern(text: str) -> re.Pattern[str]:
+    """A .dockerignore pattern as a regular expression, as Docker's matcher reads it: `*`
+    and `?` stay within one folder, and `**` crosses folders."""
+    parts = []
+    index = 0
+    clean = text.strip().strip("/")
+    while index < len(clean):
+        if clean.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        elif clean[index] == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif clean[index] == "?":
+            parts.append("[^/]")
+            index += 1
+        else:
+            parts.append(re.escape(clean[index]))
+            index += 1
+    return re.compile("".join(parts))
+
+
+def admitted(path: str, ignore: str) -> bool:
+    """Whether a build context path survives a .dockerignore: the last pattern that matches
+    the path or any folder above it decides, and `!` lets it back in."""
+    rules = []
+    for line in ignore.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        keep = line.startswith("!")
+        rules.append((keep, _pattern(line.removeprefix("!"))))
+    parts = path.split("/")
+    prefixes = ["/".join(parts[: i + 1]) for i in range(len(parts))]
+    verdict = True
+    for keep, rule in rules:
+        if any(rule.fullmatch(prefix) for prefix in prefixes):
+            verdict = keep
+    return verdict
+
+
+def copy_sources() -> list[tuple[str, str]]:
+    """Every COPY source in every Dockerfile that comes from the build context."""
+    sources = []
+    for path in DOCKERFILES:
+        for line in path.read_text().splitlines():
+            words = line.split()
+            if not words or words[0].upper() != "COPY":
+                continue
+            arguments = [w for w in words[1:] if not w.startswith("--")]
+            if any(w.startswith("--from=") for w in words[1:]):
+                continue
+            sources += [(path.parent.name, source) for source in arguments[:-1]]
+    return sources
+
+
+def context_files(source: str) -> list[str]:
+    """The files a COPY source stands for: itself, or the tracked files below a folder."""
+    path = ROOT / source
+    if path.is_dir():
+        return sorted(
+            str(p.relative_to(ROOT))
+            for p in path.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts
+        )
+    return [source]
+
+
+def test_every_copy_source_is_in_the_build_context() -> None:
+    ignore = (ROOT / ".dockerignore").read_text()
+    sources = copy_sources()
+    assert ("browsers", "images/browsers/gate.js") in sources
+    assert ("footfall", "footfall") in sources
+    refused = [
+        (image, file)
+        for image, source in sources
+        for file in context_files(source)
+        if not admitted(file, ignore)
+    ]
+    assert refused == []
+
+
+def test_the_check_would_have_caught_the_missing_gate() -> None:
+    old = """*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!footfall/
+**/__pycache__
+"""
+    assert not admitted("images/browsers/gate.js", old)
+    assert admitted("footfall/local.py", old)
+    assert not admitted("footfall/__pycache__/local.cpython-312.pyc", old)
+    assert not admitted("tests/test_local.py", old)

@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -919,19 +919,19 @@ async def test_a_runner_log_tail_never_rebuilds_the_password(
         '+++\nstart = "signed-out"\n+++\nLook around.\n'
     )
 
+    passwords: list[str] = []
+
     class SeedFails(FakeRunner):
         async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> None:
-            env = rest[-1]
-            raise RunnerError(
-                "seed failed with exit code 1", split_password(env["FOOTFALL_PASSWORD"])
-            )
+            passwords.append(rest[-1]["FOOTFALL_PASSWORD"])
+            raise RunnerError("seed failed with exit code 1", split_password(passwords[0]))
 
     runner = SeedFails(lambda copy: "127.0.0.1:9")
     with pytest.raises(RunnerError) as caught:
         await run_folder(folder, runner, connect[0], tmp_path)
     tail = caught.value.log_tail
-    password = re.search(r"seeding with \[password\]", tail)
-    assert password is not None
+    assert_scrubbed(tail, passwords[0])
+    assert "seeding with [password]" in tail
     assert "\x07" not in tail
     assert "\u200b" not in tail
 
@@ -1030,3 +1030,118 @@ async def test_every_persona_ends_before_a_failure_is_raised(
     assert ops[-2:] == ["ended", "stop"]
     grace = json.loads((tmp_path / "out" / "grace" / "report.json").read_text())
     assert grace["status"] == "finished"  # not cut short when its browser was closed
+
+
+# ---------------------------------------------------------------- copying safely
+
+
+async def test_a_link_in_place_of_a_tracked_folder_is_never_followed(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    # keys/ was committed, then replaced by an ignored link to a folder outside. git still
+    # lists keys/id_key from its index; the copy must not read it through the link.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "id_key").write_text("PRIVATE KEY THAT MUST STAY OUT\n")
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    (folder / "keys").mkdir()
+    (folder / "keys" / "id_key").write_text("a key that was committed\n")
+    git(folder, "add", "footfall.toml", "keys/id_key")
+    shutil.rmtree(folder / "keys")
+    (folder / "keys").symlink_to(outside)
+    (folder / ".gitignore").write_text("keys\n")
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError, match="keys"):
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert "prepare" not in runner.ops()
+    assert list((tmp_path / "workspaces").iterdir()) == []
+
+
+async def test_a_crafted_index_cannot_reach_through_a_link(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    # The index names keys/id_key without the file ever being in the folder, and keys is a
+    # link that is not ignored, so it is listed and copied before keys/id_key.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "id_key").write_text("PRIVATE KEY THAT MUST STAY OUT\n")
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    blob = (
+        subprocess.run(
+            [GIT, "-C", str(folder), "hash-object", "-w", "--stdin"],
+            input=b"anything\n",
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    git(folder, "update-index", "--add", "--cacheinfo", f"100644,{blob},keys/id_key")
+    (folder / "keys").symlink_to(outside)
+    copied: list[Path] = []
+    real_prepare = FakeRunner.prepare
+
+    class Recording(FakeRunner):
+        async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> None:
+            copied.extend(workspace.rglob("*"))
+            await real_prepare(self, run_id, workspace, *rest)
+
+    runner = Recording(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError, match="keys"):
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert copied == []
+    assert "prepare" not in runner.ops()
+
+
+def test_the_copy_never_writes_through_a_link_in_the_workspace(tmp_path: Path) -> None:
+    # A link already in the workspace, where a folder should be, is never written through.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "keys").symlink_to(outside)
+    folder = tmp_path / "source"
+    (folder / "keys").mkdir(parents=True)
+    (folder / "keys" / "x").write_text("data\n")
+    with pytest.raises(LocalRunError, match="keys"):
+        local._copy_files(folder, workspace, [PurePosixPath("keys/x")], tmp_path / "out")
+    assert list(outside.iterdir()) == []
+
+
+async def test_a_nested_repository_is_refused_by_name(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    nested = folder / "vendor" / "widget"
+    nested.mkdir(parents=True)
+    git(nested, "init", "-q")
+    (nested / "widget.js").write_text("export default 1;\n")
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError) as caught:
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert "vendor/widget" in str(caught.value)
+    assert "--all-files" in str(caught.value)
+    assert "prepare" not in runner.ops()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [subprocess.TimeoutExpired(["git"], 60), FileNotFoundError(2, "No such file", "git")],
+)
+async def test_git_that_hangs_or_cannot_start_is_reported(
+    tmp_path: Path,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    def run(*arguments: Any, **options: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", run)
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError, match="--all-files"):
+        await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path, all_files=False)
+    assert runner.calls == []

@@ -76,6 +76,10 @@ READY_TRY: Final = 2.0  # seconds one try may take
 GOTO_TIMEOUT_MS: Final = 30_000
 LOG_TAIL_CAP: Final = 20_000
 GIT_TIMEOUT: Final = 60.0
+_FOLDER_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_WRITE_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+_CHUNK: Final = 1024 * 1024
 
 type ConnectBrowser = Callable[[str, str], Awaitable[Browser]]
 
@@ -220,7 +224,10 @@ def _git_files(folder: Path) -> list[PurePosixPath]:
 
     git runs with no filesystem monitor and no untracked cache, either of which a
     repository's own configuration could point at a program, and with no GIT_ variables from
-    the environment. Raises LocalRunError when git is missing or cannot read the folder.
+    the environment. Listing files runs no hook, filter or pager. With those off, it is safe
+    to read a repository another user owns, as the dev stack's mounted folder is, so git's
+    check of the owner is set aside. Raises LocalRunError when git is missing, hangs, or
+    cannot read the folder.
     """
     git = shutil.which("git")
     advice = "pass --all-files to copy every file in the folder, ignored ones included"
@@ -230,25 +237,32 @@ def _git_files(folder: Path) -> list[PurePosixPath]:
         )
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env["GIT_TERMINAL_PROMPT"] = "0"
-    done = subprocess.run(  # noqa: S603  # a fixed command, with the folder as its working directory
-        [
-            git,
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.untrackedCache=false",
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-        cwd=folder,
-        env=env,
-        capture_output=True,
-        timeout=GIT_TIMEOUT,
-        check=False,
-    )
+    env["GIT_OPTIONAL_LOCKS"] = "0"  # never write to the folder, which may be read-only
+    command = [
+        git,
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "safe.directory=*",
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]
+    try:
+        done = subprocess.run(  # noqa: S603  # a fixed command, in the folder
+            command, cwd=folder, env=env, capture_output=True, timeout=GIT_TIMEOUT, check=False
+        )
+    except subprocess.TimeoutExpired:
+        raise LocalRunError(
+            f"git took more than {GIT_TIMEOUT:g} seconds to list the files in {folder}; {advice}"
+        ) from None
+    except OSError as error:
+        why = error.strerror or type(error).__name__
+        raise LocalRunError(f"git could not be started ({why}); {advice}") from None
     if done.returncode != 0:
         said = done.stderr.decode("utf-8", "replace").strip().splitlines()
         why = clean_text(said[0], 200, single_line=True) if said else "no reason given"
@@ -261,31 +275,119 @@ def _inside(path: Path, folder: Path) -> bool:
     return path == folder or path.is_relative_to(folder)
 
 
+def _open_folders(top: int, parts: Sequence[str], *, create: bool, name: PurePosixPath) -> int:
+    """Open the folder `parts` below the open folder `top`, one name at a time and never
+    through a link, making each that is missing when `create` is set.
+
+    Raises FileNotFoundError for a missing folder when not creating, and LocalRunError when
+    any part is a link or not a folder.
+    """
+    current = os.dup(top)
+    try:
+        for index, part in enumerate(parts):
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o755, dir_fd=current)
+            try:
+                inner = os.open(part, _FOLDER_FLAGS, dir_fd=current)
+            except FileNotFoundError:
+                raise
+            except OSError:
+                where = "/".join(parts[: index + 1])
+                side = "workspace" if create else "folder"
+                raise LocalRunError(
+                    f"cannot copy {name}: {where} in the {side} is a link or a file, not a "
+                    "folder, and Footfall copies nothing through a link"
+                ) from None
+            os.close(current)
+            current = inner
+    except BaseException:
+        os.close(current)
+        raise
+    return current
+
+
+def _copy_file(source: int, target: int, leaf: str, name: PurePosixPath) -> None:
+    """Copy one regular file between two open folders, refusing one that changes kind."""
+    reader = os.open(leaf, _READ_FLAGS, dir_fd=source)
+    try:
+        info = os.fstat(reader)
+        if not stat.S_ISREG(info.st_mode):
+            raise LocalRunError(f"cannot copy {name}: it changed while it was copied")
+        mode = stat.S_IMODE(info.st_mode) & 0o777  # no set-id or sticky bits
+        writer = os.open(leaf, _WRITE_FLAGS, mode, dir_fd=target)
+        try:
+            while chunk := os.read(reader, _CHUNK):
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(writer, view) :]
+            os.fchmod(writer, mode)
+            os.utime(writer, ns=(info.st_atime_ns, info.st_mtime_ns))
+        finally:
+            os.close(writer)
+    finally:
+        os.close(reader)
+
+
 def _copy_files(folder: Path, workspace: Path, names: Sequence[PurePosixPath], out: Path) -> None:
     """Copy the named files into the workspace, links as links, leaving the results out.
 
-    A name that is gone, or is not a file or a link, such as a submodule, is skipped.
+    Every name is opened one folder at a time from an open folder, never through a link, on
+    both sides, as the runner copies. A name below a link, which a crafted index or a folder
+    swapped for a link can list, is refused. So is a folder of its own, such as a submodule
+    or another repository, whose files git does not list. A name that is gone is skipped.
     """
     base = folder.resolve()
     results = out.resolve()
-    workspace.mkdir()
-    for name in names:
-        if name.is_absolute() or ".." in name.parts:
-            continue  # git never lists one; nothing outside the folder is copied
-        source = base / name
-        if _inside(source, results):
-            continue
+    left_out = results.relative_to(base).parts if _inside(results, base) else None
+    workspace.mkdir(exist_ok=True)
+    source_top = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        target_top = os.open(workspace, _FOLDER_FLAGS)
         try:
-            info = source.lstat()
+            for name in names:
+                parts = name.parts
+                if not parts or name.is_absolute() or any(p in (".", "..") for p in parts):
+                    # git refuses such a name in its index, and one would lead out of the folder.
+                    raise LocalRunError(f"cannot copy {name}: it is not a name inside the folder")
+                if left_out is not None and parts[: len(left_out)] == left_out:
+                    continue
+                _copy_name(source_top, target_top, name)
+        finally:
+            os.close(target_top)
+    finally:
+        os.close(source_top)
+
+
+def _copy_name(source_top: int, target_top: int, name: PurePosixPath) -> None:
+    parents, leaf = name.parts[:-1], name.parts[-1]
+    try:
+        source = _open_folders(source_top, parents, create=False, name=name)
+    except FileNotFoundError:
+        return  # tracked, but its folder was deleted since
+    try:
+        try:
+            info = os.stat(leaf, dir_fd=source, follow_symlinks=False)
         except FileNotFoundError:
-            continue  # tracked, but deleted since
-        target = workspace / name
-        if stat.S_ISLNK(info.st_mode):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.symlink_to(source.readlink())
-        elif stat.S_ISREG(info.st_mode):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target, follow_symlinks=False)
+            return  # tracked, but deleted since
+        if stat.S_ISDIR(info.st_mode):
+            raise LocalRunError(
+                f"{name} is a folder git lists without its files, such as a submodule or "
+                "another repository; pass --all-files to copy every file in the folder, "
+                "ignored ones included"
+            )
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            raise LocalRunError(f"cannot copy {name}: it is not a file, a link or a folder")
+        target = _open_folders(target_top, parents, create=True, name=name)
+        try:
+            if stat.S_ISLNK(info.st_mode):
+                os.symlink(os.readlink(leaf, dir_fd=source), leaf, dir_fd=target)
+            else:
+                _copy_file(source, target, leaf, name)
+        finally:
+            os.close(target)
+    finally:
+        os.close(source)
 
 
 def _copy_folder(folder: Path, workspace: Path, out: Path) -> None:

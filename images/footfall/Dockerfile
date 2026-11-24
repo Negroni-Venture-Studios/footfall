@@ -33,6 +33,12 @@ LABEL org.opencontainers.image.source="https://github.com/Negroni-Venture-Studio
       org.opencontainers.image.description="Footfall: tests web apps with AI personas on emulated devices" \
       org.opencontainers.image.licenses="MIT"
 
+# git, from the base image's own Debian release (trixie) and its security
+# updates: footfall test copies only the files git would commit.
+RUN apt-get update \
+ && apt-get install --yes --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 # The two socket folders are mount points for volumes, which take their owner
 # and mode from here: the runner's socket, which the orchestrator's group may
 # reach, and the proxy's control socket, which only the proxy's user and root

@@ -84,7 +84,9 @@ def test_the_key_reaches_only_the_orchestrator() -> None:
 def test_the_orchestrator_listens_on_nothing_and_reads_the_app_only() -> None:
     block = BLOCKS["orchestrator"]
     assert '    entrypoint: ["sleep", "infinity"]' in block
-    assert ":/app:ro" in block
+    # The whole repository, its .git included, so that git can say what it would commit.
+    assert "      - ${FOOTFALL_REPO:-../..}:/repo:ro" in block
+    assert "--all-files" not in COMPOSE
     assert "      - runner-socket:/run/footfall" in block
     assert "proxy-control" not in block  # it cannot reach the proxy's control socket
 
