@@ -12,13 +12,15 @@ refuse an added `<style>` element but cannot refuse a script that Playwright run
 """
 
 import asyncio
+import contextlib
 import json
+import re
 import time
 from collections.abc import Mapping
 from typing import Any, Final, Literal
 from urllib.parse import urljoin, urlsplit
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright
+from playwright.async_api import Browser, BrowserContext, ElementHandle, Locator, Page, Playwright
 from playwright.async_api import Error as PlaywrightError
 
 from footfall.manifest import LoginSection
@@ -116,14 +118,34 @@ async def connect_run_server(
     options = CHROMIUM_LAUNCH if engine == "chromium" else {}
     headers = {LAUNCH_HEADER: json.dumps(options)}
     deadline = time.monotonic() + wait
+    mismatch: str | None = None
     while True:
         try:
             return await browser_type.connect(endpoint, timeout=CONNECT_TIMEOUT_MS, headers=headers)
-        except PlaywrightError:
-            if time.monotonic() >= deadline:
+        except PlaywrightError as error:
+            mismatch = _version_mismatch(str(error))
+            if mismatch is not None or time.monotonic() >= deadline:
                 break
         await asyncio.sleep(CONNECT_RETRY)
+    if mismatch is not None:
+        raise BrowserConnectError(mismatch) from None
     raise BrowserConnectError(f"could not connect to the run's {engine} browser") from None
+
+
+def _version_mismatch(message: str) -> str | None:
+    """What to say when run-server refused a client of another Playwright release, which no
+    retry mends; None for any other failure. Only the versions are taken from the message,
+    which also holds the endpoint."""
+    if not re.search(r"\b428\b", message) or "version mismatch" not in message:
+        return None
+    server = re.search(r"server version: (v\d+(?:\.\d+)*)", message)
+    client = re.search(r"client version: (v\d+(?:\.\d+)*)", message)
+    if server is None or client is None:
+        return "the run's browsers run another Playwright version than Footfall's"
+    return (
+        f"the run's browsers run Playwright {server.group(1)}, and Footfall runs "
+        f"{client.group(1)}; the browser image and uv.lock must name the same version"
+    )
 
 
 async def open_context(
@@ -179,41 +201,73 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     return parts.scheme, (parts.hostname or ""), port
 
 
+class _LeftTheApp(Exception):
+    """An element Footfall would fill or press is in a document that is not the app's."""
+
+
+async def _on_app(
+    page: Page, locator: Locator, app_origin: str, timeout_ms: float
+) -> ElementHandle:
+    """The element `locator` finds, bound to the document it is in, which must be the app's
+    page in the main frame. Filling or pressing a handle acts on that document alone, and
+    raises once the page has moved on to another."""
+    handle = await locator.element_handle(timeout=timeout_ms)
+    frame = await handle.owner_frame()
+    origin = await handle.evaluate("element => element.ownerDocument.location.origin")
+    if frame is not page.main_frame or _origin(str(origin)) != _origin(app_origin):
+        await handle.dispose()
+        raise _LeftTheApp
+    return handle
+
+
 async def sign_in(
     page: Page, login: LoginSection, username: str, password: str, app_origin: str
 ) -> None:
     """Sign in on the app's sign-in page, as its manifest describes it.
 
-    Opens `login.page` on `app_origin`, fills the two fields by their labels and presses the
-    button by its name. Raises SignInError if any step fails, if the page is not on the app
-    when a field would be filled, or if it is still the sign-in page once the app has
-    answered. A redirect hop is not routed, so the sign-in page could send the browser to an
-    asset host, which must never be given the account. No error carries a browser message,
+    Opens `login.page` on `app_origin`, finds the two fields by their labels and the button
+    by its name, fills the fields and presses the button. A redirect hop is not routed, and
+    a page can send the browser elsewhere at any moment, so a page that has left the app
+    must never be given the account. Each element is therefore taken as a handle on its own
+    document, which must be the app's, in the main frame; a handle cannot fill or press
+    anything once its page has moved on. Raises SignInError if any step fails, if any
+    element is not on the app, if pressing the button leaves the app, or if the page is
+    still the sign-in page once the app has answered. No error carries a browser message,
     since one can quote the page or what was typed.
     """
     timeout_ms = SIGN_IN_TIMEOUT * 1000
     target = urljoin(app_origin + "/", login.page)
     step = f"open {quote(login.page, 80)}"
     failure: SignInError | None = None
+    handles: list[ElementHandle] = []
     try:
         await page.goto(target, timeout=timeout_ms)
         if _origin(page.url) != _origin(app_origin):
-            failure = SignInError(f"could not sign in: {quote(login.page, 80)} left the app")
-        else:
-            step = f"fill the field labelled {quote(login.username_label, 80)}"
-            await page.get_by_label(login.username_label, exact=True).fill(
-                username, timeout=timeout_ms
-            )
-            step = f"fill the field labelled {quote(login.password_label, 80)}"
-            await page.get_by_label(login.password_label, exact=True).fill(
-                password, timeout=timeout_ms
-            )
-            step = f"press the button {quote(login.submit, 80)}"
-            button = page.get_by_role("button", name=login.submit, exact=True)
-            async with page.expect_navigation(timeout=timeout_ms):
-                await button.click(timeout=timeout_ms)
+            raise _LeftTheApp
+        step = f"find the field labelled {quote(login.username_label, 80)}"
+        user = page.get_by_label(login.username_label, exact=True)
+        handles.append(await _on_app(page, user, app_origin, timeout_ms))
+        step = f"find the field labelled {quote(login.password_label, 80)}"
+        secret = page.get_by_label(login.password_label, exact=True)
+        handles.append(await _on_app(page, secret, app_origin, timeout_ms))
+        step = f"find the button {quote(login.submit, 80)}"
+        button = page.get_by_role("button", name=login.submit, exact=True)
+        handles.append(await _on_app(page, button, app_origin, timeout_ms))
+        step = f"fill the field labelled {quote(login.username_label, 80)}"
+        await handles[0].fill(username, timeout=timeout_ms)
+        step = f"fill the field labelled {quote(login.password_label, 80)}"
+        await handles[1].fill(password, timeout=timeout_ms)
+        step = f"press the button {quote(login.submit, 80)}"
+        async with page.expect_navigation(timeout=timeout_ms):
+            await handles[2].click(timeout=timeout_ms)
+    except _LeftTheApp:
+        failure = SignInError(f"could not sign in: {quote(login.page, 80)} left the app")
     except PlaywrightError:
         failure = SignInError(f"could not sign in: could not {step}")
+    finally:
+        for handle in handles:
+            with contextlib.suppress(PlaywrightError):
+                await handle.dispose()
     if failure is None:
         if _origin(page.url) != _origin(app_origin):
             failure = SignInError(

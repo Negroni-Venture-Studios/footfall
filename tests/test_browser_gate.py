@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import socket
 import subprocess
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -188,6 +189,61 @@ async def test_the_gate_waits_for_run_server_to_start() -> None:
             server.close()
     finally:
         gate.stop()
+
+
+async def test_a_slow_head_is_closed_by_its_deadline(gate: Gate, upstream: Upstream) -> None:
+    # Ten seconds for the whole head, however it trickles in: one byte every 3 s never resets it.
+    reader, writer = await asyncio.open_connection("127.0.0.1", gate.port)
+    started = time.monotonic()
+    closed_after = None
+    try:
+        async with asyncio.timeout(16):
+            for byte in upgrade(PATH):
+                writer.write(bytes([byte]))
+                with contextlib.suppress(ConnectionError):
+                    await writer.drain()
+                try:
+                    async with asyncio.timeout(3):
+                        if await reader.read(1) == b"":
+                            closed_after = time.monotonic() - started
+                            break
+                except TimeoutError:
+                    continue
+    finally:
+        writer.close()
+    assert closed_after is not None
+    assert 9 < closed_after < 11.5
+    assert upstream.connections == 0
+
+
+async def test_held_heads_from_one_address_cannot_crowd_out_the_run(
+    gate: Gate, upstream: Upstream
+) -> None:
+    held = []
+    try:
+        for _ in range(64):
+            reader, writer = await asyncio.open_connection("127.0.0.1", gate.port)
+            writer.write(b"GET / HTTP/1.1\r\nHost: x\r\n")
+            await writer.drain()
+            held.append((reader, writer))
+        answer = await exchange(gate.port, upgrade(PATH), wait=1.0)
+        assert answer == upstream.reply
+        assert upstream.connections == 1
+        # Only a few heads from one address are kept waiting; the oldest went first.
+        still_open = 0
+        for reader, _ in held:
+            try:
+                async with asyncio.timeout(0.05):
+                    if await reader.read(1) != b"":
+                        still_open += 1
+            except TimeoutError:
+                still_open += 1
+            except ConnectionError:
+                pass
+        assert still_open <= 8
+    finally:
+        for _, writer in held:
+            writer.close()
 
 
 def test_the_gate_exits_when_run_server_does() -> None:

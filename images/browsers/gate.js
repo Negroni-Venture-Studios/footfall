@@ -22,10 +22,11 @@ const crypto = require("node:crypto");
 const net = require("node:net");
 
 const MAX_HEAD = 16 * 1024; // bytes of request head read before refusing
-const HEAD_TIMEOUT_MS = 10_000; // to send a whole request head
+const HEAD_DEADLINE_MS = 10_000; // from accepting a connection to its whole head, however sent
+const PENDING_PER_ADDRESS = 8; // heads one address may keep waiting; the oldest goes first
 const UPSTREAM_WAIT_MS = 30_000; // for run-server to start answering
 const UPSTREAM_RETRY_MS = 200;
-const MAX_CONNECTIONS = 64;
+const MAX_CONNECTIONS = 1024;
 const NOT_FOUND = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const OPTIONS = ["--host", "--port", "--upstream", "--path"];
 const TOKEN_PATH = /^\/[A-Za-z0-9_-]{24,}$/;
@@ -84,6 +85,37 @@ function refuse(socket) {
   socket.end(NOT_FOUND, () => socket.destroy());
 }
 
+// Connections whose head has not yet been judged, by remote address, oldest first. A
+// connection the gate has forwarded or refused is no longer pending.
+const pending = new Map();
+
+function settle(client) {
+  clearTimeout(client.footfallDeadline);
+  const address = client.footfallAddress;
+  const waiting = pending.get(address);
+  if (waiting === undefined) return;
+  const index = waiting.indexOf(client);
+  if (index >= 0) waiting.splice(index, 1);
+  if (waiting.length === 0) pending.delete(address);
+}
+
+function admit(client) {
+  const address = client.remoteAddress || "";
+  client.footfallAddress = address;
+  client.footfallDeadline = setTimeout(() => client.destroy(), HEAD_DEADLINE_MS);
+  client.on("close", () => settle(client));
+  const waiting = pending.get(address) || [];
+  pending.set(address, waiting);
+  waiting.push(client);
+  // Too many heads from one address: the oldest goes, so that held connections can never
+  // keep a new one, such as the orchestrator's, from being heard.
+  while (waiting.length > PENDING_PER_ADDRESS) {
+    const oldest = waiting.shift();
+    clearTimeout(oldest.footfallDeadline);
+    oldest.destroy();
+  }
+}
+
 function forward(client, first, config) {
   const deadline = Date.now() + UPSTREAM_WAIT_MS;
   const attempt = () => {
@@ -112,19 +144,19 @@ function forward(client, first, config) {
 function serve(client, config) {
   let buffered = Buffer.alloc(0);
   client.on("error", () => client.destroy());
-  client.setTimeout(HEAD_TIMEOUT_MS, () => client.destroy());
+  admit(client);
   const onData = (chunk) => {
     buffered = Buffer.concat([buffered, chunk]);
     const end = buffered.indexOf("\r\n\r\n");
     if (end < 0 && buffered.length <= MAX_HEAD) return;
     client.removeListener("data", onData);
     client.pause();
+    settle(client);
     const target = end < 0 || end > MAX_HEAD ? null : upgradeTarget(buffered.subarray(0, end));
     if (target === null || !isRunPath(target, config.path)) {
       refuse(client);
       return;
     }
-    client.setTimeout(0);
     forward(client, buffered, config);
   };
   client.on("data", onData);

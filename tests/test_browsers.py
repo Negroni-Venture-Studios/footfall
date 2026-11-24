@@ -1,6 +1,7 @@
 """Browser contexts made for a persona, signing in, and connecting to the run's browsers."""
 
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
@@ -406,3 +407,71 @@ async def test_the_text_scale_follows_the_pages_own_root_size(
                   document.querySelectorAll("style").length]"""
     )
     assert sizes == ["17.5px", "35px", 0]
+
+
+async def test_sign_in_cannot_be_outrun_by_a_page_that_moves_on(
+    loopback_browser: Browser,
+    playwright: Playwright,
+    app_server: AppServer,
+    other_server: AppServer,
+    contexts: list[BrowserContext],
+) -> None:
+    # The sign-in page passes the origin check, then sends the browser elsewhere a moment
+    # later, through a redirect hop, to a page with the same form: nothing is filled there.
+    app_server.page("/", PAGE)
+    app_server.page(
+        "/login",
+        "<!doctype html><title>Sign in</title><p>Loading"
+        '<script>setTimeout(() => { location.href = "/bounce"; }, 200)</script>',
+    )
+    app_server.redirect("/bounce", f"{other_server.origin}/login")
+    other_server.page("/login", login_page("/session"))
+    context = await persona_context(loopback_browser, playwright, app_server, contexts)
+    page = await context.new_page()
+    await page.goto(app_server.origin + "/")
+    with pytest.raises(SignInError) as caught:
+        await sign_in(page, LOGIN, USERNAME, PASSWORD, app_server.origin)
+    assert "left the app" in str(caught.value)
+    assert not any(hit.path.startswith("/session") for hit in other_server.hits)
+    assert await page.locator("#u").input_value() == ""
+    assert PASSWORD not in str(caught.value)
+
+
+MISMATCH = (
+    "BrowserType.connect: WebSocket error: ws://10.89.0.12:3000/c2VjcmV0LXBhdGgtdG9rZW4 "
+    "428 Precondition Required\n"
+    "╔══════════════════════════════════════════╗\n"
+    "║ Playwright version mismatch:             ║\n"
+    "║   - server version: v1.65                ║\n"
+    "║   - client version: v1.66                ║\n"
+    "╚══════════════════════════════════════════╝"
+)
+
+
+class _Mismatched:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def connect(self, endpoint: str, **options: Any) -> str:
+        self.calls += 1
+        raise PlaywrightError(MISMATCH)
+
+
+async def test_a_version_mismatch_fails_at_once_and_names_both_versions() -> None:
+    fake = _Playwright()
+    mismatched = _Mismatched()
+    fake.chromium = mismatched  # type: ignore[assignment]
+    started = time.monotonic()
+    with pytest.raises(BrowserConnectError) as caught:
+        await connect_run_server(
+            fake,  # type: ignore[arg-type]
+            "chromium",
+            "ws://10.89.0.12:3000/c2VjcmV0LXBhdGgtdG9rZW4",
+            wait=30,
+        )
+    assert time.monotonic() - started < 1
+    assert mismatched.calls == 1
+    message = str(caught.value)
+    assert "v1.65" in message and "v1.66" in message
+    assert "version" in message
+    assert "c2VjcmV0" not in message
