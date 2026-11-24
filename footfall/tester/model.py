@@ -18,6 +18,7 @@ typed, so that one record is dropped (AGENTS.md rule 7). For the same reason, th
 import copy
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
@@ -29,7 +30,7 @@ from anthropic.types.beta import (
     BetaToolUnionParam,
 )
 
-from footfall.tester.pricing import Usage
+from footfall.tester.pricing import PricingError, Usage, cost_usd
 
 __all__ = [
     "BETAS",
@@ -174,21 +175,47 @@ class AnthropicModel:
 
         With a fallback, the top-level usage covers only the attempt that served the reply,
         and `usage.iterations` lists every attempt: a "message" entry the model asked for
-        declined, and a "fallback_message" entry served the turn (Anthropic's refusals and
-        fallback page, https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback,
+        declined, and a "fallback_message" entry served the turn. After a fallback, later
+        turns go straight to the fallback model for a while; such a turn has one
+        "fallback_message" entry and no fallback block (Anthropic's refusals and fallback
+        page, https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback,
         checked on 24 November 2026). Some declines before any output are not billed, but
         every attempt is charged here: a cost ceiling should overcharge rather than
-        undercharge. An attempt that names no model is charged as the model asked for.
+        undercharge.
 
-        Without iterations, the turn is the top-level usage on the model that answered,
-        which after a fallback can go on being the fallback model for later turns.
+        An attempt that names no model is charged as the model asked for, unless the turn
+        shows a fallback, by a "fallback_message" entry or by an answer from another model.
+        Then it is charged as whichever of the two costs more for it, since the model asked
+        for is the cheapest in its chain. Without iterations, the turn is the top-level usage
+        on the model that answered.
         """
         if not isinstance(iterations, list) or not iterations:
             return ((answered, usage),)
-        return tuple(
-            (getattr(entry, "model", None) or self.model, _usage(entry, geo))
-            for entry in iterations
+        fell_back = answered != self.model or any(
+            getattr(entry, "type", None) == "fallback_message" for entry in iterations
         )
+        charges: list[tuple[str, Usage]] = []
+        for entry in iterations:
+            used = _usage(entry, geo)
+            model = getattr(entry, "model", None)
+            if not model:
+                model = _dearer(self.model, answered, used) if fell_back else self.model
+            charges.append((model, used))
+        return tuple(charges)
+
+
+def _dearer(first: str, second: str, usage: Usage) -> str:
+    """Whichever model costs more for `usage`. One with no price is charged at the dearest
+    rates, so it is never the cheaper.
+    """
+
+    def cost(model: str) -> float:
+        try:
+            return cost_usd(model, usage)
+        except PricingError:
+            return math.inf
+
+    return second if cost(second) > cost(first) else first
 
 
 def _count(source: object, name: str) -> int:

@@ -140,10 +140,17 @@ async def test_a_fallback_turn_is_charged_for_every_attempt(api: Api) -> None:
 
 
 async def test_a_sticky_fallback_turn_is_charged_as_the_model_that_answered(api: Api) -> None:
-    # After a fallback, later turns go straight to the fallback model for a while, with no
-    # iterations and no fallback block.
-    api.answer(message([LOOK], model="claude-sonnet-5"))
+    # After a fallback, later turns go straight to the fallback model for a while. Such a
+    # turn has one fallback_message entry in usage.iterations and no fallback block.
+    api.answer(
+        message(
+            [LOOK],
+            model="claude-sonnet-5",
+            iterations=[iteration("fallback_message", "claude-sonnet-5", (1200, 80, 1000, 200))],
+        )
+    )
     turn = await AnthropicModel(client=api.client()).turn(SYSTEM, TOOLS, FIRST)
+    assert [block["type"] for block in turn.content] == ["tool_use"]
     assert turn.model == "claude-sonnet-5"
     assert turn.charges == (("claude-sonnet-5", Usage(1200, 80, 1000, 200)),)
 
@@ -215,22 +222,32 @@ async def test_one_hour_cache_writes_are_counted_apart(api: Api) -> None:
 
 
 async def test_an_attempt_without_a_model_is_charged_as_the_model_asked_for(api: Api) -> None:
-    api.answer(
-        message(
-            [LOOK],
-            model="claude-opus-5",
-            iterations=[
-                iteration("message", None, (1, 2, 3, 4)),
-                iteration("fallback_message", "claude-opus-5", (5, 6, 7, 8)),
-            ],
-        )
-    )
-    model = AnthropicModel("claude-opus-5-5", client=api.client())
-    turn = await model.turn(SYSTEM, TOOLS, FIRST)
-    assert turn.charges == (
-        ("claude-opus-5-5", Usage(1, 2, 3, 4)),
-        ("claude-opus-5", Usage(5, 6, 7, 8)),
-    )
+    # With no sign of a fallback, the model asked for is the one that ran.
+    api.answer(message([LOOK], iterations=[iteration("message", None, (1, 2, 3, 4))]))
+    turn = await AnthropicModel(client=api.client()).turn(SYSTEM, TOOLS, FIRST)
+    assert turn.charges == (("claude-sonnet-5-5", Usage(1, 2, 3, 4)),)
+
+
+@pytest.mark.parametrize(
+    ("asked", "answered", "served_entry", "charged"),
+    [
+        # Opus 5 is dearer than Opus 5.5 in every kind of token.
+        ("claude-opus-5-5", "claude-opus-5", True, "claude-opus-5"),
+        # Sonnet 5's cache reads cost twice Sonnet 5.5's, and this attempt is mostly reads.
+        ("claude-sonnet-5-5", "claude-sonnet-5", False, "claude-sonnet-5"),
+        # A model with no price will be charged at the dearest rates, so it is the dearer.
+        ("claude-sonnet-5-5", "claude-opus-4-7", True, "claude-opus-4-7"),
+    ],
+)
+async def test_after_a_fallback_an_attempt_without_a_model_is_charged_at_the_dearer(
+    api: Api, asked: str, answered: str, served_entry: bool, charged: str
+) -> None:
+    entries = [iteration("message", None, (1_000, 10, 0, 1_000_000))]
+    if served_entry:
+        entries.append(iteration("fallback_message", answered, (5, 6, 7, 8)))
+    api.answer(message([LOOK], model=answered, iterations=entries))
+    turn = await AnthropicModel(asked, client=api.client()).turn(SYSTEM, TOOLS, FIRST)
+    assert turn.charges[0] == (charged, Usage(1_000, 10, 0, 1_000_000))
 
 
 async def test_missing_cache_counts_are_zero(api: Api) -> None:
