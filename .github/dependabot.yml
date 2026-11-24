@@ -1,0 +1,51 @@
+# Weekly dependency updates, one grouped pull request per ecosystem, so the
+# lockfile is rebased once rather than once per package under branch protection.
+version: 2
+updates:
+  # The uv ecosystem updates pyproject.toml and uv.lock together, which keeps
+  # the `uv lock --check` step in CI green.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 5
+    groups:
+      python:
+        patterns: ["*"]
+
+  # GitHub Actions, which CI pins to commit SHAs.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+    labels: ["ci"]
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The base images of the Dockerfiles under images/, pinned by digest.
+  - package-ecosystem: "docker"
+    directories: ["/images/*"]
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "image"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 5
+    # Python patch releases only. Moving the image to a new minor version
+    # (3.15) is a deliberate change, made after CI tests that version.
+    # The Playwright image moves only with the Playwright version in uv.lock,
+    # which a test checks.
+    ignore:
+      - dependency-name: "mcr.microsoft.com/playwright"
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

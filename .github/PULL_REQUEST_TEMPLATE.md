@@ -1,0 +1,18 @@
+## Summary
+
+What does this change, and why?
+
+## Related issues
+
+Closes #
+
+## Security
+
+Does this touch authorisation, file handling, sessions, tokens, uploads, or anything a viewer can reach? If so, say which rules in docs/design.md and the security requirements apply, and which tests prove them.
+
+## Checklist
+
+- [ ] Tests cover the change, and fail without it
+- [ ] `uv run pre-commit run --all-files` passes
+- [ ] Documentation is updated, in British English
+- [ ] No new dependency, or one that was agreed first and passes the licence check

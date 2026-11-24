@@ -1,0 +1,108 @@
+[project]
+name = "footfall"
+version = "0.1.0"
+description = "A self-hosted service that tests web apps with AI personas on emulated devices."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Negroni Venture Studios" }]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "anthropic>=2.13,<3",
+    "playwright>=1.65.2,<2",
+]
+
+[project.scripts]
+footfall = "footfall.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Negroni-Venture-Studios/footfall"
+Issues = "https://github.com/Negroni-Venture-Studios/footfall/issues"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pip-audit>=2.10.1",
+    "pip-licenses>=5.5.5",
+    "pre-commit>=4.7.0",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+# The plan's code blocks are sketches of later tasks, not code.
+extend-exclude = ["docs/superpowers"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",  # pycodestyle, pyflakes
+    "I",            # import order
+    "B",            # bugbear
+    "UP",           # pyupgrade
+    "S",            # bandit security rules
+    "SIM",          # simplifications
+    "BLE",          # no blind except
+    "RUF",          # ruff's own
+    "TID",          # tidy imports and the banned APIs below
+    "PTH",          # pathlib over os.path: file paths come from records, never strings glued together
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S603"]  # pytest asserts; test passwords; fixed commands
+"scripts/**" = ["S603"] # scripts run fixed, trusted commands
+"docs/diagrams/**" = ["E501", "S101"]  # diagram generator: long SVG paths, build-time asserts
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pickle".msg = "Never unpickle: it runs code. Use JSON."
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["footfall", "tests", "scripts"]
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config -m 'not isolation'"
+markers = ["isolation: needs Docker, gVisor and the dev stack"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+xfail_strict = true
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["footfall"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
