@@ -1,0 +1,18 @@
+<h2>Your tasks</h2>
+<form class="toolbar" method="get" action="/" role="search">
+<label for="q">Search</label>
+<input id="q" name="q" type="search" value="$query">
+<button type="submit">Search</button>
+$clear
+</form>
+<form class="stack add" method="post" action="/tasks">
+<label for="text">New task</label>
+<input id="text" name="text" type="text" maxlength="500">
+<label for="due">Due date</label>
+<input id="due" name="due" type="date">
+<button type="submit">Add task</button>
+</form>
+<p class="count">$left</p>
+<ul class="tasks">
+$items
+</ul>

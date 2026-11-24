@@ -1,0 +1,22 @@
+name = "Tiny Tasks"
+
+[app]
+runtime = "python3.13"
+seed = "python3 seed.py"
+# Listens on every interface because the browser reaches it from another container.
+# Run by hand, `python3 serve.py` listens on 127.0.0.1 only.
+start = "python3 serve.py --host 0.0.0.0"
+port = 8080
+ready = "/healthz"
+ready_timeout = 30
+
+[login]
+page = "/login"
+username_label = "Username"
+password_label = "Password"
+submit = "Sign in"
+
+[test]
+pages = ["/", "/settings"]
+briefs = "footfall/briefs"
+personas = ["sven", "grace", "malik", "clara", "layla", "anna"]
