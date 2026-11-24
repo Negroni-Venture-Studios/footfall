@@ -1,0 +1,377 @@
+"""The command line: `footfall test`, `footfall runner` and `footfall proxy`, and their settings."""
+
+import asyncio
+import contextlib
+import os
+import socket
+import stat
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import footfall.__main__ as cli
+from footfall.__main__ import RUNC_WARNING, Settings, main
+from footfall.local import NotReadyError
+from footfall.manifest import ManifestError
+from footfall.proxy.control import ProxyControlClient
+from footfall.runner.client import RunnerClient
+from footfall.runner.service import RunnerError, RunnerService
+from footfall.tester.loop import Budget
+from footfall.tester.model import DEFAULT_MODEL
+from footfall.tester.report import PersonaReport
+
+ENV_NAMES = (
+    "FOOTFALL_RUNNER_SOCKET",
+    "FOOTFALL_PROXY_CONTROL",
+    "FOOTFALL_WORKSPACES",
+    "FOOTFALL_RUNS",
+    "FOOTFALL_RUNTIME",
+    "FOOTFALL_PROXY_CONTAINER",
+    "FOOTFALL_ORCHESTRATOR_CONTAINER",
+    "ANTHROPIC_API_KEY",
+)
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+def report(persona: str, status: Any = "finished") -> PersonaReport:
+    return PersonaReport(persona, "Pixel 7", status, "r", None, None, "", [], 1, 0.0, 1.0)
+
+
+class Recorder:
+    """Stands in for `test_folder`, recording what it was asked to do."""
+
+    def __init__(self, result: Any = None, error: Exception | None = None) -> None:
+        self.calls: list[tuple[Path, dict[str, Any]]] = []
+        self.result = result if result is not None else [report("grace")]
+        self.error = error
+
+    async def __call__(self, folder: Path, **options: Any) -> Any:
+        self.calls.append((folder, options))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def test_settings_have_the_documented_defaults() -> None:
+    settings = Settings.from_env({})
+    assert settings == Settings(
+        runner_socket=Path("/run/footfall/runner.sock"),
+        proxy_control=Path("/run/footfall/proxy.sock"),
+        workspaces=Path("/var/lib/footfall/workspaces"),
+        runs=Path("/var/lib/footfall/runs"),
+        runtime="runsc",
+        proxy_container="footfall-proxy",
+        orchestrator_container="footfall-orchestrator",
+    )
+
+
+def test_settings_come_from_the_environment() -> None:
+    settings = Settings.from_env(
+        {
+            "FOOTFALL_RUNNER_SOCKET": "/srv/ff/r.sock",
+            "FOOTFALL_PROXY_CONTROL": "/srv/ff/p.sock",
+            "FOOTFALL_WORKSPACES": "/data/w",
+            "FOOTFALL_RUNS": "/data/r",
+            "FOOTFALL_RUNTIME": "runc",
+            "FOOTFALL_PROXY_CONTAINER": "dev-proxy",
+            "FOOTFALL_ORCHESTRATOR_CONTAINER": "dev-orchestrator",
+        }
+    )
+    assert settings == Settings(
+        runner_socket=Path("/srv/ff/r.sock"),
+        proxy_control=Path("/srv/ff/p.sock"),
+        workspaces=Path("/data/w"),
+        runs=Path("/data/r"),
+        runtime="runc",
+        proxy_container="dev-proxy",
+        orchestrator_container="dev-orchestrator",
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("FOOTFALL_RUNTIME", "kata"),
+        ("FOOTFALL_PROXY_CONTAINER", "proxy:8080"),
+        ("FOOTFALL_ORCHESTRATOR_CONTAINER", "-orchestrator"),
+        ("FOOTFALL_WORKSPACES", "relative/path"),
+    ],
+)
+def test_bad_settings_are_refused(
+    name: str, value: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(name, value)
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    assert main(["test", "app", "--model", "fake:script.json"]) == 2
+    assert name in capsys.readouterr().err
+    assert recorder.calls == []
+
+
+def test_cli_test_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FOOTFALL_RUNNER_SOCKET", str(tmp_path / "runner.sock"))
+    monkeypatch.setenv("FOOTFALL_WORKSPACES", str(tmp_path / "workspaces"))
+    monkeypatch.setenv("FOOTFALL_PROXY_CONTAINER", "dev-proxy")
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    code = main(
+        [
+            "test",
+            "demo-app",
+            "--personas",
+            "grace, kenji",
+            "--brief",
+            "smoke",
+            "--focus",
+            "the search box",
+            "--model",
+            "fake:script.json",
+            "--out",
+            "results",
+        ]
+    )
+    assert code == 0
+    ((folder, options),) = recorder.calls
+    assert folder == Path("demo-app")
+    runner = options.pop("runner")
+    assert isinstance(runner, RunnerClient)
+    assert runner._socket_path == tmp_path / "runner.sock"
+    assert options == {
+        "persona_ids": ["grace", "kenji"],
+        "brief_name": "smoke",
+        "focus": "the search box",
+        "model_spec": "fake:script.json",
+        "out": Path("results"),
+        "budget": Budget(),
+        "workspaces": tmp_path / "workspaces",
+        "proxy_container": "dev-proxy",
+    }
+
+
+def test_cli_test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-a-real-key")  # gitleaks:allow
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    assert main(["test", "app"]) == 0
+    ((_, options),) = recorder.calls
+    assert options["persona_ids"] == []
+    assert options["brief_name"] == "default"
+    assert options["focus"] is None
+    assert options["model_spec"] == DEFAULT_MODEL
+    assert options["out"] == Path("footfall-results")
+    assert options["workspaces"] == Path("/var/lib/footfall/workspaces")
+    assert options["proxy_container"] == "footfall-proxy"
+
+
+def test_a_real_model_needs_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    assert main(["test", "app"]) == 2
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    assert recorder.calls == []
+
+
+def test_the_exit_code_says_whether_a_persona_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "test_folder", Recorder([report("grace"), report("kenji", "failed")]))
+    assert main(["test", "app", "--model", "fake:s.json"]) == 1
+    monkeypatch.setattr(
+        cli, "test_folder", Recorder([report("grace"), report("kenji", "incomplete")])
+    )
+    assert main(["test", "app", "--model", "fake:s.json"]) == 0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ManifestError(["app.port: is required"]),
+        RunnerError("seed failed with exit code 1", "Traceback\n\x1b[2JValueError: bad seed"),
+        NotReadyError("the copy of the app for grace did not answer /", "Listening\nCrashed"),
+    ],
+)
+def test_a_run_that_cannot_go_ahead_says_why(
+    error: Exception, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "test_folder", Recorder(error=error))
+    assert main(["test", "app", "--model", "fake:s.json"]) == 1
+    printed = capsys.readouterr().err
+    assert str(error).splitlines()[0] in printed
+    tail = getattr(error, "log_tail", "")
+    if tail:
+        assert tail.splitlines()[-1].replace("\x1b[2J", "") in printed
+    assert "\x1b" not in printed
+
+
+def test_a_missing_folder_fails_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FOOTFALL_RUNNER_SOCKET", str(tmp_path / "nobody.sock"))
+    assert main(["test", str(tmp_path / "missing"), "--model", "fake:s.json"]) == 1
+    assert "footfall.toml" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- the runc warning
+
+
+def stub_services(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    started: list[str] = []
+
+    async def runner(settings: Settings) -> None:
+        started.append("runner")
+
+    async def proxy(settings: Settings) -> None:
+        started.append("proxy")
+
+    monkeypatch.setattr(cli, "run_runner", runner)
+    monkeypatch.setattr(cli, "run_proxy", proxy)
+    monkeypatch.setattr(cli, "test_folder", Recorder())
+    return started
+
+
+@pytest.mark.parametrize("argv", [["runner"], ["proxy"], ["test", "app", "--model", "fake:s.json"]])
+def test_runc_warning_printed(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub_services(monkeypatch)
+    monkeypatch.setenv("FOOTFALL_RUNTIME", "runc")
+    assert main(argv) == 0
+    printed = capsys.readouterr()
+    assert RUNC_WARNING in printed.err
+    assert "gVisor" in RUNC_WARNING
+    assert RUNC_WARNING not in printed.out
+
+
+def test_runc_warning_even_when_the_command_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FOOTFALL_RUNTIME", "runc")
+    with pytest.raises(SystemExit):
+        main(["no-such-command"])
+    assert RUNC_WARNING in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("runtime", [None, "runsc"])
+def test_no_warning_with_gvisor(
+    runtime: str | None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    started = stub_services(monkeypatch)
+    if runtime is not None:
+        monkeypatch.setenv("FOOTFALL_RUNTIME", runtime)
+    assert main(["runner"]) == 0
+    assert main(["proxy"]) == 0
+    assert started == ["runner", "proxy"]
+    assert RUNC_WARNING not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- the services
+
+
+def short_dir() -> Path:
+    """A folder with a short path, since a Unix socket's path has a small limit."""
+    return Path(tempfile.mkdtemp(prefix="ff-", dir="/tmp"))
+
+
+async def test_the_runner_socket_is_for_the_runner_and_its_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[dict[str, Any]] = []
+    real = RunnerService
+
+    def recording(*args: Any, **options: Any) -> RunnerService:
+        built.append(options)
+        return real(*args, **options)
+
+    monkeypatch.setattr(cli, "RunnerService", recording)
+    folder = short_dir()
+    try:
+        settings = Settings.from_env(
+            {
+                "FOOTFALL_RUNNER_SOCKET": str(folder / "runner.sock"),
+                "FOOTFALL_PROXY_CONTROL": str(folder / "proxy.sock"),
+                "FOOTFALL_WORKSPACES": str(tmp_path / "workspaces"),
+                "FOOTFALL_RUNS": str(tmp_path / "runs"),
+                "FOOTFALL_RUNTIME": "runc",
+                "FOOTFALL_PROXY_CONTAINER": "dev-proxy",
+                "FOOTFALL_ORCHESTRATOR_CONTAINER": "dev-orchestrator",
+            }
+        )
+        socket_path = folder / "runner.sock"
+
+        async def check() -> None:
+            info = socket_path.lstat()
+            assert stat.S_ISSOCK(info.st_mode)
+            assert stat.S_IMODE(info.st_mode) == 0o660
+            assert info.st_gid == os.getegid()  # 10001 when compose runs it as "0:10001"
+            client = RunnerClient(socket_path)
+            assert await client.status("r_" + "a" * 26) is None
+
+        task = asyncio.create_task(cli.run_runner(settings))
+        try:
+            for _ in range(200):
+                if socket_path.exists():
+                    break
+                await asyncio.sleep(0.01)
+            await check()
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        assert not socket_path.exists()
+    finally:
+        for leftover in folder.iterdir():
+            leftover.unlink()
+        folder.rmdir()
+    (options,) = built
+    assert options["runtime"] == "runc"
+    assert options["workspaces"] == tmp_path / "workspaces"
+    assert options["runs"] == tmp_path / "runs"
+    assert options["proxy_container"] == "dev-proxy"
+    assert options["orchestrator_container"] == "dev-orchestrator"
+    assert options["proxy_port"] == 3128
+    assert options["browsers_image"] == "footfall-browsers:dev"
+    assert options["images"] == {
+        "python3.13": "footfall-python3.13:dev",
+        "node22": "footfall-node22:dev",
+    }
+
+
+async def test_the_proxy_serves_its_port_and_its_control_socket() -> None:
+    folder = short_dir()
+    control = folder / "proxy.sock"
+    try:
+        settings = Settings.from_env({"FOOTFALL_PROXY_CONTROL": str(control)})
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        task = asyncio.create_task(cli.run_proxy(settings, host="127.0.0.1", port=port))
+        try:
+            for _ in range(200):
+                if control.exists():
+                    break
+                await asyncio.sleep(0.01)
+            assert stat.S_IMODE(control.lstat().st_mode) == 0o600
+            client = ProxyControlClient(control)
+            run_id = "r_" + "b" * 26
+            await asyncio.to_thread(client.allow, "10.89.0.7", run_id, ["example.org"])
+            assert await asyncio.to_thread(client.reached, run_id) == []
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"CONNECT example.org:443 HTTP/1.1\r\nHost: example.org:443\r\n\r\n")
+            answer = await reader.readline()
+            writer.close()
+            assert answer.startswith(b"HTTP/1.1 403")  # 127.0.0.1 has no allow list
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+    finally:
+        for leftover in folder.iterdir():
+            leftover.unlink()
+        folder.rmdir()

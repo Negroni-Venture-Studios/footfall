@@ -1,0 +1,295 @@
+"""Footfall's command line.
+
+    footfall test <folder> [--personas ids] [--brief name] [--focus text] [--model spec]
+                           [--out dir]
+    footfall runner
+    footfall proxy
+
+`footfall test` runs the testers against a local folder and writes their results. `footfall
+runner` serves the runner, the one process that holds the Docker socket, on its Unix socket.
+`footfall proxy` serves the egress proxy and its control socket. The development compose
+file, `deploy/dev/compose.yaml`, runs the three together.
+
+Settings come from the environment:
+
+| Variable | Default |
+|---|---|
+| `FOOTFALL_RUNNER_SOCKET` | `/run/footfall/runner.sock` |
+| `FOOTFALL_PROXY_CONTROL` | `/run/footfall/proxy.sock` |
+| `FOOTFALL_WORKSPACES` | `/var/lib/footfall/workspaces` |
+| `FOOTFALL_RUNS` | `/var/lib/footfall/runs` |
+| `FOOTFALL_RUNTIME` | `runsc` |
+| `FOOTFALL_PROXY_CONTAINER` | `footfall-proxy` |
+| `FOOTFALL_ORCHESTRATOR_CONTAINER` | `footfall-orchestrator` |
+
+`FOOTFALL_RUNTIME=runc` starts containers without gVisor, for development on a machine that
+lacks it, and every command then prints a warning.
+"""
+
+import argparse
+import asyncio
+import logging
+import os
+import re
+import signal
+import sys
+from collections.abc import Coroutine, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Final
+
+from footfall.browsers import BrowserConnectError
+from footfall.local import PROXY_PORT, LocalRunError, test_folder
+from footfall.manifest import ManifestError
+from footfall.personas import PersonaError
+from footfall.proxy.control import ProxyControlClient, serve_control
+from footfall.proxy.policy import Policy
+from footfall.proxy.server import ProxyServer
+from footfall.runner.client import RunnerClient
+from footfall.runner.engine import DockerEngine
+from footfall.runner.server import serve
+from footfall.runner.service import RunnerError, RunnerService
+from footfall.tester.loop import Budget
+from footfall.tester.model import DEFAULT_MODEL, ModelSpecError
+from footfall.tester.report import clean_text
+
+__all__ = ["RUNC_WARNING", "Settings", "main", "run_proxy", "run_runner"]
+
+RUNC_WARNING: Final = (
+    "footfall: warning: FOOTFALL_RUNTIME=runc starts containers without gVisor, so code "
+    "under test runs on the host's own kernel. Use it for development only, never on a server."
+)
+RUNTIMES: Final = ("runsc", "runc")
+# The images the runner starts, as `docker build` tags them for development.
+RUNTIME_IMAGES: Final = {"python3.13": "footfall-python3.13:dev", "node22": "footfall-node22:dev"}
+BROWSERS_IMAGE: Final = "footfall-browsers:dev"
+DEFAULT_OUT: Final = Path("footfall-results")
+_CONTAINER_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
+_LOG_TAIL_CAP: Final = 20_000
+_STOPPED: Final = 130  # the exit code when a command is stopped by a signal
+
+_DEFAULTS: Final = {
+    "FOOTFALL_RUNNER_SOCKET": "/run/footfall/runner.sock",
+    "FOOTFALL_PROXY_CONTROL": "/run/footfall/proxy.sock",
+    "FOOTFALL_WORKSPACES": "/var/lib/footfall/workspaces",
+    "FOOTFALL_RUNS": "/var/lib/footfall/runs",
+    "FOOTFALL_RUNTIME": "runsc",
+    "FOOTFALL_PROXY_CONTAINER": "footfall-proxy",
+    "FOOTFALL_ORCHESTRATOR_CONTAINER": "footfall-orchestrator",
+}
+
+
+class SettingsError(ValueError):
+    """A setting in the environment that Footfall cannot use."""
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Footfall's settings, from the environment."""
+
+    runner_socket: Path
+    proxy_control: Path
+    workspaces: Path
+    runs: Path
+    runtime: str
+    proxy_container: str
+    orchestrator_container: str
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> "Settings":
+        def get(name: str) -> str:
+            return env.get(name) or _DEFAULTS[name]
+
+        def path(name: str) -> Path:
+            value = Path(get(name))
+            if not value.is_absolute():
+                raise SettingsError(f"{name} must be an absolute path, not {str(value)!r}")
+            return value
+
+        def container(name: str) -> str:
+            value = get(name)
+            if not _CONTAINER_NAME.fullmatch(value):
+                raise SettingsError(
+                    f"{name} must be a container name of lower-case letters, digits, dots "
+                    f"and hyphens, not {value!r}"
+                )
+            return value
+
+        runtime = get("FOOTFALL_RUNTIME")
+        if runtime not in RUNTIMES:
+            raise SettingsError(f"FOOTFALL_RUNTIME must be runsc or runc, not {runtime!r}")
+        return cls(
+            runner_socket=path("FOOTFALL_RUNNER_SOCKET"),
+            proxy_control=path("FOOTFALL_PROXY_CONTROL"),
+            workspaces=path("FOOTFALL_WORKSPACES"),
+            runs=path("FOOTFALL_RUNS"),
+            runtime=runtime,
+            proxy_container=container("FOOTFALL_PROXY_CONTAINER"),
+            orchestrator_container=container("FOOTFALL_ORCHESTRATOR_CONTAINER"),
+        )
+
+
+# ---------------------------------------------------------------- the services
+
+
+async def run_runner(settings: Settings) -> None:
+    """Serve the runner on its socket until stopped.
+
+    The socket's mode is 0660 and its group is the runner's own, so a runner started as
+    "0:10001" can be reached by the orchestrator's user, 10001, and by nobody else.
+    """
+    service = RunnerService(
+        DockerEngine(),
+        ProxyControlClient(settings.proxy_control),
+        workspaces=settings.workspaces,
+        runs=settings.runs,
+        images=RUNTIME_IMAGES,
+        browsers_image=BROWSERS_IMAGE,
+        proxy_container=settings.proxy_container,
+        orchestrator_container=settings.orchestrator_container,
+        proxy_port=PROXY_PORT,
+        runtime=settings.runtime,
+    )
+    group = os.getegid()
+    logging.getLogger(__name__).info(
+        "the runner is serving %s for group %d", settings.runner_socket, group
+    )
+    await serve(service, settings.runner_socket, group=group)
+
+
+async def run_proxy(
+    settings: Settings,
+    *,
+    host: str = "0.0.0.0",  # noqa: S104  # every interface of the proxy's own container
+    port: int = PROXY_PORT,
+) -> None:
+    """Serve the egress proxy and its control socket until stopped."""
+    policy = Policy()
+    server = await ProxyServer(policy).start(host, port)
+    async with server, asyncio.TaskGroup() as tasks:
+        tasks.create_task(server.serve_forever())
+        tasks.create_task(serve_control(policy, settings.proxy_control))
+
+
+def _until_stopped[T](work: Coroutine[Any, Any, T]) -> T:
+    """Run `work`, cancelling it on SIGTERM as asyncio already does on Ctrl-C, so that its
+    cleanup, such as stopping a run, still happens."""
+
+    async def guarded() -> T:
+        task = asyncio.current_task()
+        assert task is not None  # noqa: S101  # always inside asyncio.run
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+        return await work
+
+    return asyncio.run(guarded())
+
+
+# ---------------------------------------------------------------- footfall test
+
+
+def _ids(text: str) -> list[str]:
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _test(args: argparse.Namespace, settings: Settings) -> int:
+    def say(message: str) -> None:
+        print(f"footfall test: {message}", file=sys.stderr)
+
+    if not args.model.startswith("fake:") and not os.environ.get("ANTHROPIC_API_KEY"):
+        say("set ANTHROPIC_API_KEY, or try Footfall without one with --model fake:<script>")
+        return 2
+    try:
+        reports = _until_stopped(
+            test_folder(
+                Path(args.folder),
+                persona_ids=args.personas,
+                brief_name=args.brief,
+                focus=args.focus,
+                model_spec=args.model,
+                out=args.out,
+                runner=RunnerClient(settings.runner_socket),
+                budget=Budget(),
+                workspaces=settings.workspaces,
+                proxy_container=settings.proxy_container,
+            )
+        )
+    except (RunnerError, LocalRunError) as error:
+        say(str(error))
+        if error.log_tail:
+            tail = clean_text(error.log_tail, _LOG_TAIL_CAP)
+            print(f"The app's last output:\n{tail}", file=sys.stderr)
+        return 1
+    except (ManifestError, PersonaError, ModelSpecError, BrowserConnectError, OSError) as error:
+        say(str(error))
+        return 1
+    print(f"The results are in {args.out}.")
+    return 1 if any(report.status == "failed" for report in reports) else 0
+
+
+# ---------------------------------------------------------------- the command line
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="footfall", description="Test web apps the way strangers would use them."
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    test = commands.add_parser(
+        "test",
+        help="test a local folder with AI personas",
+        description=(
+            "Test the app in a local folder. Exits with 0 when every persona ran, 1 when "
+            "one failed or the run could not go ahead, and 2 for a setting that is wrong."
+        ),
+    )
+    test.add_argument("folder", help="the folder to test, with footfall.toml at its root")
+    test.add_argument(
+        "--personas",
+        type=_ids,
+        default=[],
+        help="persona ids, separated by commas (default: the manifest's)",
+    )
+    test.add_argument("--brief", default="default", help="the brief to use (default: default)")
+    test.add_argument("--focus", default=None, help="what the testers should pay attention to")
+    test.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"the model, or fake:<script> for a scripted one (default: {DEFAULT_MODEL})",
+    )
+    test.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_OUT,
+        help=f"the folder for the results (default: {DEFAULT_OUT})",
+    )
+    commands.add_parser("runner", help="serve the runner, which alone holds the Docker socket")
+    commands.add_parser("proxy", help="serve the egress proxy")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run one command and return its exit code."""
+    if os.environ.get("FOOTFALL_RUNTIME") == "runc":
+        print(RUNC_WARNING, file=sys.stderr)
+    args = _parser().parse_args(argv)
+    try:
+        settings = Settings.from_env(os.environ)
+    except SettingsError as error:
+        print(f"footfall: {error}", file=sys.stderr)
+        return 2
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+    try:
+        if args.command == "test":
+            return _test(args, settings)
+        _until_stopped(run_runner(settings) if args.command == "runner" else run_proxy(settings))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        return _STOPPED
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

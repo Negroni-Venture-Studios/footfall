@@ -222,20 +222,28 @@ async def _handle(
             await writer.wait_closed()
 
 
-def _bind(path: Path) -> socket.socket:
-    """Bind a Unix socket at `path` with mode 0660, replacing a stale socket but nothing else."""
+def _bind(path: Path, group: int | None = None) -> socket.socket:
+    """Bind a Unix socket at `path` with mode 0660, replacing a stale socket but nothing else.
+
+    With `group`, the socket is given to that group before the group may use it. Otherwise
+    its group is whatever the system gives a new file, which can be the folder's.
+    """
     with contextlib.suppress(FileNotFoundError):
         if not stat.S_ISSOCK(path.lstat().st_mode):
             raise FileExistsError(f"{path} exists and is not a socket")
         path.unlink()  # left by a runner that did not shut down cleanly
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        # The mask makes the socket 0660 from the moment it exists, with no window in between.
-        previous = os.umask(0o777 & ~_SOCKET_MODE)
+        # The mask sets the socket's mode from the moment it exists, with no window in between:
+        # 0600 until its group is set, when there is one to set.
+        first = _SOCKET_MODE if group is None else _SOCKET_MODE & 0o700
+        previous = os.umask(0o777 & ~first)
         try:
             sock.bind(str(path))
         finally:
             os.umask(previous)
+        if group is not None:
+            os.chown(path, -1, group, follow_symlinks=False)
         path.chmod(_SOCKET_MODE)
     except BaseException:
         sock.close()
@@ -255,10 +263,14 @@ def _raise_file_limit() -> None:
         logger.warning("could not raise the open-file limit from %s", soft)
 
 
-async def serve(service: RunnerService, socket_path: Path) -> None:
-    """Answer requests on `socket_path` until cancelled, and watch the runs meanwhile."""
+async def serve(service: RunnerService, socket_path: Path, *, group: int | None = None) -> None:
+    """Answer requests on `socket_path` until cancelled, and watch the runs meanwhile.
+
+    `group`, when given, is the group the socket belongs to: the group of the orchestrator's
+    user, which may then connect.
+    """
     _raise_file_limit()
-    sock = _bind(socket_path)
+    sock = _bind(socket_path, group)
     inode = socket_path.lstat().st_ino
     stop = threading.Event()
     watcher = threading.Thread(

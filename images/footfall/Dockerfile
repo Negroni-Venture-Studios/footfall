@@ -33,9 +33,15 @@ LABEL org.opencontainers.image.source="https://github.com/Negroni-Venture-Studio
       org.opencontainers.image.description="Footfall: tests web apps with AI personas on emulated devices" \
       org.opencontainers.image.licenses="MIT"
 
+# The two socket folders are mount points for volumes, which take their owner
+# and mode from here: the runner's socket, which the orchestrator's group may
+# reach, and the proxy's control socket, which only the proxy's user and root
+# may reach.
 RUN groupadd --system --gid 10001 footfall \
  && useradd --system --uid 10001 --gid footfall --home-dir /var/lib/footfall --shell /usr/sbin/nologin footfall \
- && install --directory --owner footfall --group footfall --mode 0700 /var/lib/footfall
+ && install --directory --owner footfall --group footfall --mode 0700 /var/lib/footfall \
+ && install --directory --owner root --group footfall --mode 0750 /run/footfall \
+ && install --directory --owner footfall --group footfall --mode 0700 /run/footfall-proxy
 
 COPY --from=build --chown=root:root /app /app
 # The base image ships Python's standard library without compiled files, and
@@ -52,6 +58,6 @@ ENV PATH=/app/.venv/bin:$PATH \
 USER footfall
 WORKDIR /var/lib/footfall
 
-# footfall/__main__.py arrives in a later task; until then the image builds
-# but its entrypoint has nothing to run.
+# `footfall test`, `footfall runner` or `footfall proxy`; deploy/dev/compose.yaml
+# runs all three.
 ENTRYPOINT ["footfall"]
