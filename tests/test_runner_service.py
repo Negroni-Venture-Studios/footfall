@@ -16,13 +16,16 @@ from footfall.runner.service import (
     DISK_REASON,
     MAX_DEPTH,
     MEASURE_REASON,
+    NEVER_PREPARED,
     REGISTRIES,
     RunnerError,
     RunnerService,
     _copy_file,
     _copy_tree,
     _disk_usage,
+    _entries,
     _OverBudget,
+    _TooDeep,
 )
 from footfall.runner.spec import container_config
 from tests.runner_fakes import (
@@ -44,6 +47,7 @@ INSTALL = f"footfall-{RUN}-install-prepare"
 SEED = f"footfall-{RUN}-seed-prepare"
 PASSWORD = "pw-7f3k2m9q4x8z"  # gitleaks:allow
 MIB = 1024 * 1024
+PAGE = 4096
 
 
 @pytest.fixture
@@ -380,7 +384,7 @@ def test_stop_removes_everything_and_is_idempotent(h: Harness) -> None:
     h.service.stop(RUN)
     assert_nothing_left(h)
     h.service.stop(OTHER)  # never prepared
-    with pytest.raises(RunnerError, match="not been prepared"):
+    with pytest.raises(RunnerError, match="was stopped"):
         h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
     assert h.service.status(RUN) is None
 
@@ -630,7 +634,7 @@ def test_fifo_in_workspace_refused(h: Harness) -> None:
     workspace = h.workspace()
     (workspace / "deep").mkdir()
     os.mkfifo(workspace / "deep" / "pipe")
-    with pytest.raises(RunnerError, match=r"FIFO at deep/pipe"):
+    with pytest.raises(RunnerError, match=r"FIFO at 'deep/pipe'"):
         prepare(h)
     assert h.engine.names("create_network") == []
     assert_nothing_left(h)
@@ -638,7 +642,7 @@ def test_fifo_in_workspace_refused(h: Harness) -> None:
 
 def test_fifo_left_by_seed_refused(h: Harness) -> None:
     h.engine.during_wait["seed"] = lambda w: os.mkfifo(w / "pipe")
-    with pytest.raises(RunnerError, match="FIFO at pipe"):
+    with pytest.raises(RunnerError, match="FIFO at 'pipe'"):
         prepare(h, seed="python3 seed.py")
     assert_nothing_left(h)
 
@@ -654,8 +658,9 @@ def test_deep_workspace_refused(h: Harness) -> None:
     workspace = h.workspace()
     make_chain(workspace / "ok", MAX_DEPTH - 1)
     (make_chain(workspace / "deep", MAX_DEPTH) / "x.txt").write_text("too deep\n")
-    with pytest.raises(RunnerError, match=f"more than {MAX_DEPTH} folders deep at deep/"):
+    with pytest.raises(RunnerError, match=f"more than {MAX_DEPTH} folders deep at 'deep/"):
         prepare(h)
+    assert h.service.status(RUN) == DISK_REASON  # measured before the copy, as over budget
     assert h.engine.names("create_network") == []
     assert_nothing_left(h)
 
@@ -714,13 +719,19 @@ def test_copy_counts_bytes_against_its_limit(tmp_path: Path) -> None:
     source.mkdir()
     (source / "a.bin").write_bytes(b"\x01" * 3000)
     (source / "b.bin").write_bytes(b"\x01" * 3000)
+    # Each entry is charged at least a 4 KiB block: the folder and two small files.
     written = _copy_tree(
-        tmp_path, PurePath("source"), tmp_path / "fits", limit=6000, chown=noop, what="it"
+        tmp_path, PurePath("source"), tmp_path / "fits", limit=3 * PAGE, chown=noop, what="it"
     )
-    assert written == 6000
+    assert written == 3 * PAGE
     with pytest.raises(_OverBudget):
         _copy_tree(
-            tmp_path, PurePath("source"), tmp_path / "over", limit=5999, chown=noop, what="it"
+            tmp_path,
+            PurePath("source"),
+            tmp_path / "over",
+            limit=3 * PAGE - 1,
+            chown=noop,
+            what="it",
         )
 
 
@@ -733,7 +744,7 @@ def test_copy_refuses_special_files_in_the_same_pass(tmp_path: Path) -> None:
     source.mkdir()
     (source / "serve.py").write_text("print('hi')\n")
     os.mkfifo(source / "pipe")
-    with pytest.raises(RunnerError, match="it contains a FIFO at pipe"):
+    with pytest.raises(RunnerError, match="it contains a FIFO at 'pipe'"):
         _copy_tree(tmp_path, PurePath("source"), tmp_path / "t", limit=10**9, chown=noop, what="it")
 
 
@@ -832,8 +843,9 @@ def test_engine_failure_becomes_runner_error_and_cleans_up(
     if method == "remove":
         h.service.stop(RUN)  # the container that would not go is swept up here
     assert_nothing_left(h)
-    # Nothing is remembered: the same run can be prepared again.
-    prepare(h)
+    # A failed prepare leaves nothing on record, so its id can be prepared again; a stopped
+    # run's id cannot.
+    prepare(h, run_id=OTHER if method == "remove" else RUN)
 
 
 def test_proxy_failure_becomes_runner_error_and_cleans_up(h: Harness) -> None:
@@ -1043,10 +1055,11 @@ def test_failed_container_removal_keeps_the_network_and_folder(h: Harness) -> No
     assert status is not None and "container is stuck" in status
     with pytest.raises(RunnerError, match="was stopped"):
         h.service.logs(RUN, "anna")
-    with pytest.raises(RunnerError, match="already exists"):
+    with pytest.raises(RunnerError, match="was stopped"):
         prepare(h)
 
     h.engine.failures.clear()
+    h.clock.advance(15)
     h.service.check_runs()  # the watch finishes the stop
     assert_nothing_left(h)
     assert h.service.status(RUN) is None
@@ -1080,29 +1093,264 @@ def test_failed_stop_of_an_unknown_run_is_retried_by_the_watch(h: Harness) -> No
     assert stray in h.engine.live
     assert NETWORK in h.engine.networks
     h.engine.failures.clear()
+    h.clock.advance(15)
     h.service.check_runs()
     assert h.engine.live == {}
     assert h.engine.networks == {}
 
 
 def test_stop_racing_prepare_waits_for_it(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without install or seed, prepare never lets go of the run's lock, so a stop that finds
+    # the run registered cannot finish until prepare has.
     h.workspace()
     register = h.service._register
+    started = threading.Event()
     racers: list[threading.Thread] = []
+
+    def stop() -> None:
+        started.set()
+        h.service.stop(RUN)
 
     def register_then_race(run: Any) -> None:
         register(run)
-        racer = threading.Thread(target=h.service.stop, args=(RUN,), daemon=True)
-        racer.start()
-        racer.join(timeout=0.2)
+        racer = threading.Thread(target=stop, daemon=True)
         racers.append(racer)
-        assert racer.is_alive(), "the stop closed the run before prepare had its lock"
+        racer.start()
+        assert started.wait(5)
+        racer.join(timeout=0.2)
+        assert racer.is_alive(), "the stop did not wait for prepare"
 
     monkeypatch.setattr(h.service, "_register", register_then_race)
-    prepare(h, install="pip install -r requirements.txt")
+    prepare(h)
     racers[0].join(timeout=5)
     assert not racers[0].is_alive()
     assert_nothing_left(h)  # the stop ran after prepare and removed what it made
+    with pytest.raises(RunnerError, match="was stopped"):
+        prepare(h)
+
+
+# ---------------------------------------------------------------- fix round 2
+
+
+def test_entries_are_yielded_as_they_are_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A folder of a million empty files must not become a million stat results in memory.
+    for index in range(50):
+        (tmp_path / f"e{index}").touch()
+    stats: list[object] = []
+    real_stat = os.stat
+
+    def counting(*args: Any, **kwargs: Any) -> os.stat_result:
+        stats.append(args)
+        return real_stat(*args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", counting)
+    folder = open_folder(tmp_path)
+    try:
+        entries = _entries(folder, "it")
+        next(entries)
+        assert len(stats) <= 3  # the walk's own look at the top, and the first entry
+        entries.close()
+    finally:
+        os.close(folder)
+
+
+def test_every_name_is_charged_at_least_a_block(tmp_path: Path) -> None:
+    top = tmp_path / "top"
+    top.mkdir()
+    for index in range(10):
+        (top / f"e{index}").touch()
+    (top / "folder").mkdir()
+    (top / "link").symlink_to("e0")
+    (top / "small.txt").write_bytes(b"x" * 5000)  # rounds up to two blocks
+    assert _disk_usage(top) >= (1 + 10 + 1 + 1 + 2) * PAGE
+
+
+def test_a_seed_that_plants_many_empty_files_is_stopped(tmp_path: Path) -> None:
+    h = make_harness(tmp_path, disk_budget=MIB)  # 256 blocks of 4 KiB
+
+    def seed(workspace: Path) -> None:
+        for index in range(300):
+            (workspace / f"e{index}").touch()
+
+    h.engine.during_wait["seed"] = seed
+    with pytest.raises(RunnerError, match=DISK_REASON):
+        prepare(h, seed="python3 seed.py")
+    assert h.service.status(RUN) == DISK_REASON
+    assert_nothing_left(h)
+
+
+def test_copy_charges_each_entry_a_block(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(100):
+        (source / f"e{index}").touch()
+    with pytest.raises(_OverBudget):
+        _copy_tree(
+            tmp_path, PurePath("source"), tmp_path / "over", limit=50 * PAGE, chown=noop, what="it"
+        )
+    written = _copy_tree(
+        tmp_path, PurePath("source"), tmp_path / "fits", limit=101 * PAGE, chown=noop, what="it"
+    )
+    assert written == 101 * PAGE
+
+    folders = tmp_path / "folders"
+    for index in range(100):
+        (folders / f"f{index}").mkdir(parents=True)
+    with pytest.raises(_OverBudget):
+        _copy_tree(
+            tmp_path,
+            PurePath("folders"),
+            tmp_path / "f-over",
+            limit=50 * PAGE,
+            chown=noop,
+            what="it",
+        )
+
+
+def test_stop_before_prepare_refuses_the_prepare(h: Harness) -> None:
+    h.workspace()
+    h.service.stop(RUN)
+    assert h.service.status(RUN) == NEVER_PREPARED
+    with pytest.raises(RunnerError, match=NEVER_PREPARED):
+        prepare(h)
+    assert h.engine.names("create_network") == []
+    assert not (h.runs / RUN).exists()
+
+
+def test_a_stopped_run_id_is_never_prepared_again(h: Harness) -> None:
+    prepare(h)
+    h.service.stop(RUN)
+    h.service.stop(RUN)  # stopping again does not turn it into one never prepared
+    assert h.service.status(RUN) is None
+    with pytest.raises(RunnerError, match="was stopped"):
+        prepare(h)
+    assert h.engine.names("create_network") == [NETWORK]
+
+
+def test_a_stop_during_a_step_keeps_the_id_from_a_second_prepare(h: Harness) -> None:
+    # The first prepare's cleanup sweeps by the run's label, so a second prepare of the same id
+    # must never get to make anything.
+    second: list[BaseException] = []
+
+    def again() -> None:
+        try:
+            prepare(h, install="pip install -r requirements.txt")
+        except RunnerError as error:
+            second.append(error)
+
+    def install(_: Path) -> None:
+        if not second:
+            in_another_thread(lambda: h.service.stop(RUN))
+            in_another_thread(again)
+
+    h.engine.during_wait["install"] = install
+    with pytest.raises(RunnerError, match="was stopped"):
+        prepare(h, install="pip install -r requirements.txt")
+    assert len(second) == 1
+    assert "was stopped" in str(second[0])
+    assert h.engine.names("create_network") == [NETWORK]
+    assert_nothing_left(h)
+
+
+def test_teardown_retries_back_off(h: Harness) -> None:
+    prepare(h)
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    h.engine.fail("remove", EngineError("container is stuck"), role="app")
+    with pytest.raises(RunnerError, match="container is stuck"):
+        h.service.stop(RUN)
+
+    def attempts() -> int:
+        return h.engine.calls.count(("remove", app_name("anna")))
+
+    seen = attempts()
+    for delay in (15, 30, 60, 120, 240, 480, 600, 600):
+        h.clock.advance(delay - 1)
+        h.service.check_runs()
+        assert attempts() == seen, f"retried before {delay} s"
+        h.clock.advance(1)
+        h.service.check_runs()
+        assert attempts() == seen + 1, f"not retried after {delay} s"
+        seen += 1
+    h.engine.failures.clear()
+    h.clock.advance(600)
+    h.service.check_runs()
+    assert_nothing_left(h)
+
+
+def test_measure_stops_at_the_depth_limit(tmp_path: Path) -> None:
+    top = tmp_path / "top"
+    make_chain(top, 5)
+    with pytest.raises(_TooDeep):
+        _disk_usage(top, 4)
+    assert _disk_usage(top, 5) >= 6 * PAGE
+
+
+def test_a_run_deeper_than_the_limit_is_stopped_as_over_budget(h: Harness) -> None:
+    prepare(h)
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    make_chain(h.runs / RUN / "copies" / "anna", MAX_DEPTH + 1)
+    h.service.check_runs()
+    assert h.service.status(RUN) == DISK_REASON
+    assert_nothing_left(h)
+
+
+@pytest.mark.parametrize("name", [b"pi\npe", b"pipe\xff"])
+def test_hostile_names_are_escaped_in_errors(h: Harness, name: bytes) -> None:
+    workspace = h.workspace()
+    try:
+        os.mkfifo(os.fsencode(workspace) + b"/" + name)
+    except OSError:
+        pytest.skip("this filesystem refuses the name")
+    with pytest.raises(RunnerError) as caught:
+        prepare(h)
+    message = str(caught.value)
+    assert "FIFO" in message
+    assert "\n" not in message
+    message.encode("utf-8")  # no lone surrogate from an undecodable byte
+
+
+def test_hostile_folder_names_are_escaped_and_capped(h: Harness) -> None:
+    workspace = h.workspace()
+    make_chain(workspace / ("x\n" + "y" * 200), MAX_DEPTH)
+    with pytest.raises(RunnerError) as caught:
+        prepare(h)
+    message = str(caught.value)
+    assert "\n" not in message
+    assert len(message) < 200
+
+
+def test_a_stray_whose_address_cannot_be_read_keeps_the_network(h: Harness) -> None:
+    h.engine.networks[NETWORK] = {"footfall.run": RUN}
+    plant_stray(h.engine, RUN, "stray")
+    h.engine.fail("address", EngineError("inspect failed"))
+    with pytest.raises(RunnerError, match="inspect failed"):
+        h.service.stop(RUN)
+    assert NETWORK in h.engine.networks
+    h.engine.failures.clear()
+    h.clock.advance(15)
+    h.service.check_runs()
+    assert h.engine.live == {}
+    assert h.engine.networks == {}
+
+
+def test_relaunch_revokes_an_address_kept_after_a_failed_revoke(h: Harness) -> None:
+    prepare(h)
+    name = f"footfall-{RUN}-browsers-browsers"
+    h.proxy.failures["allow"] = ConnectionRefusedError(61, "Connection refused")
+    h.proxy.failures["revoke"] = ConnectionRefusedError(61, "Connection refused")
+    with pytest.raises(RunnerError):
+        h.service.start_browsers(RUN, [])
+    old = h.engine.ips[name]
+    del h.proxy.failures["allow"]
+    with pytest.raises(RunnerError, match="Connection refused"):
+        h.service.start_browsers(RUN, [])  # cannot revoke the old address, so does not start
+    assert h.engine.names("create").count(name) == 1
+    del h.proxy.failures["revoke"]
+    h.service.start_browsers(RUN, [])
+    assert ("revoke", old) in h.proxy.calls
+    assert h.engine.names("create").count(name) == 2
 
 
 def test_default_disk_budget_is_8_gib() -> None:
@@ -1171,6 +1419,7 @@ def test_watch_survives_a_failed_stop(tmp_path: Path) -> None:
     assert status is not None and status.startswith(f"{DISK_REASON}; ")
     assert "network is busy" in status
     h.engine.failures.clear()
+    h.clock.advance(15)
     h.service.check_runs()  # tries the stop again
     assert h.service.status(RUN) == DISK_REASON
     assert_nothing_left(h)

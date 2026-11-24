@@ -32,7 +32,8 @@ import re
 import shutil
 import stat
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any, Final, Literal, Protocol
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 REGISTRIES: Final = ("pypi.org", "files.pythonhosted.org", "registry.npmjs.org")
 DISK_REASON: Final = "disk budget exceeded"
 MEASURE_REASON: Final = "disk usage could not be measured"
+NEVER_PREPARED: Final = "stopped before it was prepared"
 MAX_DEPTH: Final = 100  # folders below a workspace or prepared app
 BROWSERS_PORT: Final = 3000
 
@@ -70,6 +72,10 @@ _LOG_LINES: Final = 200
 _TAIL_CHARS: Final = 20_000
 _REDACTED: Final = "[redacted]"
 _BLOCK: Final = 512  # st_blocks counts 512-byte units
+_PAGE: Final = 4096  # the least any name is charged, so the budget also bounds entries
+_RUN_DEPTH: Final = MAX_DEPTH + 2  # below a run's folder: copies, the copy, then its tree
+_RETRY_FIRST: Final = 15.0
+_RETRY_MOST: Final = 600.0
 _CHUNK: Final = 1024 * 1024
 _FOLDER_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
 _READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -82,6 +88,10 @@ class RunnerError(Exception):
     def __init__(self, message: str, log_tail: str = "") -> None:
         super().__init__(message)
         self.log_tail = log_tail
+
+
+class _TooDeep(Exception):
+    """A tree is deeper than the measure goes, which counts as over budget."""
 
 
 class _OverBudget(Exception):
@@ -121,6 +131,8 @@ class _Run:
     containers: dict[str, str | None] = field(default_factory=dict)  # name or id -> address
     copies: set[str] = field(default_factory=set)
     problems: list[str] = field(default_factory=list)  # why the last stop did not finish
+    retry_delay: float = 0.0
+    retry_at: float = 0.0
 
     @property
     def network(self) -> str:
@@ -224,7 +236,7 @@ def _open_folder(root: Path, relative: PurePath) -> int:
     try:
         for name in relative.parts:
             if name in (".", ".."):
-                raise RunnerError(f"not a plain path: {relative}")
+                raise RunnerError(f"not a plain path: {_show(str(relative))}")
             inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
             os.close(folder)
             folder = inner
@@ -234,7 +246,7 @@ def _open_folder(root: Path, relative: PurePath) -> int:
     return folder
 
 
-def _entries(folder: int, what: str) -> Iterator[tuple[PurePath, int, str, os.stat_result]]:
+def _entries(folder: int, what: str) -> Generator[tuple[PurePath, int, str, os.stat_result]]:
     """Yield (where, its descriptor, name, lstat) for everything below an open folder.
 
     The walk goes by descriptor, top down, and never into a link. It refuses anything but
@@ -247,25 +259,27 @@ def _entries(folder: int, what: str) -> Iterator[tuple[PurePath, int, str, os.st
     ):
         here = PurePath(path)
         unvisited.discard(here)
-        found: list[tuple[str, os.stat_result]] = []
+        folders: list[str] = []
         for name in (*dirs, *files):
             info = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
             where = here / name
             if stat.S_ISDIR(info.st_mode):
                 if len(here.parts) >= MAX_DEPTH:
-                    raise RunnerError(f"{what} is more than {MAX_DEPTH} folders deep at {where}")
+                    raise RunnerError(
+                        f"{what} is more than {MAX_DEPTH} folders deep at {_show(str(where))}"
+                    )
                 unvisited.add(where)
+                folders.append(name)
             elif not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                 raise RunnerError(
-                    f"{what} contains {_kind(info.st_mode)} at {where}; "
+                    f"{what} contains {_kind(info.st_mode)} at {_show(str(where))}; "
                     "only files, folders and symbolic links are copied"
                 )
-            found.append((name, info))
-        dirs[:] = [name for name, info in found if stat.S_ISDIR(info.st_mode)]
-        for name, info in found:
-            yield here, dirfd, name, info
+            yield here, dirfd, name, info  # one at a time: a folder may hold millions
+        dirs[:] = folders  # walk on into folders only, never into a link
     if unvisited:
-        raise RunnerError(f"{what} changed while it was read, at {min(unvisited)}")
+        first = str(min(unvisited))
+        raise RunnerError(f"{what} changed while it was read, at {_show(first)}")
 
 
 def _copy_file(folder: int, name: str, target: Path, allowed: int) -> int:
@@ -280,7 +294,9 @@ def _copy_file(folder: int, name: str, target: Path, allowed: int) -> int:
     try:
         info = os.fstat(reader)
         if not stat.S_ISREG(info.st_mode):
-            raise RunnerError(f"{name} changed into {_kind(info.st_mode)} while it was copied")
+            raise RunnerError(
+                f"{_show(name)} changed into {_kind(info.st_mode)} while it was copied"
+            )
         writer = os.open(target, _WRITE_FLAGS, 0o600)
         written = 0
         try:
@@ -311,25 +327,33 @@ def _copy_tree(
 ) -> int:
     """Copy the folder `relative` below `root` to a new `target` in one pass; return the bytes.
 
-    Links stay links. Every entry made is passed to `chown`. Raises _OverBudget once the files
-    copied come to more than `limit` bytes.
+    Links stay links. Every entry made is passed to `chown`. Each entry is charged as the
+    measure charges it, at least one 4 KiB block, and _OverBudget is raised once the charges
+    come to more than `limit`.
     """
     source = _open_folder(root, relative)
     try:
         folders = [(target, os.fstat(source).st_mode)]
         target.mkdir(mode=0o700)
         chown(target)
-        written = 0
+        written = _PAGE
         for here, dirfd, name, info in _entries(source, what):
+            if written > limit:
+                raise _OverBudget
             destination = target / here / name
             if stat.S_ISDIR(info.st_mode):
                 destination.mkdir(mode=0o700)
                 folders.append((destination, info.st_mode))
+                written += _PAGE
             elif stat.S_ISLNK(info.st_mode):
-                destination.symlink_to(os.readlink(name, dir_fd=dirfd))
+                link = os.readlink(name, dir_fd=dirfd)
+                destination.symlink_to(link)
+                written += _charge(len(os.fsencode(link)))
             else:
-                written += _copy_file(dirfd, name, destination, limit - written)
+                written += _charge(_copy_file(dirfd, name, destination, limit - written))
             chown(destination)
+        if written > limit:
+            raise _OverBudget
         for path, mode in reversed(folders):  # last, so that no folder is closed to its contents
             path.chmod(stat.S_IMODE(mode) & 0o777)
     finally:
@@ -347,22 +371,32 @@ def _scan_tree(root: Path, relative: PurePath, what: str) -> None:
         os.close(source)
 
 
+def _charge(size: int) -> int:
+    """A size rounded up to whole 4 KiB blocks, and never less than one."""
+    return max(_PAGE, -(-size // _PAGE) * _PAGE)
+
+
 def _size(info: os.stat_result) -> int:
-    return max(info.st_size, info.st_blocks * _BLOCK)
+    return max(_charge(info.st_size), info.st_blocks * _BLOCK)
 
 
-def _disk_usage(top: Path) -> int:
+def _disk_usage(top: Path, max_depth: int = MAX_DEPTH) -> int:
     """Bytes that copying `top` would write, never following a link.
 
-    Every name counts at the larger of its size and its allocated blocks, so a sparse file
-    counts in full and each hard link counts again, as a copy writes them. Entries removed
-    during the walk are skipped and a missing `top` measures 0. Any other failure is raised.
+    Every name counts at the larger of its size, rounded up to whole 4 KiB blocks, and its
+    allocated blocks, and at least one block. So a sparse file counts in full, each hard link
+    counts again, as a copy writes them, and the budget bounds how many entries a run holds.
+    Entries removed during the walk are skipped and a missing `top` measures 0. A folder more
+    than `max_depth` below `top` raises _TooDeep, so the walk never holds more descriptors than
+    that. Any other failure is raised.
     """
+    base = os.fspath(top).count(os.sep)
     try:
         total = _size(top.lstat())
-        for _path, dirs, files, dirfd in os.fwalk(
+        for path, dirs, files, dirfd in os.fwalk(
             top, follow_symlinks=False, onerror=_reraise_unless_gone
         ):
+            depth = path.count(os.sep) - base
             folders: list[str] = []
             for name in (*dirs, *files):
                 try:
@@ -371,6 +405,9 @@ def _disk_usage(top: Path) -> int:
                     continue  # removed while being measured
                 total += _size(info)
                 if stat.S_ISDIR(info.st_mode):
+                    if depth >= max_depth:
+                        where = str(PurePath(path, name).relative_to(top))
+                        raise _TooDeep(f"more than {max_depth} folders deep at {_show(where)}")
                     folders.append(name)
             dirs[:] = folders  # never open a link, even to compare it
     except FileNotFoundError:
@@ -410,6 +447,7 @@ class RunnerService:
         disk_budget: int = 8 * 1024**3,
         disk_interval: float = 15.0,
         chown: Callable[[Path], None] = _chown_to_app,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if runtime not in _SPEC_RUNTIMES:
             raise ValueError(f"runtime must be runsc or runc, not {runtime!r}")
@@ -440,9 +478,11 @@ class RunnerService:
         self._disk_budget = disk_budget
         self._disk_interval = disk_interval
         self._chown = chown
-        self._lock = threading.Lock()  # guards _runs and _reasons; never held while taking a run's
+        self._clock = clock
+        self._lock = threading.Lock()  # guards the three below; never held while taking a run's
         self._runs: dict[str, _Run] = {}
         self._reasons: dict[str, str] = {}
+        self._stopped: set[str] = set()  # every run id ever stopped, so none is used twice
 
     # ------------------------------------------------------------ operations
 
@@ -564,13 +604,18 @@ class RunnerService:
         """Remove everything the run has, and its folder. Stopping a run twice is harmless.
 
         A run the runner has no record of, perhaps from before a restart, is found by its
-        label and its names. RunnerError lists anything that could not be removed; the run
-        then keeps its network and folder, and the watch tries again.
+        label and its names, and is recorded as stopped before it was prepared. A run id that
+        has been stopped is never prepared again. RunnerError lists anything that could not be
+        removed; the run then keeps its network and folder, and the watch tries again.
         """
         with _as_runner_error():
             _check_run_id(run_id)
             with self._lock:
                 run = self._runs.get(run_id)
+                if run is None and run_id not in self._stopped:
+                    # A stop can overtake its own prepare; recording it makes that prepare refuse.
+                    self._reasons.setdefault(run_id, NEVER_PREPARED)
+                self._stopped.add(run_id)
             if run is None:
                 run = _Run(run_id, "", self._runs_root / run_id, ())
             with run.lock:
@@ -593,23 +638,25 @@ class RunnerService:
 
     def check_runs(self) -> None:
         """Stop every live run over its disk budget or that cannot be measured, and try again
-        to finish every stop that could not."""
+        to finish every stop that could not, waiting longer after each failure."""
         with self._lock:
             runs = list(self._runs.values())
         for run in runs:
             reason: str | None = None
             if run.closed:
-                with run.lock:
-                    if run.closed and run.problems:
-                        self._teardown_locked(run)
+                if self._clock() >= run.retry_at:
+                    with run.lock:
+                        if run.closed and run.problems and self._clock() >= run.retry_at:
+                            self._teardown_locked(run)
                 continue
             try:
-                over = _disk_usage(run.directory) > self._disk_budget
+                if _disk_usage(run.directory, _RUN_DEPTH) > self._disk_budget:
+                    reason = DISK_REASON
+            except _TooDeep:
+                reason = DISK_REASON
             except Exception:
                 logger.exception("could not measure the disk use of run %s", run.run_id)
                 reason = MEASURE_REASON
-            else:
-                reason = DISK_REASON if over else None
             if reason is not None:
                 with run.lock:
                     if not run.closed:
@@ -711,8 +758,11 @@ class RunnerService:
         """Return the run's disk use, after stopping the run and raising if that use, plus a
         copy of `incoming`, is over budget or cannot be measured."""
         try:
-            usage = _disk_usage(run.directory)
+            usage = _disk_usage(run.directory, _RUN_DEPTH)
             extra = 0 if incoming is None else _disk_usage(incoming)
+        except _TooDeep as deep:
+            self._stop_for_locked(run, DISK_REASON)
+            raise RunnerError(f"{DISK_REASON}: {deep}") from None
         except (OSError, RecursionError) as error:
             self._stop_for_locked(run, MEASURE_REASON)
             raise RunnerError(MEASURE_REASON) from error
@@ -770,6 +820,11 @@ class RunnerService:
 
     def _launch_locked(self, run: _Run, name: str, config: dict[str, Any], hosts: list[str]) -> str:
         """Create and start a container, then allow it `hosts`. Returns its address."""
+        earlier = run.containers.get(name)
+        if earlier is not None:
+            # An earlier container of this name whose allow list could not be revoked: revoke
+            # it now, or keep it on record and start nothing.
+            self._proxy.revoke(earlier)
         run.containers[name] = None  # recorded first, so that cleanup finds a half-made one
         self._engine.create(name, config)
         self._engine.start(name)
@@ -833,17 +888,21 @@ class RunnerService:
             raise RunnerError(f"workspace must be a folder inside {self._workspaces}")
         return resolved
 
-    def _refuse_stopped(self, run_id: str) -> None:
-        with self._lock:
-            reason = self._reasons.get(run_id)
+    def _refuse_stopped_locked(self, run_id: str) -> None:
+        """Refuse a run id that has been stopped; the caller holds the service's lock."""
+        reason = self._reasons.get(run_id)
         if reason is not None:
             raise RunnerError(f"run {run_id} was stopped: {reason}")
+        if run_id in self._stopped:
+            raise RunnerError(f"run {run_id} was stopped, and a run id is never used again")
+
+    def _refuse_stopped(self, run_id: str) -> None:
+        with self._lock:
+            self._refuse_stopped_locked(run_id)
 
     def _register(self, run: _Run) -> None:
         with self._lock:
-            reason = self._reasons.get(run.run_id)
-            if reason is not None:
-                raise RunnerError(f"run {run.run_id} was stopped: {reason}")
+            self._refuse_stopped_locked(run.run_id)
             if run.run_id in self._runs:
                 raise RunnerError(f"run {run.run_id} already exists")
             self._runs[run.run_id] = run
@@ -872,6 +931,7 @@ class RunnerService:
     def _stop_for_locked(self, run: _Run, reason: str) -> None:
         with self._lock:
             self._reasons.setdefault(run.run_id, reason)
+            self._stopped.add(run.run_id)
         self._teardown_locked(run)
 
     def _teardown_locked(self, run: _Run) -> list[str]:
@@ -900,6 +960,9 @@ class RunnerService:
         with self._lock:
             run.problems = problems
             if problems:
+                # Wait longer before each retry: one that cannot succeed must not hog the runner.
+                run.retry_delay = min(_RETRY_MOST, max(_RETRY_FIRST, run.retry_delay * 2))
+                run.retry_at = self._clock() + run.retry_delay
                 self._runs.setdefault(run.run_id, run)
             elif self._runs.get(run.run_id) is run:
                 del self._runs[run.run_id]
@@ -916,7 +979,10 @@ class RunnerService:
         for container in strays:
             try:
                 run.containers[container] = self._engine.address(container, run.network)
-            except (EngineError, OSError):
+            except (EngineError, OSError) as error:
+                # Its allow list cannot be revoked without its address, so the network stays.
+                logger.exception("could not read the address of %s", container)
+                problems.append(f"could not read the address of {container}: {error}")
                 run.containers[container] = None
             self._remove_container_locked(run, container, problems)
 

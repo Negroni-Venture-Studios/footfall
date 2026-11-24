@@ -174,6 +174,19 @@ class FakeEngine:
         return [call[1] for call in self.calls if call[0] == method]
 
 
+class FakeClock:
+    """A monotonic clock that moves only when a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class FakeProxy:
     """The egress proxy's control interface, holding allow lists by address."""
 
@@ -208,6 +221,7 @@ class Harness:
     workspaces: Path
     runs: Path
     chowned: list[Path] = field(default_factory=list)
+    clock: FakeClock = field(default_factory=FakeClock)
 
     def workspace(self, name: str = "app", files: Mapping[str, str] | None = None) -> Path:
         """Make a workspace folder holding `files` (relative path -> text)."""
@@ -228,6 +242,8 @@ def make_harness(tmp_path: Path, **settings: Any) -> Harness:
     runs = (tmp_path / "runs").resolve()
     chowned: list[Path] = []
     chown = settings.pop("chown", chowned.append)
+    clock = FakeClock()
+    settings.setdefault("clock", clock)
     service = RunnerService(
         engine,
         proxy,
@@ -240,4 +256,4 @@ def make_harness(tmp_path: Path, **settings: Any) -> Harness:
         chown=chown,
         **settings,
     )
-    return Harness(engine, proxy, service, workspaces, runs, chowned)
+    return Harness(engine, proxy, service, workspaces, runs, chowned, clock)
