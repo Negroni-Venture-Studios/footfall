@@ -51,6 +51,10 @@ _HARDENING: Final[Mapping[str, Any]] = {
 }
 
 _TMPFS_OPTIONS: Final = "rw,nosuid,nodev,size=268435456"
+# Chromium's renderers share memory through /dev/shm, whose Docker default of 64 MiB is too
+# small for a dozen pages. Docker's own setting sizes the mount it already makes, and the
+# pages count against the container's memory limit as any other memory does.
+_BROWSERS_SHM: Final = 512 * _MIB
 _BROWSER_HOME: Final = "/home/pwuser"
 _WORKSPACE: Final = "/workspace"
 
@@ -133,6 +137,9 @@ def container_config(
 
     host_config: dict[str, Any] = {
         "Runtime": runtime,
+        # Docker's init is the container's first process: it reaps orphaned processes, such
+        # as a browser's, and passes signals on.
+        "Init": True,
         "CapDrop": list(_HARDENING["CapDrop"]),
         "SecurityOpt": list(_HARDENING["SecurityOpt"]),
         "ReadonlyRootfs": _HARDENING["ReadonlyRootfs"],
@@ -148,6 +155,8 @@ def container_config(
         "PidsLimit": limits.pids,
         "NetworkMode": network,
     }
+    if role == "browsers":
+        host_config["ShmSize"] = _BROWSERS_SHM
     if workspace is not None:
         host_config["Binds"] = [f"{workspace}:{_WORKSPACE}:rw"]
 

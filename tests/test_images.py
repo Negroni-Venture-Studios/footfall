@@ -1,5 +1,6 @@
 """The container images: what the Dockerfiles say, since CI builds them and tests cannot."""
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -70,3 +71,16 @@ def test_browsers_playwright_version_matches_lock() -> None:
     assert f"npm install --global playwright@{version}" in text
     assert re.search(r"^USER pwuser$", text, re.MULTILINE)
     assert '"playwright", "run-server", "--port", "3000", "--host", "0.0.0.0"' in text
+
+
+def test_browsers_image_has_the_gate_and_the_ech_policy() -> None:
+    text = (ROOT / "images" / "browsers" / "Dockerfile").read_text()
+    assert "COPY images/browsers/gate.js /opt/footfall/gate.js" in text
+    policy = "images/browsers/chromium-policy.json"
+    for folder in (
+        "/etc/chromium/policies/managed",
+        "/etc/opt/chrome/policies/managed",
+        "/etc/opt/chrome_for_testing/policies/managed",
+    ):
+        assert f"COPY {policy} {folder}/footfall.json" in text
+    assert json.loads((ROOT / policy).read_text()) == {"EncryptedClientHelloEnabled": False}

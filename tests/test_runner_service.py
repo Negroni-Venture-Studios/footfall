@@ -290,12 +290,32 @@ def test_bad_start_command_refused(h: Harness, start: str) -> None:
 
 
 def browsers_path(config: Mapping[str, Any]) -> str:
-    """The secret path a browser container's run-server was started with."""
+    """The secret path a browser container was started with: the gate listens on port 3000
+    and passes the path's upgrades alone to run-server, which also checks it, on loopback."""
     command: list[str] = config["Cmd"]
-    assert command[:6] == ["playwright", "run-server", "--port", "3000", "--host", "0.0.0.0"]  # noqa: S104
-    assert command[6] == "--path"
-    assert len(command) == 8
-    return command[7]
+    path = command[9]
+    assert command == [
+        "node",
+        "/opt/footfall/gate.js",
+        "--host",
+        "0.0.0.0",  # noqa: S104
+        "--port",
+        "3000",
+        "--upstream",
+        "3001",
+        "--path",
+        path,
+        "--",
+        "playwright",
+        "run-server",
+        "--port",
+        "3001",
+        "--host",
+        "127.0.0.1",
+        "--path",
+        path,
+    ]
+    return path
 
 
 def test_start_browsers_runs_run_server_with_the_assets_hosts(h: Harness) -> None:

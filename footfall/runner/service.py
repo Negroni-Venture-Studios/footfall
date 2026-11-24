@@ -54,20 +54,41 @@ NEVER_PREPARED: Final = "stopped before it was prepared"
 MAX_DEPTH: Final = 100  # folders below a workspace or prepared app
 BROWSERS_PORT: Final = 3000
 
-# The browsers listen on every interface of their own container, which is on the run's internal
-# network alone. The app containers share that network, and run-server lets any client that
-# reaches it launch a browser, so it answers only on a path made fresh for each run, which only
-# the orchestrator is told. The image's own command is a default this always replaces.
-_BROWSERS_COMMAND: Final = (
-    "playwright",
-    "run-server",
-    "--port",
-    str(BROWSERS_PORT),
-    "--host",
-    "0.0.0.0",  # noqa: S104
-    "--path",
-)
+# The browser container's port is on the run's internal network, which the app containers
+# share. Playwright's run-server launches a browser for any client that reaches it, and gives
+# its path to anyone who asks `GET /json`, so it listens on loopback alone. In front of it,
+# the image's gate (images/browsers/gate.js) listens on every interface and passes on only a
+# WebSocket upgrade for a path made fresh for each run, which only the orchestrator is told.
+# run-server checks the path too. The image's own command is a default this always replaces.
+_GATE: Final = "/opt/footfall/gate.js"
+_RUN_SERVER_PORT: Final = 3001
 _BROWSERS_PATH_BYTES: Final = 24
+
+
+def _browsers_command(path: str) -> tuple[str, ...]:
+    return (
+        "node",
+        _GATE,
+        "--host",
+        "0.0.0.0",  # noqa: S104
+        "--port",
+        str(BROWSERS_PORT),
+        "--upstream",
+        str(_RUN_SERVER_PORT),
+        "--path",
+        path,
+        "--",
+        "playwright",
+        "run-server",
+        "--port",
+        str(_RUN_SERVER_PORT),
+        "--host",
+        "127.0.0.1",
+        "--path",
+        path,
+    )
+
+
 _RUN_ID: Final = re.compile(r"r_[a-z2-7]{26}")
 _COPY: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _PREPARE: Final = "prepare"  # the copy name of the install and seed containers
@@ -582,7 +603,7 @@ class RunnerService:
                     run_id=run_id,
                     copy="browsers",
                     image=self._browsers_image,
-                    command=(*_BROWSERS_COMMAND, path),
+                    command=_browsers_command(path),
                     workspace=None,
                     network=run.network,
                     proxy_url=run.proxy_url,

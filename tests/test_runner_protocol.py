@@ -100,6 +100,7 @@ async def test_round_trip_prepare(live: Live) -> None:
     address = h.engine.ips[f"footfall-{RUN}-browsers-browsers"]
     assert endpoint == f"ws://{address}:3000{browsers['Cmd'][-1]}"
     assert len(browsers["Cmd"][-1]) == 33
+    assert browsers["Cmd"][:2] == ["node", "/opt/footfall/gate.js"]
     h.engine.output["app"] = "listening on 8000\n"
     assert await client.logs(RUN, "anna") == "listening on 8000\n"
     assert await client.status(RUN) is None

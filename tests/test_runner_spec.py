@@ -250,3 +250,19 @@ def test_relative_workspace_rejected() -> None:
 def test_bad_network_rejected(bad: str) -> None:
     with pytest.raises(ValueError, match="network"):
         make(network=bad)
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_every_container_has_an_init(role: Role) -> None:
+    # A process of the container's own reaps its zombies and passes signals on.
+    assert host(role)["Init"] is True
+
+
+def test_browsers_get_shared_memory_for_chromium() -> None:
+    assert host("browsers")["ShmSize"] == 512 * 1024**2
+    assert host("browsers")["ShmSize"] < LIMITS["browsers"].memory_bytes
+
+
+@pytest.mark.parametrize("role", APP_ROLES)
+def test_app_roles_keep_dockers_shared_memory(role: Role) -> None:
+    assert "ShmSize" not in host(role)
