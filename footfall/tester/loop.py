@@ -43,7 +43,13 @@ import anthropic
 
 from footfall.manifest import Brief
 from footfall.personas import Device, Persona
-from footfall.tester.model import CLIENT_TIMEOUT, FakeModel, ModelClient, ModelTurn
+from footfall.tester.model import (
+    CLIENT_RETRIES,
+    CLIENT_TIMEOUT,
+    FakeModel,
+    ModelClient,
+    ModelTurn,
+)
 from footfall.tester.pricing import PricingError, Usage, cost_usd, dearest_cost_usd
 from footfall.tester.prompt import system_prompt
 from footfall.tester.report import (
@@ -107,8 +113,9 @@ TOO_MANY: Final = "not run: more than one tool call in one turn"
 CUT_SHORT: Final = "not run: the call was cut off at the token limit"
 # The least time any model call is given, even once the time limit has passed. A grace
 # turn is when the tester writes its report, the heaviest turn of the run, so it gets as
-# long as one request may take. Read when used, so that a test can shorten it.
-TURN_FLOOR = CLIENT_TIMEOUT
+# long as the client may spend on it, every retry included. Read when used, so that a
+# test can shorten it.
+TURN_FLOOR = CLIENT_TIMEOUT * (CLIENT_RETRIES + 1)
 CUT_OFF_CALL: Final = "a model call it cut off is not counted, so the cost may read low"
 LOG = logging.getLogger(__name__)
 

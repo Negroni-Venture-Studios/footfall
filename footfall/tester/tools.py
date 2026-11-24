@@ -585,7 +585,8 @@ class Executor:
             visible = map_report_text(data, strip_invisible) if self._secrets else data
             parse_finish(visible, source="", device="", screenshots=self.screenshot_ids)
             return _Action(finish=dict(data))
-        raise ToolError(f"there is no tool called {quote(str(name), 40)}")
+        # The name is the model's own text, so none of it is echoed into the trace.
+        raise ToolError("there is no tool by that name")
 
     async def _tap(self, data: Mapping[str, Any]) -> _Action:
         names = ("element", "x", "y")

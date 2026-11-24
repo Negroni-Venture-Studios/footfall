@@ -32,6 +32,7 @@ from footfall.tester.loop import (
     run_persona,
 )
 from footfall.tester.model import (
+    CLIENT_RETRIES,
     CLIENT_TIMEOUT,
     NO_USAGE,
     AnthropicModel,
@@ -970,8 +971,9 @@ async def test_a_hung_model_call_ends_at_the_time_limit(
 
 
 def test_a_grace_turn_has_as_long_as_one_request() -> None:
-    # The grace turn that writes the report is the heaviest of the run.
-    assert loop.TURN_FLOOR >= CLIENT_TIMEOUT
+    # The grace turn that writes the report is the heaviest of the run, and the client may
+    # retry it, so it gets as long as every attempt the client may make.
+    assert loop.TURN_FLOOR >= CLIENT_TIMEOUT * (CLIENT_RETRIES + 1)
 
 
 async def test_a_timeout_raised_by_the_model_itself_fails_the_persona(world: MakeWorld) -> None:

@@ -795,7 +795,7 @@ async def test_an_invalid_finish_is_an_error(
 @pytest.mark.parametrize(
     ("name", "tool_input", "message"),
     [
-        ("teleport", {}, "no tool called"),
+        ("teleport", {}, "no tool by that name"),
         ("look", {"x": 1}, "unexpected field `x`"),
         ("go", {}, "missing field `to`"),
         ("type", {"text": 5}, "string"),
