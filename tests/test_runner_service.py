@@ -1,10 +1,12 @@
 """The runner's logic, against a fake Docker engine and a fake proxy, with real folders."""
 
+import inspect
 import os
+import shutil
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 import pytest
@@ -12,11 +14,15 @@ import pytest
 from footfall.runner.engine import EngineError
 from footfall.runner.service import (
     DISK_REASON,
+    MAX_DEPTH,
+    MEASURE_REASON,
     REGISTRIES,
     RunnerError,
     RunnerService,
     _copy_file,
     _copy_tree,
+    _disk_usage,
+    _OverBudget,
 )
 from footfall.runner.spec import container_config
 from tests.runner_fakes import (
@@ -626,8 +632,8 @@ def test_fifo_in_workspace_refused(h: Harness) -> None:
     os.mkfifo(workspace / "deep" / "pipe")
     with pytest.raises(RunnerError, match=r"FIFO at deep/pipe"):
         prepare(h)
-    assert h.engine.calls == []
-    assert not h.runs.exists()
+    assert h.engine.names("create_network") == []
+    assert_nothing_left(h)
 
 
 def test_fifo_left_by_seed_refused(h: Harness) -> None:
@@ -637,37 +643,168 @@ def test_fifo_left_by_seed_refused(h: Harness) -> None:
     assert_nothing_left(h)
 
 
-def test_copy_refuses_a_fifo_the_scan_did_not_see(tmp_path: Path) -> None:
-    # The scan before a copy catches a FIFO; this is the second wall, for one made after it.
+def make_chain(top: Path, depth: int) -> Path:
+    """Make `depth` nested folders below `top` and return the deepest."""
+    folder = top.joinpath(*["d"] * depth)
+    folder.mkdir(parents=True)
+    return folder
+
+
+def test_deep_workspace_refused(h: Harness) -> None:
+    workspace = h.workspace()
+    make_chain(workspace / "ok", MAX_DEPTH - 1)
+    (make_chain(workspace / "deep", MAX_DEPTH) / "x.txt").write_text("too deep\n")
+    with pytest.raises(RunnerError, match=f"more than {MAX_DEPTH} folders deep at deep/"):
+        prepare(h)
+    assert h.engine.names("create_network") == []
+    assert_nothing_left(h)
+
+
+def test_workspace_just_within_the_depth_limit_is_copied(h: Harness) -> None:
+    workspace = h.workspace()
+    (make_chain(workspace, MAX_DEPTH - 1) / "leaf.txt").write_text("deep enough\n")
+    prepare(h)
+    copied = (h.runs / RUN / "prepared").joinpath(*["d"] * (MAX_DEPTH - 1), "leaf.txt")
+    assert copied.read_text() == "deep enough\n"
+
+
+def test_deep_tree_left_by_seed_refused(h: Harness) -> None:
+    h.engine.during_wait["seed"] = lambda w: make_chain(w, MAX_DEPTH + 1)
+    with pytest.raises(RunnerError, match=f"the prepared app is more than {MAX_DEPTH} folders"):
+        prepare(h, seed="python3 seed.py")
+    assert_nothing_left(h)
+
+
+def open_folder(path: Path) -> int:
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+
+
+def test_copy_file_refuses_anything_but_a_regular_file(tmp_path: Path) -> None:
+    os.mkfifo(tmp_path / "pipe")
+    (tmp_path / "target").write_text("followed\n")
+    (tmp_path / "link").symlink_to(tmp_path / "target")
+    folder = open_folder(tmp_path)
+    try:
+        with pytest.raises(RunnerError, match="FIFO"):
+            _copy_file(folder, "pipe", tmp_path / "out-pipe", 10**9)  # never blocks
+        with pytest.raises(OSError):
+            _copy_file(folder, "link", tmp_path / "out-link", 10**9)
+        assert not (tmp_path / "out-pipe").exists()
+        assert not (tmp_path / "out-link").exists()
+
+        source = tmp_path / "tool"
+        source.write_bytes(b"\x00\x01" * 700_000)
+        source.chmod(0o4755)
+        assert _copy_file(folder, "tool", tmp_path / "copied", 10**9) == 1_400_000
+        copied = tmp_path / "copied"
+        assert copied.read_bytes() == source.read_bytes()
+        assert copied.stat().st_mode & 0o7777 == 0o755  # no set-user-id bit
+        assert copied.stat().st_mtime_ns == source.stat().st_mtime_ns
+        with pytest.raises(OSError):
+            _copy_file(folder, "tool", tmp_path / "copied", 10**9)  # never overwrites
+
+        with pytest.raises(_OverBudget):
+            _copy_file(folder, "tool", tmp_path / "too-big", 1_399_999)
+    finally:
+        os.close(folder)
+
+
+def test_copy_counts_bytes_against_its_limit(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.bin").write_bytes(b"\x01" * 3000)
+    (source / "b.bin").write_bytes(b"\x01" * 3000)
+    written = _copy_tree(
+        tmp_path, PurePath("source"), tmp_path / "fits", limit=6000, chown=noop, what="it"
+    )
+    assert written == 6000
+    with pytest.raises(_OverBudget):
+        _copy_tree(
+            tmp_path, PurePath("source"), tmp_path / "over", limit=5999, chown=noop, what="it"
+        )
+
+
+def noop(path: Path) -> None:
+    pass
+
+
+def test_copy_refuses_special_files_in_the_same_pass(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "serve.py").write_text("print('hi')\n")
     os.mkfifo(source / "pipe")
-    with pytest.raises(RunnerError, match=r"could not copy source: .*FIFO"):
-        _copy_tree(source, tmp_path / "target")
+    with pytest.raises(RunnerError, match="it contains a FIFO at pipe"):
+        _copy_tree(tmp_path, PurePath("source"), tmp_path / "t", limit=10**9, chown=noop, what="it")
 
 
-def test_copy_function_refuses_anything_but_a_regular_file(tmp_path: Path) -> None:
-    pipe = tmp_path / "pipe"
-    os.mkfifo(pipe)
-    with pytest.raises(OSError, match="FIFO"):
-        _copy_file(str(pipe), str(tmp_path / "out-pipe"))  # returns at once, never blocks
-    link = tmp_path / "link"
-    link.symlink_to(tmp_path / "target")
-    (tmp_path / "target").write_text("followed\n")
-    with pytest.raises(OSError):
-        _copy_file(str(link), str(tmp_path / "out-link"))
-    assert not (tmp_path / "out-pipe").exists()
-    assert not (tmp_path / "out-link").exists()
+def test_workspace_swapped_for_a_link_after_the_check_is_not_followed(
+    h: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("a host secret\n")
+    workspace = h.workspace()
+    checked = h.service._workspace
 
-    source = tmp_path / "tool"
-    source.write_bytes(b"\x00\x01" * 700_000)
-    source.chmod(0o4755)
-    _copy_file(str(source), str(tmp_path / "copied"))
-    copied = tmp_path / "copied"
-    assert copied.read_bytes() == source.read_bytes()
-    assert copied.stat().st_mode & 0o7777 == 0o755  # no set-user-id bit
-    assert copied.stat().st_mtime_ns == source.stat().st_mtime_ns
+    def check_then_swap(path: Path) -> Path:
+        resolved = checked(path)
+        workspace.rename(h.workspaces / "moved")
+        workspace.symlink_to(outside)
+        return resolved
+
+    monkeypatch.setattr(h.service, "_workspace", check_then_swap)
+    with pytest.raises(RunnerError):
+        prepare(h, workspace=workspace)
+    assert not any(path.name == "secret.txt" for path in h.chowned)
+    assert_nothing_left(h)
+
+
+def test_folder_swapped_for_a_link_during_the_copy_is_not_followed(tmp_path: Path) -> None:
+    h: Harness  # made below, once the hook that uses it exists
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("a host secret\n")
+    seen: list[Path] = []
+
+    def chown_then_swap(path: Path) -> None:
+        seen.append(path)
+        if path.parts[-2:] == ("a", "b"):  # its target is made; now swap the source
+            source = h.workspaces / "app" / "a" / "b"
+            source.rename(source.with_name("b-moved"))
+            source.symlink_to(outside)
+
+    h = make_harness(tmp_path / "h", chown=chown_then_swap)
+    workspace = h.workspace()
+    (workspace / "a" / "b").mkdir(parents=True)
+    (workspace / "a" / "b" / "data.txt").write_text("app data\n")
+    with pytest.raises(RunnerError, match="changed while it was read"):
+        prepare(h)
+    assert not any(path.name == "secret.txt" for path in seen)
+    assert_nothing_left(h)
+
+
+def test_no_container_mounts_a_tree_while_it_is_copied(tmp_path: Path) -> None:
+    h: Harness  # made below, once the hook that uses it exists
+    # The invariant the copy relies on: install and seed are removed before prepared is copied,
+    # app containers mount only their own copies, and no container ever mounts the workspace.
+    checked: list[Path] = []
+
+    def chown_and_check(path: Path) -> None:
+        # The runner calls chown only while it copies, once for each entry it makes.
+        checked.append(path)
+        for name in h.engine.live:
+            for bind in h.engine.configs[name]["HostConfig"].get("Binds", []):
+                source = Path(bind.rsplit(":", 2)[0])
+                assert source not in (h.workspaces / "app", h.runs / RUN / "prepared"), (
+                    f"{name} mounts {source} while {path} is copied"
+                )
+
+    h = make_harness(tmp_path, chown=chown_and_check)
+    h.engine.during_wait["seed"] = lambda w: (w / "data.json").write_text("{}")
+    prepare(h, install="pip install -r requirements.txt", seed="python3 seed.py")
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    h.service.start_app(RUN, "malik", "python3 serve.py", 8000, [])
+    assert any("/copies/malik" in str(path) for path in checked)
 
 
 # ---------------------------------------------------------------- failures and cleanup
@@ -771,11 +908,11 @@ def test_disk_watch_stops_a_run_over_budget(tmp_path: Path) -> None:
     prepare(h)
     h.service.start_app(RUN, "anna", "python3 serve.py", 8000, ["api.example.com"])
     prepare(h, run_id=OTHER)
-    h.service.check_disks()
+    h.service.check_runs()
     assert h.service.status(RUN) is None
 
     (h.runs / RUN / "copies" / "anna" / "upload.bin").write_bytes(b"\x01" * MIB)
-    h.service.check_disks()
+    h.service.check_runs()
     assert h.service.status(RUN) == DISK_REASON
     assert h.service.status(OTHER) is None
     assert app_name("anna") not in h.engine.live
@@ -788,15 +925,189 @@ def test_disk_watch_stops_a_run_over_budget(tmp_path: Path) -> None:
         h.service.start_browsers(RUN, [])
 
 
-def test_disk_watch_counts_hard_links_once(tmp_path: Path) -> None:
+def test_hard_links_count_once_per_name(tmp_path: Path) -> None:
+    # A copy writes every name in full, so the measure counts every name.
+    h = make_harness(tmp_path, disk_budget=MIB)
+
+    def seed(workspace: Path) -> None:
+        (workspace / "one.bin").write_bytes(b"\x01" * 400 * 1024)
+        for index in range(3):
+            (workspace / f"link{index}.bin").hardlink_to(workspace / "one.bin")
+
+    h.engine.during_wait["seed"] = seed
+    with pytest.raises(RunnerError, match=DISK_REASON):
+        prepare(h, seed="python3 seed.py")
+    assert h.service.status(RUN) == DISK_REASON
+    assert_nothing_left(h)
+
+
+def test_sparse_file_counts_at_full_size(tmp_path: Path) -> None:
+    h = make_harness(tmp_path, disk_budget=MIB)
+
+    def seed(workspace: Path) -> None:
+        with (workspace / "sparse.bin").open("wb") as sparse:
+            sparse.truncate(1024 * MIB)  # takes almost no disk, but a copy writes all of it
+
+    h.engine.during_wait["seed"] = seed
+    with pytest.raises(RunnerError, match=DISK_REASON):
+        prepare(h, seed="python3 seed.py")
+    assert h.service.status(RUN) == DISK_REASON
+    assert_nothing_left(h)
+
+
+def test_disk_usage_measures_what_a_copy_writes(tmp_path: Path) -> None:
+    top = tmp_path / "top"
+    top.mkdir()
+    (top / "a.bin").write_bytes(b"\x01" * 100_000)
+    (top / "b.bin").hardlink_to(top / "a.bin")
+    with (top / "sparse.bin").open("wb") as sparse:
+        sparse.truncate(5_000_000)
+    (top / "link").symlink_to(tmp_path)  # counted as a link, never followed
+    assert _disk_usage(top) >= 5_200_000
+    assert _disk_usage(tmp_path / "missing") == 0
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any folder")
+def test_disk_usage_raises_on_a_folder_it_cannot_read(tmp_path: Path) -> None:
+    locked = tmp_path / "top" / "locked"
+    locked.mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            _disk_usage(tmp_path / "top")
+    finally:
+        locked.chmod(0o700)
+
+
+def test_start_app_checks_the_budget_before_copying(tmp_path: Path) -> None:
     h = make_harness(tmp_path, disk_budget=int(1.5 * MIB))
+    h.engine.during_wait["seed"] = lambda w: (w / "data.bin").write_bytes(b"\x01" * MIB)
+    prepare(h, seed="python3 seed.py")
+    with pytest.raises(RunnerError, match=DISK_REASON):
+        h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    assert not any("copies" in path.parts for path in h.chowned)  # the copy never started
+    assert app_name("anna") not in h.engine.configs
+    assert h.service.status(RUN) == DISK_REASON
+    assert_nothing_left(h)
+
+
+def test_prepare_checks_the_workspace_size_before_copying(tmp_path: Path) -> None:
+    h = make_harness(tmp_path, disk_budget=256 * 1024)
+    (h.workspace() / "big.bin").write_bytes(b"\x01" * MIB)
+    with pytest.raises(RunnerError, match=DISK_REASON):
+        prepare(h)
+    assert not any(path.name == "big.bin" for path in h.chowned)
+    assert_nothing_left(h)
+
+
+def test_a_run_that_cannot_be_measured_is_stopped(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     prepare(h)
-    prepared = h.runs / RUN / "prepared"
-    (prepared / "one.bin").write_bytes(b"\x01" * MIB)
-    for index in range(3):
-        (prepared / f"link{index}.bin").hardlink_to(prepared / "one.bin")
-    h.service.check_disks()
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+
+    def too_many_files(top: Path) -> int:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("footfall.runner.service._disk_usage", too_many_files)
+    h.service.check_runs()
+    assert h.service.status(RUN) == MEASURE_REASON
+    assert_nothing_left(h)
+
+
+def test_a_run_whose_folder_has_gone_is_left_alone(h: Harness) -> None:
+    prepare(h)
+    shutil.rmtree(h.runs / RUN)
+    h.service.check_runs()
     assert h.service.status(RUN) is None
+    h.service.start_browsers(RUN, [])
+
+
+def test_recursion_error_becomes_runner_error(h: Harness) -> None:
+    h.engine.fail("create_network", RecursionError("maximum recursion depth exceeded"))
+    with pytest.raises(RunnerError, match="recursion"):
+        prepare(h)
+    assert_nothing_left(h)
+
+
+def test_failed_container_removal_keeps_the_network_and_folder(h: Harness) -> None:
+    prepare(h)
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, ["api.example.com"])
+    h.engine.fail("remove", EngineError("container is stuck"), role="app")
+    with pytest.raises(RunnerError, match="container is stuck"):
+        h.service.stop(RUN)
+    assert NETWORK in h.engine.networks
+    assert (h.runs / RUN / "copies" / "anna").exists()
+    assert ("remove_network", NETWORK) not in h.engine.calls
+    status = h.service.status(RUN)
+    assert status is not None and "container is stuck" in status
+    with pytest.raises(RunnerError, match="was stopped"):
+        h.service.logs(RUN, "anna")
+    with pytest.raises(RunnerError, match="already exists"):
+        prepare(h)
+
+    h.engine.failures.clear()
+    h.service.check_runs()  # the watch finishes the stop
+    assert_nothing_left(h)
+    assert h.service.status(RUN) is None
+
+
+def test_failed_revoke_keeps_the_network(h: Harness) -> None:
+    prepare(h)
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, ["api.example.com"])
+    ip = h.engine.ips[app_name("anna")]
+    h.proxy.failures["revoke"] = ConnectionRefusedError(61, "Connection refused")
+    with pytest.raises(RunnerError, match="Connection refused"):
+        h.service.stop(RUN)
+    # The address keeps its allow list, so its network stays and Docker cannot hand the
+    # address to another container.
+    assert ip in h.proxy.allowed
+    assert NETWORK in h.engine.networks
+    assert (h.runs / RUN).exists()
+
+    del h.proxy.failures["revoke"]
+    h.service.stop(RUN)
+    assert ("revoke", ip) in h.proxy.calls
+    assert_nothing_left(h)
+
+
+def test_failed_stop_of_an_unknown_run_is_retried_by_the_watch(h: Harness) -> None:
+    h.engine.networks[NETWORK] = {"footfall.run": RUN}
+    stray = plant_stray(h.engine, RUN, "stray")
+    h.engine.fail("remove", EngineError("container is stuck"))
+    with pytest.raises(RunnerError, match="container is stuck"):
+        h.service.stop(RUN)
+    assert stray in h.engine.live
+    assert NETWORK in h.engine.networks
+    h.engine.failures.clear()
+    h.service.check_runs()
+    assert h.engine.live == {}
+    assert h.engine.networks == {}
+
+
+def test_stop_racing_prepare_waits_for_it(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    h.workspace()
+    register = h.service._register
+    racers: list[threading.Thread] = []
+
+    def register_then_race(run: Any) -> None:
+        register(run)
+        racer = threading.Thread(target=h.service.stop, args=(RUN,), daemon=True)
+        racer.start()
+        racer.join(timeout=0.2)
+        racers.append(racer)
+        assert racer.is_alive(), "the stop closed the run before prepare had its lock"
+
+    monkeypatch.setattr(h.service, "_register", register_then_race)
+    prepare(h, install="pip install -r requirements.txt")
+    racers[0].join(timeout=5)
+    assert not racers[0].is_alive()
+    assert_nothing_left(h)  # the stop ran after prepare and removed what it made
+
+
+def test_default_disk_budget_is_8_gib() -> None:
+    parameter = inspect.signature(RunnerService).parameters["disk_budget"]
+    assert parameter.default == 8 * 1024**3
 
 
 def test_watch_checks_until_told_to_stop(tmp_path: Path) -> None:
@@ -840,7 +1151,7 @@ def test_disk_watch_during_a_step_ends_the_run(tmp_path: Path) -> None:
 
     def install(workspace: Path) -> None:
         (workspace / "big.bin").write_bytes(b"\x01" * MIB)
-        in_another_thread(h.service.check_disks)
+        in_another_thread(h.service.check_runs)
 
     h.engine.during_wait["install"] = install
     with pytest.raises(RunnerError, match=DISK_REASON):
@@ -855,10 +1166,13 @@ def test_watch_survives_a_failed_stop(tmp_path: Path) -> None:
     prepare(h)
     (h.runs / RUN / "prepared" / "big.bin").write_bytes(b"\x01" * MIB)
     h.engine.fail("remove_network", EngineError("network is busy"))
-    h.service.check_disks()
-    assert h.service.status(RUN) == DISK_REASON
+    h.service.check_runs()
+    status = h.service.status(RUN)
+    assert status is not None and status.startswith(f"{DISK_REASON}; ")
+    assert "network is busy" in status
     h.engine.failures.clear()
-    h.service.stop(RUN)
+    h.service.check_runs()  # tries the stop again
+    assert h.service.status(RUN) == DISK_REASON
     assert_nothing_left(h)
 
 

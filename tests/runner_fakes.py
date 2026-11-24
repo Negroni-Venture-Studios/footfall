@@ -227,6 +227,7 @@ def make_harness(tmp_path: Path, **settings: Any) -> Harness:
     workspaces.mkdir(parents=True)
     runs = (tmp_path / "runs").resolve()
     chowned: list[Path] = []
+    chown = settings.pop("chown", chowned.append)
     service = RunnerService(
         engine,
         proxy,
@@ -236,7 +237,7 @@ def make_harness(tmp_path: Path, **settings: Any) -> Harness:
         browsers_image=BROWSERS_IMAGE,
         proxy_container=PROXY,
         orchestrator_container=ORCHESTRATOR,
-        chown=chowned.append,
+        chown=chown,
         **settings,
     )
     return Harness(engine, proxy, service, workspaces, runs, chowned)

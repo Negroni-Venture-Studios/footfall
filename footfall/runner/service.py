@@ -4,13 +4,20 @@ The runner is the only part of Footfall that holds the Docker socket, and it run
 trusts nothing it is asked. Every container's settings come from `spec.container_config`; a
 request supplies only a run id, copy names, commands, a port and host names, and each is checked
 here before anything starts. A workspace must lie inside the workspaces root and hold nothing but
-files, folders and symbolic links. Every copy keeps those links as links and never follows one,
-so a link planted in a workspace cannot pull a host file into a container.
+files, folders and symbolic links, at most `MAX_DEPTH` folders deep.
+
+Every copy is one pass by file descriptor: each folder is opened relative to its parent and
+never through a link, and links are copied as links. A link planted in a workspace, or swapped in
+while it is read, therefore cannot pull a host file into a container. The copy also relies on
+nothing writing to its source meanwhile. No container ever mounts the workspace, and install and
+seed are removed before `prepared` is copied for each app.
 
 A container is allowed out through the egress proxy only once its address on the run's network is
-known, and its allow list is revoked when it goes. Each run has a disk budget, checked after each
-preparation step and every `disk_interval` seconds while its containers live; a run that goes
-over it is stopped, and `status` says why.
+known, and its allow list is revoked when it goes. Each run has a disk budget, measured as what a
+copy of its folder would write: before and after every copy, after each preparation step, and
+every `disk_interval` seconds while it lives. A run that goes over it, or cannot be measured, is
+stopped, and `status` says why. Stopping fails closed: if a container or its allow list cannot be
+removed, the run keeps its network and folder, and the watch tries again.
 
 The methods block, since Docker calls do. The server runs each request in a thread of its own,
 so each run carries a lock, and a long wait for a step to finish lets go of it so that `stop`, or
@@ -27,7 +34,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Final, Literal, Protocol
 
 from footfall.hosts import HostError, validate_host_name
@@ -39,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 REGISTRIES: Final = ("pypi.org", "files.pythonhosted.org", "registry.npmjs.org")
 DISK_REASON: Final = "disk budget exceeded"
+MEASURE_REASON: Final = "disk usage could not be measured"
+MAX_DEPTH: Final = 100  # folders below a workspace or prepared app
 BROWSERS_PORT: Final = 3000
 
 # The browsers listen on every interface of their own container, which is on the run's internal
@@ -54,6 +63,7 @@ _BROWSERS_COMMAND: Final = (
 _RUN_ID: Final = re.compile(r"r_[a-z2-7]{26}")
 _COPY: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _PREPARE: Final = "prepare"  # the copy name of the install and seed containers
+_PREPARED: Final = "prepared"
 _SEED_ENV: Final = frozenset({"FOOTFALL_USERNAME", "FOOTFALL_PASSWORD"})
 _SPEC_RUNTIMES: Final = frozenset({"runsc", "runc"})
 _LOG_LINES: Final = 200
@@ -61,6 +71,9 @@ _TAIL_CHARS: Final = 20_000
 _REDACTED: Final = "[redacted]"
 _BLOCK: Final = 512  # st_blocks counts 512-byte units
 _CHUNK: Final = 1024 * 1024
+_FOLDER_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+_READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_WRITE_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 
 
 class RunnerError(Exception):
@@ -71,10 +84,15 @@ class RunnerError(Exception):
         self.log_tail = log_tail
 
 
+class _OverBudget(Exception):
+    """A copy would write more than the run's disk budget allows."""
+
+
 class ProxyControl(Protocol):
     """What the runner needs from the egress proxy: an allow list for each container's address.
 
-    Implementations raise OSError when the proxy cannot be reached.
+    `allow` replaces any list already held for the address. Implementations raise OSError when
+    the proxy cannot be reached.
     """
 
     def allow(self, ip: str, run_id: str, hosts: Sequence[str]) -> None: ...
@@ -100,8 +118,9 @@ class _Run:
     prepared: bool = False
     closed: bool = False
     browsers: bool = False
-    containers: dict[str, str | None] = field(default_factory=dict)  # name -> address
+    containers: dict[str, str | None] = field(default_factory=dict)  # name or id -> address
     copies: set[str] = field(default_factory=set)
+    problems: list[str] = field(default_factory=list)  # why the last stop did not finish
 
     @property
     def network(self) -> str:
@@ -173,7 +192,7 @@ def _as_runner_error() -> Iterator[None]:
     """Turn the failures the runner expects (Docker, the proxy, the disk) into RunnerError."""
     try:
         yield
-    except (EngineError, OSError, ValueError) as error:
+    except (EngineError, OSError, ValueError, RecursionError) as error:
         raise RunnerError(str(error) or type(error).__name__) from error
 
 
@@ -182,6 +201,11 @@ def _as_runner_error() -> Iterator[None]:
 
 def _reraise(error: OSError) -> None:
     raise error
+
+
+def _reraise_unless_gone(error: OSError) -> None:
+    if not isinstance(error, FileNotFoundError):
+        raise error
 
 
 def _kind(mode: int) -> str:
@@ -194,34 +218,76 @@ def _kind(mode: int) -> str:
     return "a special file"
 
 
-def _refuse_special_files(top: Path, what: str) -> None:
-    """Raise RunnerError if anything below `top` is not a file, a folder or a symbolic link."""
-    for folder, _dirs, files, dirfd in os.fwalk(top, follow_symlinks=False, onerror=_reraise):
-        for name in files:
-            mode = os.stat(name, dir_fd=dirfd, follow_symlinks=False).st_mode
-            if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode) or stat.S_ISDIR(mode)):
-                where = Path(folder, name).relative_to(top)
+def _open_folder(root: Path, relative: PurePath) -> int:
+    """Open a folder below a trusted `root` one name at a time, never through a link."""
+    folder = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in relative.parts:
+            if name in (".", ".."):
+                raise RunnerError(f"not a plain path: {relative}")
+            inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+            os.close(folder)
+            folder = inner
+    except BaseException:
+        os.close(folder)
+        raise
+    return folder
+
+
+def _entries(folder: int, what: str) -> Iterator[tuple[PurePath, int, str, os.stat_result]]:
+    """Yield (where, its descriptor, name, lstat) for everything below an open folder.
+
+    The walk goes by descriptor, top down, and never into a link. It refuses anything but
+    files, folders and links, a tree more than `MAX_DEPTH` folders deep, and a folder that
+    turns into something else before it is walked. Each folder is yielded before anything in it.
+    """
+    unvisited: set[PurePath] = set()
+    for path, dirs, files, dirfd in os.fwalk(
+        ".", dir_fd=folder, follow_symlinks=False, onerror=_reraise
+    ):
+        here = PurePath(path)
+        unvisited.discard(here)
+        found: list[tuple[str, os.stat_result]] = []
+        for name in (*dirs, *files):
+            info = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+            where = here / name
+            if stat.S_ISDIR(info.st_mode):
+                if len(here.parts) >= MAX_DEPTH:
+                    raise RunnerError(f"{what} is more than {MAX_DEPTH} folders deep at {where}")
+                unvisited.add(where)
+            elif not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                 raise RunnerError(
-                    f"{what} contains {_kind(mode)} at {where}; "
+                    f"{what} contains {_kind(info.st_mode)} at {where}; "
                     "only files, folders and symbolic links are copied"
                 )
+            found.append((name, info))
+        dirs[:] = [name for name, info in found if stat.S_ISDIR(info.st_mode)]
+        for name, info in found:
+            yield here, dirfd, name, info
+    if unvisited:
+        raise RunnerError(f"{what} changed while it was read, at {min(unvisited)}")
 
 
-def _copy_file(source: str, target: str) -> str:
-    """Copy one regular file for `copytree`, refusing anything else and never following a link.
+def _copy_file(folder: int, name: str, target: Path, allowed: int) -> int:
+    """Copy one regular file, named relative to an open folder; return the bytes written.
 
-    Opening without blocking and checking what was opened, rather than the name, means a FIFO
-    or a link swapped in after the check is refused instead of read. Set-user-id, set-group-id
-    and sticky bits are dropped.
+    Checking the opened descriptor rather than the name means a FIFO or a link swapped in is
+    refused instead of read, and opening without blocking means a FIFO cannot hang the runner.
+    The target must not exist. Set-user-id, set-group-id and sticky bits are dropped. Raises
+    _OverBudget once more than `allowed` bytes have been read.
     """
-    reader = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    reader = os.open(name, _READ_FLAGS, dir_fd=folder)
     try:
         info = os.fstat(reader)
         if not stat.S_ISREG(info.st_mode):
-            raise OSError(f"{source} is {_kind(info.st_mode)}, which is not copied")
-        writer = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            raise RunnerError(f"{name} changed into {_kind(info.st_mode)} while it was copied")
+        writer = os.open(target, _WRITE_FLAGS, 0o600)
+        written = 0
         try:
             while chunk := os.read(reader, _CHUNK):
+                written += len(chunk)
+                if written > allowed:
+                    raise _OverBudget
                 view = memoryview(chunk)
                 while view:
                     view = view[os.write(writer, view) :]
@@ -231,36 +297,85 @@ def _copy_file(source: str, target: str) -> str:
             os.close(writer)
     finally:
         os.close(reader)
-    return target
+    return written
 
 
-def _copy_tree(source: Path, target: Path) -> None:
-    """Copy a folder, keeping symbolic links as links."""
+def _copy_tree(
+    root: Path,
+    relative: PurePath,
+    target: Path,
+    *,
+    limit: int,
+    chown: Callable[[Path], None],
+    what: str,
+) -> int:
+    """Copy the folder `relative` below `root` to a new `target` in one pass; return the bytes.
+
+    Links stay links. Every entry made is passed to `chown`. Raises _OverBudget once the files
+    copied come to more than `limit` bytes.
+    """
+    source = _open_folder(root, relative)
     try:
-        shutil.copytree(source, target, symlinks=True, copy_function=_copy_file)
-    except shutil.Error as error:
-        problems = error.args[0] if error.args and isinstance(error.args[0], list) else []
-        detail = str(problems[0][2]) if problems else str(error)
-        raise RunnerError(f"could not copy {source.name}: {detail}") from error
+        folders = [(target, os.fstat(source).st_mode)]
+        target.mkdir(mode=0o700)
+        chown(target)
+        written = 0
+        for here, dirfd, name, info in _entries(source, what):
+            destination = target / here / name
+            if stat.S_ISDIR(info.st_mode):
+                destination.mkdir(mode=0o700)
+                folders.append((destination, info.st_mode))
+            elif stat.S_ISLNK(info.st_mode):
+                destination.symlink_to(os.readlink(name, dir_fd=dirfd))
+            else:
+                written += _copy_file(dirfd, name, destination, limit - written)
+            chown(destination)
+        for path, mode in reversed(folders):  # last, so that no folder is closed to its contents
+            path.chmod(stat.S_IMODE(mode) & 0o777)
+    finally:
+        os.close(source)
+    return written
+
+
+def _scan_tree(root: Path, relative: PurePath, what: str) -> None:
+    """Refuse a folder below `root` holding anything a copy would refuse."""
+    source = _open_folder(root, relative)
+    try:
+        for _entry in _entries(source, what):
+            pass
+    finally:
+        os.close(source)
+
+
+def _size(info: os.stat_result) -> int:
+    return max(info.st_size, info.st_blocks * _BLOCK)
 
 
 def _disk_usage(top: Path) -> int:
-    """Bytes of disk used below `top`, never following a link and counting hard links once."""
-    seen: set[tuple[int, int]] = set()
+    """Bytes that copying `top` would write, never following a link.
+
+    Every name counts at the larger of its size and its allocated blocks, so a sparse file
+    counts in full and each hard link counts again, as a copy writes them. Entries removed
+    during the walk are skipped and a missing `top` measures 0. Any other failure is raised.
+    """
     try:
-        total = top.lstat().st_blocks * _BLOCK
-        for _folder, dirs, files, dirfd in os.fwalk(top, follow_symlinks=False):
+        total = _size(top.lstat())
+        for _path, dirs, files, dirfd in os.fwalk(
+            top, follow_symlinks=False, onerror=_reraise_unless_gone
+        ):
+            folders: list[str] = []
             for name in (*dirs, *files):
                 try:
                     info = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
                 except FileNotFoundError:
                     continue  # removed while being measured
-                if info.st_nlink > 1 and not stat.S_ISDIR(info.st_mode):
-                    if (info.st_dev, info.st_ino) in seen:
-                        continue
-                    seen.add((info.st_dev, info.st_ino))
-                total += info.st_blocks * _BLOCK
+                total += _size(info)
+                if stat.S_ISDIR(info.st_mode):
+                    folders.append(name)
+            dirs[:] = folders  # never open a link, even to compare it
     except FileNotFoundError:
+        if top.is_symlink() or top.exists():
+            raise
         return 0
     return total
 
@@ -292,7 +407,7 @@ class RunnerService:
         proxy_port: int = 3128,
         step_timeout: float = 300,
         runtime: str = "runsc",
-        disk_budget: int = 2 * 1024**3,
+        disk_budget: int = 8 * 1024**3,
         disk_interval: float = 15.0,
         chown: Callable[[Path], None] = _chown_to_app,
     ) -> None:
@@ -341,7 +456,7 @@ class RunnerService:
         egress: Sequence[str],
         env: Mapping[str, str],
     ) -> None:
-        """Make the run's network and prepared copy of the workspace, then run install and seed.
+        """Copy the workspace into the run, make its network, then run install and seed.
 
         On any failure everything made for the run is removed again, and RunnerError carries
         the failing step's last output.
@@ -355,20 +470,21 @@ class RunnerService:
             _check_command(seed, "seed")
             hosts = _hosts(egress, "egress")
             seed_env = _seed_env(env)
-            source = self._workspace(workspace)
+            relative = self._workspace(workspace).relative_to(self._workspaces)
             directory = self._runs_root / run_id
             self._refuse_stopped(run_id)
             if directory.is_symlink() or directory.exists():
                 raise RunnerError(f"run {run_id} already exists")
-            _refuse_special_files(source, "the workspace")
             secrets = tuple(v for k, v in env.items() if k == "FOOTFALL_PASSWORD" and v)
-            run = self._register(_Run(run_id, image, directory, secrets))
+            run = _Run(run_id, image, directory, secrets)
             with run.lock:
+                # Registered only once locked, so that a stop arriving now waits for prepare.
+                self._register(run)
                 try:
-                    self._prepare_locked(run, source, install, seed, hosts, seed_env)
+                    self._prepare_locked(run, relative, install, seed, hosts, seed_env)
                 except BaseException:
-                    if not run.closed:
-                        self._teardown_locked(run)
+                    # Even if a stop has closed the run meanwhile, sweep up whatever was made.
+                    self._teardown_locked(run)
                     raise
 
     def start_app(
@@ -390,10 +506,11 @@ class RunnerService:
                 try:
                     address = self._start_app_locked(run, copy, start, port, hosts)
                 except BaseException:
-                    run.copies.discard(copy)
-                    if not run.closed:
-                        self._forget_locked(run, _container_name(run_id, "app", copy))
-                        self._attempt([], f"delete copy {copy}", self._copy_dir(run, copy))
+                    name = _container_name(run_id, "app", copy)
+                    if not run.closed and self._forget_locked(run, name):
+                        run.copies.discard(copy)
+                        remove = functools.partial(_remove_tree, run.directory / "copies" / copy)
+                        self._attempt([], f"delete copy {copy}", remove)
                     raise
                 return f"{address}:{port}"
 
@@ -447,80 +564,95 @@ class RunnerService:
         """Remove everything the run has, and its folder. Stopping a run twice is harmless.
 
         A run the runner has no record of, perhaps from before a restart, is found by its
-        label and its names. RunnerError lists anything that could not be removed.
+        label and its names. RunnerError lists anything that could not be removed; the run
+        then keeps its network and folder, and the watch tries again.
         """
         with _as_runner_error():
             _check_run_id(run_id)
             with self._lock:
                 run = self._runs.get(run_id)
             if run is None:
-                problems = self._sweep(run_id, {})
-            else:
-                with run.lock:
-                    problems = self._teardown_locked(run)
+                run = _Run(run_id, "", self._runs_root / run_id, ())
+            with run.lock:
+                problems = self._teardown_locked(run)
             if problems:
                 raise RunnerError("; ".join(problems))
 
     def status(self, run_id: str) -> str | None:
-        """Why the runner stopped a run of its own accord, or None if it has not."""
+        """Why the runner stopped a run of its own accord, and what is left of a stop that
+        could not finish; None for a run that is live, or gone without either."""
         _check_run_id(run_id)
         with self._lock:
-            return self._reasons.get(run_id)
+            reason = self._reasons.get(run_id)
+            run = self._runs.get(run_id)
+        problems = list(run.problems) if run is not None else []
+        if not problems:
+            return reason
+        note = "could not finish stopping the run: " + "; ".join(problems)
+        return f"{reason}; {note}" if reason else note
 
-    def check_disks(self) -> None:
-        """Stop every run that is over its disk budget."""
+    def check_runs(self) -> None:
+        """Stop every live run over its disk budget or that cannot be measured, and try again
+        to finish every stop that could not."""
         with self._lock:
             runs = list(self._runs.values())
         for run in runs:
+            reason: str | None = None
+            if run.closed:
+                with run.lock:
+                    if run.closed and run.problems:
+                        self._teardown_locked(run)
+                continue
             try:
                 over = _disk_usage(run.directory) > self._disk_budget
             except Exception:
                 logger.exception("could not measure the disk use of run %s", run.run_id)
-                continue
-            if over:
+                reason = MEASURE_REASON
+            else:
+                reason = DISK_REASON if over else None
+            if reason is not None:
                 with run.lock:
                     if not run.closed:
-                        logger.warning("run %s is over its disk budget; stopping it", run.run_id)
-                        self._stop_for_locked(run, DISK_REASON)
+                        logger.warning("stopping run %s: %s", run.run_id, reason)
+                        self._stop_for_locked(run, reason)
 
     def watch(self, stop: threading.Event) -> None:
-        """Check the runs' disk use every `disk_interval` seconds until `stop` is set."""
+        """Call `check_runs` every `disk_interval` seconds until `stop` is set."""
         while not stop.wait(self._disk_interval):
             try:
-                self.check_disks()
+                self.check_runs()
             except Exception:
-                logger.exception("the disk check failed")
+                logger.exception("the check of the runs failed")
 
     # ------------------------------------------------------------ preparing
 
     def _prepare_locked(
         self,
         run: _Run,
-        source: Path,
+        relative: PurePath,
         install: str | None,
         seed: str | None,
         hosts: list[str],
         seed_env: dict[str, str],
     ) -> None:
+        self._runs_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        run.directory.mkdir(mode=0o700)
+        # No container ever mounts the workspace, so nothing changes it while it is copied.
+        prepared = run.directory / _PREPARED
+        self._copy_locked(run, self._workspaces, relative, prepared, "the workspace")
+
         self._engine.create_network(run.network, {"footfall.run": run.run_id})
         for container in (self._proxy_container, self._orchestrator_container):
             self._engine.connect(run.network, container)
         proxy_address = self._engine.address(self._proxy_container, run.network)
         run.proxy_url = f"http://{proxy_address}:{self._proxy_port}"
 
-        self._runs_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        run.directory.mkdir(mode=0o700)
-        prepared = run.directory / "prepared"
-        _copy_tree(source, prepared)
-        self._chown_tree(prepared)
-        self._check_disk_locked(run)
-
         if install is not None:
             install_hosts = list(dict.fromkeys([*REGISTRIES, *hosts]))
             self._step_locked(run, "install", install, install_hosts, {})
         if seed is not None:
             self._step_locked(run, "seed", seed, hosts, seed_env)
-        _refuse_special_files(prepared, "the prepared app")
+        _scan_tree(self._runs_root, PurePath(run.run_id, _PREPARED), "the prepared app")
         run.prepared = True
 
     def _step_locked(
@@ -539,7 +671,7 @@ class RunnerService:
             copy=_PREPARE,
             image=run.image,
             command=("sh", "-c", command),
-            workspace=run.directory / "prepared",
+            workspace=run.directory / _PREPARED,
             network=run.network,
             proxy_url=run.proxy_url,
             env=env,
@@ -552,16 +684,16 @@ class RunnerService:
             self._check_open(run)  # a stop while waiting explains the failure better
             raise
         self._check_open(run)
-        over = code == 0 and _disk_usage(run.directory) > self._disk_budget
-        tail = self._tail(run, name) if code != 0 or over else ""
+        tail = self._tail(run, name)
         self._discard_locked(run, name)
         if code is None:
             raise RunnerError(f"{role} did not finish within {self._step_timeout:g} seconds", tail)
         if code != 0:
             raise RunnerError(f"{role} failed with exit code {code}", tail)
-        if over:
-            self._stop_for_locked(run, DISK_REASON)
-            raise RunnerError(DISK_REASON, tail)
+        try:
+            self._check_budget_locked(run)
+        except RunnerError as error:
+            raise RunnerError(str(error), tail) from error
 
     def _wait_unlocked(self, run: _Run, name: str) -> int | None:
         """Wait for a container to exit, without the run's lock; None if it ran out of time."""
@@ -573,15 +705,42 @@ class RunnerService:
         finally:
             run.lock.acquire()
 
-    def _check_disk_locked(self, run: _Run) -> None:
-        if _disk_usage(run.directory) > self._disk_budget:
+    # ------------------------------------------------------------ the disk budget
+
+    def _check_budget_locked(self, run: _Run, incoming: Path | None = None) -> int:
+        """Return the run's disk use, after stopping the run and raising if that use, plus a
+        copy of `incoming`, is over budget or cannot be measured."""
+        try:
+            usage = _disk_usage(run.directory)
+            extra = 0 if incoming is None else _disk_usage(incoming)
+        except (OSError, RecursionError) as error:
+            self._stop_for_locked(run, MEASURE_REASON)
+            raise RunnerError(MEASURE_REASON) from error
+        if usage + extra > self._disk_budget:
             self._stop_for_locked(run, DISK_REASON)
             raise RunnerError(DISK_REASON)
+        return usage
+
+    def _copy_locked(
+        self, run: _Run, root: Path, relative: PurePath, target: Path, what: str
+    ) -> None:
+        """Copy a folder into the run, checking its budget before, during and after."""
+        usage = self._check_budget_locked(run, root / relative)
+        try:
+            _copy_tree(
+                root,
+                relative,
+                target,
+                limit=self._disk_budget - usage,
+                chown=self._chown,
+                what=what,
+            )
+        except _OverBudget:
+            self._stop_for_locked(run, DISK_REASON)
+            raise RunnerError(DISK_REASON) from None
+        self._check_budget_locked(run)
 
     # ------------------------------------------------------------ apps
-
-    def _copy_dir(self, run: _Run, copy: str) -> Callable[[], None]:
-        return functools.partial(_remove_tree, run.directory / "copies" / copy)
 
     def _start_app_locked(
         self, run: _Run, copy: str, start: str, port: int, hosts: list[str]
@@ -589,8 +748,10 @@ class RunnerService:
         copies = run.directory / "copies"
         copies.mkdir(mode=0o700, exist_ok=True)
         target = copies / copy
-        _copy_tree(run.directory / "prepared", target)
-        self._chown_tree(target)
+        # Install and seed were removed before prepare returned, and app containers mount only
+        # their own copies, so no container can change `prepared` while it is copied.
+        prepared = PurePath(run.run_id, _PREPARED)
+        self._copy_locked(run, self._runs_root, prepared, target, "the prepared app")
         config = container_config(
             role="app",
             run_id=run.run_id,
@@ -617,24 +778,29 @@ class RunnerService:
         self._proxy.allow(address, run.run_id, hosts)
         return address
 
-    def _discard_locked(self, run: _Run, name: str) -> None:
-        """Revoke a container's allow list and remove it."""
+    def _remove_container_locked(self, run: _Run, name: str, problems: list[str]) -> bool:
+        """Revoke a container's allow list and remove it; forget it only if both succeed."""
         address = run.containers.get(name)
-        try:
-            if address is not None:
-                self._proxy.revoke(address)
-        finally:
-            self._engine.remove(name)
-        del run.containers[name]
+        revoked = address is None or self._attempt(
+            problems,
+            f"revoke the allow list of {name}",
+            functools.partial(self._proxy.revoke, address),
+        )
+        removed = self._attempt(
+            problems, f"remove {name}", functools.partial(self._engine.remove, name)
+        )
+        if revoked and removed:
+            run.containers.pop(name, None)
+        return revoked and removed
 
-    def _forget_locked(self, run: _Run, name: str) -> None:
-        """Discard a container after a failure, logging rather than raising what goes wrong."""
-        if name not in run.containers:
-            return
-        address = run.containers.pop(name)
-        if address is not None:
-            self._attempt([], f"revoke {name}", functools.partial(self._proxy.revoke, address))
-        self._attempt([], f"remove {name}", functools.partial(self._engine.remove, name))
+    def _discard_locked(self, run: _Run, name: str) -> None:
+        problems: list[str] = []
+        if not self._remove_container_locked(run, name, problems):
+            raise RunnerError("; ".join(problems))
+
+    def _forget_locked(self, run: _Run, name: str) -> bool:
+        """Remove a container after a failure, logging rather than raising what goes wrong."""
+        return name not in run.containers or self._remove_container_locked(run, name, [])
 
     def _tail(self, run: _Run, name: str) -> str:
         try:
@@ -648,12 +814,6 @@ class RunnerService:
         for secret in run.secrets:
             text = text.replace(secret, _REDACTED)
         return text[-_TAIL_CHARS:]
-
-    def _chown_tree(self, top: Path) -> None:
-        self._chown(top)
-        for folder, dirs, files, _dirfd in os.fwalk(top, follow_symlinks=False, onerror=_reraise):
-            for name in (*dirs, *files):
-                self._chown(Path(folder, name))
 
     # ------------------------------------------------------------ the record of runs
 
@@ -679,7 +839,7 @@ class RunnerService:
         if reason is not None:
             raise RunnerError(f"run {run_id} was stopped: {reason}")
 
-    def _register(self, run: _Run) -> _Run:
+    def _register(self, run: _Run) -> None:
         with self._lock:
             reason = self._reasons.get(run.run_id)
             if reason is not None:
@@ -687,7 +847,6 @@ class RunnerService:
             if run.run_id in self._runs:
                 raise RunnerError(f"run {run.run_id} already exists")
             self._runs[run.run_id] = run
-        return run
 
     def _live(self, run_id: str) -> _Run:
         self._refuse_stopped(run_id)
@@ -716,54 +875,58 @@ class RunnerService:
         self._teardown_locked(run)
 
     def _teardown_locked(self, run: _Run) -> list[str]:
+        """Remove everything the run has, failing closed; return what could not be done.
+
+        Containers go first, each with its allow list. Only when all of them are gone does the
+        network go, since Docker may then give its addresses to another run's containers, and
+        an allow list left behind would follow the address. A run that could not be stopped
+        stays on record with its network and folder, for the watch to try again.
+        """
         run.closed = True
-        problems = self._sweep(run.run_id, run.containers)
-        run.containers.clear()
+        problems: list[str] = []
+        for name in list(run.containers):
+            self._remove_container_locked(run, name, problems)
+        if not problems:
+            self._remove_strays_locked(run, problems)
+        if not problems:
+            network = run.network
+            for container in (self._proxy_container, self._orchestrator_container):
+                disconnect = functools.partial(self._engine.disconnect, network, container)
+                self._attempt(problems, f"disconnect {container} from {network}", disconnect)
+            remove_network = functools.partial(self._engine.remove_network, network)
+            self._attempt(problems, f"remove the network {network}", remove_network)
+            remove_folder = functools.partial(_remove_tree, run.directory)
+            self._attempt(problems, f"delete the folder of run {run.run_id}", remove_folder)
         with self._lock:
-            if self._runs.get(run.run_id) is run:
+            run.problems = problems
+            if problems:
+                self._runs.setdefault(run.run_id, run)
+            elif self._runs.get(run.run_id) is run:
                 del self._runs[run.run_id]
         return problems
 
-    def _sweep(self, run_id: str, known: Mapping[str, str | None]) -> list[str]:
-        """Remove every container, connection, network and folder of a run, as far as possible.
-
-        Containers the runner knows are removed by name, then any others carrying the run's
-        label. Each allow list is revoked before its container is removed. Returns a
-        description of each thing that could not be done.
-        """
-        network = _network_name(run_id)
-        problems: list[str] = []
-        for name, address in list(known.items()):
-            if address is not None:
-                revoke = functools.partial(self._proxy.revoke, address)
-                self._attempt(problems, f"revoke the allow list of {name}", revoke)
-            self._attempt(problems, f"remove {name}", functools.partial(self._engine.remove, name))
-        listing = functools.partial(self._engine.containers, f"footfall.run={run_id}")
-        for container in self._attempt(problems, "list the run's containers", listing) or []:
+    def _remove_strays_locked(self, run: _Run, problems: list[str]) -> None:
+        """Remove containers carrying the run's label that the runner has no record of."""
+        try:
+            strays = self._engine.containers(f"footfall.run={run.run_id}")
+        except Exception as error:
+            logger.exception("could not list the containers of run %s", run.run_id)
+            problems.append(f"could not list the containers of run {run.run_id}: {error}")
+            return
+        for container in strays:
             try:
-                address = self._engine.address(container, network)
+                run.containers[container] = self._engine.address(container, run.network)
             except (EngineError, OSError):
-                address = None
-            if address is not None:
-                revoke = functools.partial(self._proxy.revoke, address)
-                self._attempt(problems, f"revoke the allow list of {container}", revoke)
-            remove = functools.partial(self._engine.remove, container)
-            self._attempt(problems, f"remove {container}", remove)
-        for container in (self._proxy_container, self._orchestrator_container):
-            disconnect = functools.partial(self._engine.disconnect, network, container)
-            self._attempt(problems, f"disconnect {container} from {network}", disconnect)
-        remove_network = functools.partial(self._engine.remove_network, network)
-        self._attempt(problems, f"remove the network {network}", remove_network)
-        remove_folder = functools.partial(_remove_tree, self._runs_root / run_id)
-        self._attempt(problems, f"delete the folder of run {run_id}", remove_folder)
-        return problems
+                run.containers[container] = None
+            self._remove_container_locked(run, container, problems)
 
     @staticmethod
-    def _attempt[T](problems: list[str], what: str, action: Callable[[], T]) -> T | None:
+    def _attempt(problems: list[str], what: str, action: Callable[[], object]) -> bool:
         """Do one cleanup step; log and record a failure rather than stop the cleanup."""
         try:
-            return action()
+            action()
         except Exception as error:
             logger.exception("could not %s", what)
             problems.append(f"could not {what}: {error}")
-            return None
+            return False
+        return True
