@@ -4,13 +4,16 @@ The orchestrator holds the Anthropic key and drives the browsers; the runner, ov
 holds Docker. Nothing here starts a container or opens the Docker socket (AGENTS.md rule 1).
 A run copies the folder into the workspaces root and asks the runner to prepare it, to start
 one copy of the app for each persona and one browser container, and to stop it all at the end,
-whatever happened in between.
+whatever happened in between. It copies only the files git would commit, tracked or untracked
+but not ignored, so that an ignored `.env` never reaches a container (AGENTS.md rule 3); a
+folder outside git is copied only when the caller asks for every file.
 
 When the manifest has a `[login]` section, the run makes a throwaway username and password.
 The password reaches a container only through the seed step's environment (AGENTS.md rule 3).
 Footfall signs each persona in before it starts when the brief starts signed in. Either way
 the tester is given the account in its first message, and every executor redacts the
-password, so it is written to no trace, report or summary, printed nowhere and logged nowhere.
+password, so it is written to no trace, report, summary or printed table, and to no log
+line. A screenshot can still show it, if the app displays what was typed in plain text.
 
 Each persona runs in its own browser context, and a persona that fails, whatever the reason,
 ends alone: its context is closed and the others carry on. Each one's report is written as it
@@ -23,12 +26,15 @@ import contextlib
 import functools
 import json
 import logging
+import os
 import secrets
 import shutil
+import stat
+import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, Protocol, TextIO
 from urllib.parse import quote as url_quote
 
@@ -38,10 +44,11 @@ from playwright.async_api import Error as PlaywrightError
 from footfall.browsers import Engine, SignInError, connect_run_server, open_context, sign_in
 from footfall.manifest import Brief, Manifest, load_brief, load_manifest
 from footfall.personas import Device, Persona, PersonaError, load_devices, load_personas, select
+from footfall.runner.service import RunnerError
 from footfall.tester.guard import Guard
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import model_from_spec
-from footfall.tester.report import PersonaReport, clean_text
+from footfall.tester.report import PersonaReport, clean_text, strip_invisible
 from footfall.tester.tools import REDACTED, Executor
 from footfall.tester.trace import Trace
 
@@ -68,6 +75,7 @@ READY_POLL: Final = 0.25  # seconds between two tries of the ready path
 READY_TRY: Final = 2.0  # seconds one try may take
 GOTO_TIMEOUT_MS: Final = 30_000
 LOG_TAIL_CAP: Final = 20_000
+GIT_TIMEOUT: Final = 60.0
 
 type ConnectBrowser = Callable[[str, str], Awaitable[Browser]]
 
@@ -131,8 +139,8 @@ async def _answers(host: str, port: int, request: bytes) -> bool:
                 writer.close()
                 with contextlib.suppress(OSError):
                     await writer.wait_closed()
-    except (OSError, TimeoutError):
-        return False
+    except (OSError, TimeoutError, ValueError):
+        return False  # ValueError: a line longer than the reader's limit
     parts = status_line.split()
     return len(parts) >= 2 and parts[0].startswith(b"HTTP/") and parts[1][:1] in (b"2", b"3")
 
@@ -207,12 +215,85 @@ def _write_json(path: Path, data: object, password: str | None) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _git_files(folder: Path) -> list[PurePosixPath]:
+    """The files git would commit from `folder`: tracked, or untracked and not ignored.
+
+    git runs with no filesystem monitor and no untracked cache, either of which a
+    repository's own configuration could point at a program, and with no GIT_ variables from
+    the environment. Raises LocalRunError when git is missing or cannot read the folder.
+    """
+    git = shutil.which("git")
+    advice = "pass --all-files to copy every file in the folder, ignored ones included"
+    if git is None:
+        raise LocalRunError(
+            f"git is not installed, so Footfall cannot tell which files to copy; {advice}"
+        )
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    done = subprocess.run(  # noqa: S603  # a fixed command, with the folder as its working directory
+        [
+            git,
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        cwd=folder,
+        env=env,
+        capture_output=True,
+        timeout=GIT_TIMEOUT,
+        check=False,
+    )
+    if done.returncode != 0:
+        said = done.stderr.decode("utf-8", "replace").strip().splitlines()
+        why = clean_text(said[0], 200, single_line=True) if said else "no reason given"
+        raise LocalRunError(f"git cannot list the files in {folder} ({why}); {advice}")
+    names = [os.fsdecode(name) for name in done.stdout.split(b"\0") if name]
+    return sorted({PurePosixPath(name) for name in names})
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    return path == folder or path.is_relative_to(folder)
+
+
+def _copy_files(folder: Path, workspace: Path, names: Sequence[PurePosixPath], out: Path) -> None:
+    """Copy the named files into the workspace, links as links, leaving the results out.
+
+    A name that is gone, or is not a file or a link, such as a submodule, is skipped.
+    """
+    base = folder.resolve()
+    results = out.resolve()
+    workspace.mkdir()
+    for name in names:
+        if name.is_absolute() or ".." in name.parts:
+            continue  # git never lists one; nothing outside the folder is copied
+        source = base / name
+        if _inside(source, results):
+            continue
+        try:
+            info = source.lstat()
+        except FileNotFoundError:
+            continue  # tracked, but deleted since
+        target = workspace / name
+        if stat.S_ISLNK(info.st_mode):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(source.readlink())
+        elif stat.S_ISREG(info.st_mode):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target, follow_symlinks=False)
+
+
 def _copy_folder(folder: Path, workspace: Path, out: Path) -> None:
-    """Copy the folder to test into its workspace, links as links, leaving the results out."""
+    """Copy all of the folder into its workspace, links as links, leaving the results out."""
     results = out.resolve()
 
     def ignore(where: str, names: list[str]) -> set[str]:
-        return {name for name in names if (Path(where) / name).resolve() == results}
+        return {name for name in names if _inside((Path(where) / name).resolve(), results)}
 
     shutil.copytree(folder, workspace, symlinks=True, ignore=ignore)
 
@@ -266,7 +347,7 @@ class _Run:
             await page.goto(app_origin + "/", timeout=GOTO_TIMEOUT_MS)
             login = self.manifest.login
             if self.brief.start == "signed-in" and login is not None and self.account:
-                await sign_in(page, login, *self.account)
+                await sign_in(page, login, *self.account, app_origin)
             executor = Executor(
                 page,
                 guard,
@@ -295,7 +376,12 @@ class _Run:
             if context is not None:
                 with contextlib.suppress(PlaywrightError):
                     await context.close()
-        _write_json(folder / "report.json", report.to_json(), self.password)
+        path = folder / "report.json"
+        try:
+            _write_json(path, report.to_json(), self.password)
+        except OSError as error:
+            # The report is still returned, and goes in the summary and the table.
+            LOG.error("could not write %s: %s", path, error.strerror or type(error).__name__)
         LOG.info("persona %s: %s", persona.id, report.status)
         return report
 
@@ -323,10 +409,16 @@ class _Run:
 
 
 def _clean_tail(text: str, password: str | None) -> str:
-    """An app's log tail, safe to print: the password out and no terminal control characters."""
+    """A log tail, safe to print: no terminal control characters and the password out.
+
+    It is cleaned, then stripped of characters that show nothing, then redacted, as the
+    executor does, so that cleaning can never join a password split by such a character.
+    It is cut to its last `LOG_TAIL_CAP` characters only then, so no cut leaves part of one.
+    """
+    text = clean_text(text, sys.maxsize)
     if password:
-        text = text.replace(password, REDACTED)
-    return clean_text(text, LOG_TAIL_CAP)
+        text = strip_invisible(text).replace(password, REDACTED)
+    return text[-LOG_TAIL_CAP:]
 
 
 async def _ready(runner: Runner, run: _Run, copy: str, address: str) -> None:
@@ -385,8 +477,12 @@ async def test_folder(
     workspaces: Path = DEFAULT_WORKSPACES,
     proxy_container: str = DEFAULT_PROXY_CONTAINER,
     stdout: TextIO | None = None,
+    all_files: bool = False,
 ) -> list[PersonaReport]:
     """Test a local folder with the named personas (the manifest's, when none are named).
+
+    Only the files git would commit are copied, unless `all_files` is true, which a folder
+    outside git needs.
 
     `connect_browser` takes an engine and the run's Playwright endpoint and returns a
     browser; by default it connects to the run's browser container. Writes the results into
@@ -399,6 +495,7 @@ async def test_folder(
     devices = load_devices()
     personas = select(load_personas(devices), list(persona_ids) or list(manifest.test.personas))
     model_from_spec(model_spec)  # a spec that names nothing runnable stops the run here
+    names = None if all_files else await asyncio.to_thread(_git_files, folder)
 
     run_id = new_run_id()
     account = None
@@ -427,10 +524,14 @@ async def test_folder(
             account=account,
         )
         try:
-            reports = await _go(run, runner, connect, personas, folder, workspace)
+            reports = await _go(run, runner, connect, personas, folder, workspace, names)
             _write_json(out / "summary.json", run.summary(reports), run.password)
             print(format_table(reports), file=stream)
-        except BaseException:
+        except BaseException as error:
+            if isinstance(error, LocalRunError | RunnerError):
+                # The runner redacts its logs, but by plain replacement, which a password cut
+                # by a character that shows nothing gets past.
+                error.log_tail = _clean_tail(error.log_tail, run.password)
             await _finish(runner, run_id, workspace, quiet=True)
             _tidy_results(folders)
             raise
@@ -448,11 +549,18 @@ async def _go(
     personas: Sequence[Persona],
     folder: Path,
     workspace: Path,
+    names: Sequence[PurePosixPath] | None,
 ) -> list[PersonaReport]:
-    """Prepare the app, start its copies and the browsers, and run every persona."""
+    """Prepare the app, start its copies and the browsers, and run every persona.
+
+    `names` are the files to copy, or None to copy every file in the folder.
+    """
     manifest = run.manifest
     workspace.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(_copy_folder, folder, workspace, run.out)
+    if names is None:
+        await asyncio.to_thread(_copy_folder, folder, workspace, run.out)
+    else:
+        await asyncio.to_thread(_copy_files, folder, workspace, names, run.out)
     env: dict[str, str] = {}
     if run.account is not None:
         env = {"FOOTFALL_USERNAME": run.account[0], "FOOTFALL_PASSWORD": run.account[1]}
@@ -480,14 +588,21 @@ async def _go(
         for engine in engines:
             browsers[engine] = await connect(engine, endpoint)
         LOG.info("running %d personas", len(personas))
-        return list(
-            await asyncio.gather(
-                *(
-                    run.persona(p, browsers[run.devices[p.device].engine], addresses[p.id])
-                    for p in personas
-                )
-            )
+        # Every persona ends before anything is raised, so that none is still running when
+        # its browser closes and the run stops.
+        ended = await asyncio.gather(
+            *(
+                run.persona(p, browsers[run.devices[p.device].engine], addresses[p.id])
+                for p in personas
+            ),
+            return_exceptions=True,
         )
+        reports: list[PersonaReport] = []
+        for outcome in ended:
+            if isinstance(outcome, BaseException):
+                raise outcome
+            reports.append(outcome)
+        return reports
     finally:
         for browser in browsers.values():
             with contextlib.suppress(PlaywrightError):

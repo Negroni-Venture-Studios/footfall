@@ -2,12 +2,12 @@
 
 Footfall makes the first look itself and sends it as the first user message, with the
 throwaway account's username and password when the app has its own sign-in. They go there
-rather than in the system prompt, which then stays the same for every persona and run, so
+rather than in the system prompt, which then stays the same from one run to the next, so
 that prompt caching can reuse it. Each turn after that appends the model's content
 unchanged, runs its one tool call through the executor, and appends the result with the
-screenshot it led to. Nothing already in the
-conversation is ever edited or removed (AGENTS.md rule 5), and the executor is handed a
-copy of each tool input, so that not even it can reach the history.
+screenshot it led to. Nothing already in the conversation is ever edited or removed
+(AGENTS.md rule 5), and the executor is handed a copy of each tool input, so that not even
+it can reach the history.
 
 What the model writes, and what the pages it reads say, can steer only which tool it
 calls with what input, and when it calls `finish`. The budget, the count of actions and

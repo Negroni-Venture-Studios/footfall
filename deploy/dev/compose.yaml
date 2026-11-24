@@ -4,10 +4,12 @@
 #
 #   sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/footfall /var/lib/footfall/workspaces
 #   FOOTFALL_APP=/path/to/an/app docker compose up -d
-#   docker compose exec orchestrator footfall test /app
+#   docker compose exec orchestrator footfall test /app --all-files
 #
-# FOOTFALL_APP defaults to the demo app. The results land in
-# /var/lib/footfall/footfall-results on the host.
+# FOOTFALL_APP defaults to the demo app. The image has no git, so `footfall
+# test` cannot tell which files git would ignore and needs --all-files, which
+# copies every file in the folder: mount one that holds no secrets. The
+# results land in /var/lib/footfall/footfall-results on the host.
 #
 # On a Mac, Docker Desktop has no gVisor. FOOTFALL_RUNTIME=runc starts the
 # containers under test without it, and every command then warns that it has.
@@ -44,6 +46,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    init: true
     logging: *logging
 
   runner:
@@ -81,6 +84,7 @@ services:
       - FOWNER  # sets the modes of files it does not own
     security_opt:
       - no-new-privileges:true
+    init: true
     logging: *logging
 
   orchestrator:
@@ -112,6 +116,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    init: true
     logging: *logging
 
 volumes:

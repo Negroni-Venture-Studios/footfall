@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 import footfall.__main__ as cli
-from footfall.__main__ import RUNC_WARNING, Settings, main
+from footfall.__main__ import ALL_FILES_WARNING, RUNC_WARNING, Settings, main
 from footfall.local import NotReadyError
 from footfall.manifest import ManifestError
 from footfall.proxy.control import ProxyControlClient
@@ -63,7 +63,8 @@ def test_settings_have_the_documented_defaults() -> None:
     settings = Settings.from_env({})
     assert settings == Settings(
         runner_socket=Path("/run/footfall/runner.sock"),
-        proxy_control=Path("/run/footfall/proxy.sock"),
+        # In a folder of its own, which only the proxy and the runner mount.
+        proxy_control=Path("/run/footfall-proxy/proxy.sock"),
         workspaces=Path("/var/lib/footfall/workspaces"),
         runs=Path("/var/lib/footfall/runs"),
         runtime="runsc",
@@ -152,6 +153,7 @@ def test_cli_test_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         "budget": Budget(),
         "workspaces": tmp_path / "workspaces",
         "proxy_container": "dev-proxy",
+        "all_files": False,
     }
 
 
@@ -168,6 +170,22 @@ def test_cli_test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert options["out"] == Path("footfall-results")
     assert options["workspaces"] == Path("/var/lib/footfall/workspaces")
     assert options["proxy_container"] == "footfall-proxy"
+
+
+def test_all_files_copies_every_file_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    assert main(["test", "app", "--model", "fake:s.json", "--all-files"]) == 0
+    ((_, options),) = recorder.calls
+    assert options["all_files"] is True
+    printed = capsys.readouterr()
+    assert ALL_FILES_WARNING in printed.err
+    assert ".env" in ALL_FILES_WARNING
+    assert main(["test", "app", "--model", "fake:s.json"]) == 0
+    assert recorder.calls[1][1]["all_files"] is False
+    assert ALL_FILES_WARNING not in capsys.readouterr().err
 
 
 def test_a_real_model_needs_the_api_key(

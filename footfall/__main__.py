@@ -15,7 +15,7 @@ Settings come from the environment:
 | Variable | Default |
 |---|---|
 | `FOOTFALL_RUNNER_SOCKET` | `/run/footfall/runner.sock` |
-| `FOOTFALL_PROXY_CONTROL` | `/run/footfall/proxy.sock` |
+| `FOOTFALL_PROXY_CONTROL` | `/run/footfall-proxy/proxy.sock` |
 | `FOOTFALL_WORKSPACES` | `/var/lib/footfall/workspaces` |
 | `FOOTFALL_RUNS` | `/var/lib/footfall/runs` |
 | `FOOTFALL_RUNTIME` | `runsc` |
@@ -53,11 +53,15 @@ from footfall.tester.loop import Budget
 from footfall.tester.model import DEFAULT_MODEL, ModelSpecError
 from footfall.tester.report import clean_text
 
-__all__ = ["RUNC_WARNING", "Settings", "main", "run_proxy", "run_runner"]
+__all__ = ["ALL_FILES_WARNING", "RUNC_WARNING", "Settings", "main", "run_proxy", "run_runner"]
 
 RUNC_WARNING: Final = (
     "footfall: warning: FOOTFALL_RUNTIME=runc starts containers without gVisor, so code "
     "under test runs on the host's own kernel. Use it for development only, never on a server."
+)
+ALL_FILES_WARNING: Final = (
+    "footfall test: warning: --all-files copies every file in the folder into the app's "
+    "containers, including files git would ignore, such as a .env with real keys in it."
 )
 RUNTIMES: Final = ("runsc", "runc")
 # The images the runner starts, as `docker build` tags them for development.
@@ -70,7 +74,8 @@ _STOPPED: Final = 130  # the exit code when a command is stopped by a signal
 
 _DEFAULTS: Final = {
     "FOOTFALL_RUNNER_SOCKET": "/run/footfall/runner.sock",
-    "FOOTFALL_PROXY_CONTROL": "/run/footfall/proxy.sock",
+    # A folder of its own, which only the proxy and the runner mount.
+    "FOOTFALL_PROXY_CONTROL": "/run/footfall-proxy/proxy.sock",
     "FOOTFALL_WORKSPACES": "/var/lib/footfall/workspaces",
     "FOOTFALL_RUNS": "/var/lib/footfall/runs",
     "FOOTFALL_RUNTIME": "runsc",
@@ -198,6 +203,8 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
     if not args.model.startswith("fake:") and not os.environ.get("ANTHROPIC_API_KEY"):
         say("set ANTHROPIC_API_KEY, or try Footfall without one with --model fake:<script>")
         return 2
+    if args.all_files:
+        print(ALL_FILES_WARNING, file=sys.stderr)
     try:
         reports = _until_stopped(
             test_folder(
@@ -211,6 +218,7 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
                 budget=Budget(),
                 workspaces=settings.workspaces,
                 proxy_container=settings.proxy_container,
+                all_files=args.all_files,
             )
         )
     except (RunnerError, LocalRunError) as error:
@@ -261,6 +269,14 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_OUT,
         help=f"the folder for the results (default: {DEFAULT_OUT})",
+    )
+    test.add_argument(
+        "--all-files",
+        action="store_true",
+        help=(
+            "copy every file in the folder, ignored ones included; needed outside git, which "
+            "otherwise decides what is copied"
+        ),
     )
     commands.add_parser("runner", help="serve the runner, which alone holds the Docker socket")
     commands.add_parser("proxy", help="serve the egress proxy")

@@ -45,6 +45,7 @@ def test_every_service_is_hardened(name: str) -> None:
     assert "    cap_drop:\n      - ALL" in block
     assert "    security_opt:\n      - no-new-privileges:true" in block
     assert "    logging: *logging" in block
+    assert "    init: true" in block  # a first process that reaps and passes signals on
     assert "privileged" not in block
     assert "ports:" not in block  # nothing listens on the host
     assert 'max-size: "10m"' in COMPOSE

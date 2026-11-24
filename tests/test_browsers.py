@@ -1,22 +1,18 @@
 """Browser contexts made for a persona, signing in, and connecting to the run's browsers."""
 
-import asyncio
 import json
-import socket
-import subprocess
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from playwright._impl._driver import compute_driver_executable
 from playwright.async_api import Browser, BrowserContext, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 from footfall import browsers
 from footfall.browsers import (
-    CHROMIUM_ARGS,
+    CHROMIUM_LAUNCH,
     BrowserConnectError,
     SignInError,
     connect_run_server,
@@ -266,7 +262,7 @@ async def test_sign_in_success_and_failure(
     context = await persona_context(loopback_browser, playwright, app_server, contexts)
     page = await context.new_page()
     await page.goto(app_server.origin + "/")
-    await sign_in(page, LOGIN, USERNAME, PASSWORD)
+    await sign_in(page, LOGIN, USERNAME, PASSWORD, app_server.origin)
     assert urlsplit(page.url).path == "/home"
     (sent,) = [hit.path for hit in app_server.hits if hit.path.startswith("/session")]
     assert parse_qs(urlsplit(sent).query) == {"u": [USERNAME], "p": [PASSWORD]}
@@ -275,7 +271,7 @@ async def test_sign_in_success_and_failure(
     page = await context.new_page()
     await page.goto(app_server.origin + "/")
     with pytest.raises(SignInError) as caught:
-        await sign_in(page, LOGIN, USERNAME, PASSWORD)
+        await sign_in(page, LOGIN, USERNAME, PASSWORD, app_server.origin)
     assert 'still on "/login"' in str(caught.value)
     assert PASSWORD not in str(caught.value)
 
@@ -294,7 +290,7 @@ async def test_sign_in_without_the_fields_fails_without_the_password(
     page = await context.new_page()
     await page.goto(app_server.origin + "/")
     with pytest.raises(SignInError) as caught:
-        await sign_in(page, LOGIN, USERNAME, PASSWORD)
+        await sign_in(page, LOGIN, USERNAME, PASSWORD, app_server.origin)
     assert "Email address" in str(caught.value)
     assert PASSWORD not in str(caught.value)
     assert caught.value.__cause__ is None
@@ -305,26 +301,28 @@ async def test_sign_in_without_the_fields_fails_without_the_password(
 
 
 class _Recorder:
-    """A browser type that records how it was asked to connect."""
+    """A browser type that records how it was asked to connect, and fails `failures` times."""
 
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, failures: int = 0) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.fail = fail
+        self.failures = failures
 
     async def connect(self, endpoint: str, **options: Any) -> str:
         self.calls.append((endpoint, options))
-        if self.fail:
+        if len(self.calls) <= self.failures:
             raise PlaywrightError(f"WebSocket error: {endpoint} 400 Bad Request")
         return "a browser"
 
 
 class _Playwright:
-    def __init__(self, fail: bool = False) -> None:
-        self.chromium = _Recorder(fail)
-        self.webkit = _Recorder(fail)
+    def __init__(self, failures: int = 0) -> None:
+        self.chromium = _Recorder(failures)
+        self.webkit = _Recorder(failures)
 
 
-async def test_chromium_is_asked_to_launch_without_encrypted_client_hello() -> None:
+async def test_chromium_is_launched_as_the_build_that_reads_policies() -> None:
+    # Only full Chromium reads the image's policy that turns Encrypted Client Hello off; the
+    # headless shell reads none, and no command-line switch turns it off in Chromium 158.
     fake = _Playwright()
     endpoint = "ws://10.89.0.12:3000/Zm9vYmFyYmF6"
     chromium: object = await connect_run_server(fake, "chromium", endpoint)  # type: ignore[arg-type]
@@ -333,59 +331,78 @@ async def test_chromium_is_asked_to_launch_without_encrypted_client_hello() -> N
     ((url, options),) = fake.chromium.calls
     assert url == endpoint
     launch = json.loads(options["headers"]["x-playwright-launch-options"])
-    assert launch == {"args": ["--disable-features=EncryptedClientHello"]}
-    assert list(CHROMIUM_ARGS) == launch["args"]
+    assert launch == {"channel": "chromium"} == CHROMIUM_LAUNCH
     ((url, options),) = fake.webkit.calls
     assert url == endpoint
     assert json.loads(options["headers"]["x-playwright-launch-options"]) == {}
 
 
+async def test_a_connection_is_tried_again_until_the_browsers_answer() -> None:
+    fake = _Playwright(failures=2)
+    endpoint = "ws://10.89.0.12:3000/Zm9vYmFyYmF6"
+    browser: object = await connect_run_server(fake, "chromium", endpoint, wait=5)  # type: ignore[arg-type]
+    assert browser == "a browser"
+    assert len(fake.chromium.calls) == 3
+
+
 async def test_a_failed_connection_never_shows_the_endpoint() -> None:
     endpoint = "ws://10.89.0.12:3000/c2VjcmV0LXBhdGgtdG9rZW4"
+    fake = _Playwright(failures=1000)
     with pytest.raises(BrowserConnectError) as caught:
-        await connect_run_server(_Playwright(fail=True), "chromium", endpoint)  # type: ignore[arg-type]
+        await connect_run_server(fake, "chromium", endpoint, wait=0.5)  # type: ignore[arg-type]
+    assert len(fake.chromium.calls) > 1
     assert "c2VjcmV0" not in str(caught.value)
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
 
 
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port: int = sock.getsockname()[1]
-        return port
-
-
-@pytest.fixture
-def run_server() -> Iterator[str]:
-    """Playwright's own run-server on 127.0.0.1, on a secret path, as the runner starts it."""
-    node, cli = compute_driver_executable()
-    port = free_port()
-    path = "/c2VjcmV0LXBhdGgtZm9yLXRoaXMtcnVu"
-    command = [str(node), str(cli), "run-server", "--port", str(port), "--host", "127.0.0.1"]
-    process = subprocess.Popen(
-        [*command, "--path", path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-    )
-    try:
-        assert process.stdout is not None
-        assert process.stdout.readline().decode().strip().endswith(path)
-        yield f"ws://127.0.0.1:{port}{path}"
-    finally:
-        process.terminate()
-        process.communicate(timeout=10)
-
-
-async def test_only_the_secret_path_reaches_the_browsers(
-    run_server: str, playwright: Playwright, app_server: AppServer
+async def test_sign_in_fills_nothing_on_a_page_off_the_app(
+    loopback_browser: Browser,
+    playwright: Playwright,
+    app_server: AppServer,
+    other_server: AppServer,
+    contexts: list[BrowserContext],
 ) -> None:
+    # A redirect hop is not routed, so the sign-in page can send the browser to another host,
+    # here one of the assets, which must never be given the account.
     app_server.page("/", PAGE)
-    root = run_server.rsplit("/", 1)[0] + "/"
-    with pytest.raises(BrowserConnectError):
-        await connect_run_server(playwright, "chromium", root)
-    browser = await connect_run_server(playwright, "chromium", run_server)
-    try:
-        page = await browser.new_page()
-        await page.goto(app_server.origin + "/")
-        assert await page.title() == "Plain"
-    finally:
-        await asyncio.wait_for(browser.close(), 30)
+    app_server.redirect("/login", f"http://assets.test:{other_server.port}/login")
+    other_server.page("/login", login_page("/session"))
+    context = await persona_context(
+        loopback_browser, playwright, app_server, contexts, proxy=other_server.origin
+    )
+    page = await context.new_page()
+    await page.goto(app_server.origin + "/")
+    with pytest.raises(SignInError) as caught:
+        await sign_in(page, LOGIN, USERNAME, PASSWORD, app_server.origin)
+    assert "left the app" in str(caught.value)
+    assert [hit.path for hit in other_server.hits] == [
+        f"http://assets.test:{other_server.port}/login"
+    ]
+    assert await page.locator("#u").input_value() == ""
+
+
+async def test_the_text_scale_follows_the_pages_own_root_size(
+    loopback_browser: Browser,
+    playwright: Playwright,
+    app_server: AppServer,
+    contexts: list[BrowserContext],
+) -> None:
+    # A site that sets its root to 62.5%, for rem units of 10px, grows by the persona's scale,
+    # not to 1.75 times the browser's 16px.
+    app_server.reply(
+        "/",
+        '<!doctype html><meta name="viewport" content="width=device-width">'
+        '<link rel="stylesheet" href="/site.css"><title>Rem</title><h1>Rem</h1>',
+        headers=STRICT,
+    )
+    app_server.reply("/site.css", "html { font-size: 62.5% }", headers={"Content-Type": "text/css"})
+    context = await persona_context(loopback_browser, playwright, app_server, contexts)
+    page = await context.new_page()
+    await page.goto(app_server.origin + "/")
+    sizes = await page.evaluate(
+        """() => [getComputedStyle(document.documentElement).fontSize,
+                  getComputedStyle(document.querySelector("h1")).fontSize,
+                  document.querySelectorAll("style").length]"""
+    )
+    assert sizes == ["17.5px", "35px", 0]

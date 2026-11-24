@@ -7,6 +7,7 @@ lookups switched off, and the model is a `FakeModel` or a scripted tester.
 """
 
 import asyncio
+import contextlib
 import json
 import re
 import shutil
@@ -24,6 +25,7 @@ from playwright.async_api import Browser, async_playwright
 from footfall import local
 from footfall.browsers import BrowserConnectError, open_context
 from footfall.local import (
+    LocalRunError,
     NotReadyError,
     OutputError,
     format_table,
@@ -37,7 +39,7 @@ from footfall.tester import tools
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import ModelTurn
 from footfall.tester.pricing import Usage
-from footfall.tester.report import Finding, PersonaReport
+from footfall.tester.report import Finding, PersonaReport, clean_text, strip_invisible
 from footfall.tester.screen import CaptureError, capture
 from footfall.tester.tools import Executor
 from tests.app_server import AppServer
@@ -184,6 +186,7 @@ async def run_folder(
     personas: Sequence[str] = ("grace",),
     model: str = FINISHES,
     brief: str = "default",
+    all_files: bool = True,
 ) -> list[Any]:
     return await test_folder(
         folder,
@@ -196,6 +199,7 @@ async def run_folder(
         budget=Budget(max_actions=8, max_seconds=120),
         connect_browser=connect_browser,
         workspaces=tmp_path / "workspaces",
+        all_files=all_files,
     )
 
 
@@ -364,6 +368,7 @@ async def test_contexts_use_the_proxy_container_and_the_device(
         connect_browser=connect[0],
         workspaces=tmp_path / "workspaces",
         proxy_container="proxy-for-tests",
+        all_files=True,
     )
     assert [r.status for r in reports] == ["finished", "finished"]
     origin = f"http://127.0.0.1:{app_server.port}"
@@ -547,6 +552,7 @@ async def test_the_results_folder_is_left_out_of_the_copy(
         budget=Budget(max_actions=8, max_seconds=120),
         connect_browser=connect[0],
         workspaces=tmp_path / "workspaces",
+        all_files=True,
     )
     # A link is copied as a link, never as the host file it points at.
     assert runner.workspace_files == [
@@ -790,6 +796,7 @@ async def test_footfall_signs_the_persona_in_when_the_brief_starts_signed_in(
         budget=Budget(max_actions=8, max_seconds=120),
         connect_browser=connect[0],
         workspaces=tmp_path / "workspaces",
+        all_files=True,
     )
     (report,) = reports
     assert report.status == "finished", report.reason
@@ -798,3 +805,228 @@ async def test_footfall_signs_the_persona_in_when_the_brief_starts_signed_in(
     assert json.loads(trace.splitlines()[0])["path_before"] == "/"  # signed in, on the list
     assert password.encode() not in everything_written(tmp_path / "out")
     assert password not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- which files are copied
+
+
+GIT = shutil.which("git") or "git"
+
+
+def git(folder: Path, *arguments: str) -> None:
+    subprocess.run([GIT, "-C", str(folder), *arguments], check=True, capture_output=True)
+
+
+async def test_only_the_files_git_would_commit_are_copied(
+    tmp_path: Path, app_server: AppServer, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    serve_two_pages(app_server)
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    (folder / ".gitignore").write_text(".env\nnode_modules/\n")
+    (folder / ".env").write_text("API_KEY=sk-not-a-real-key\n")  # gitleaks:allow
+    (folder / "node_modules").mkdir()
+    (folder / "node_modules" / "left-pad.js").write_text("module.exports = 1;\n")
+    (folder / "notes.txt").write_text("not committed yet, and not ignored\n")
+    (folder / "link").symlink_to("serve.py")
+    (folder / "gone.txt").write_text("tracked, then deleted\n")
+    git(folder, "add", "footfall.toml", "gone.txt")
+    (folder / "gone.txt").unlink()
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    reports = await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert [r.status for r in reports] == ["finished"]
+    assert runner.workspace_files == [
+        ".gitignore",
+        "footfall.toml",
+        "footfall/briefs/default.md",
+        "link -> serve.py",
+        "notes.txt",
+        "serve.py",
+    ]
+
+
+async def test_results_inside_a_repository_are_not_copied(
+    tmp_path: Path, app_server: AppServer, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    serve_two_pages(app_server)
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    (folder / "results" / "old").mkdir(parents=True)
+    (folder / "results" / "old" / "report.json").write_text("{}")
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    await test_folder(
+        folder,
+        persona_ids=["grace"],
+        brief_name="default",
+        focus=None,
+        model_spec=FINISHES,
+        out=folder / "results",
+        runner=runner,
+        budget=Budget(max_actions=8, max_seconds=120),
+        connect_browser=connect[0],
+        workspaces=tmp_path / "workspaces",
+    )
+    assert runner.workspace_files == ["footfall.toml", "footfall/briefs/default.md", "serve.py"]
+
+
+async def test_a_folder_outside_git_is_refused_without_all_files(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError, match="--all-files"):
+        await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path, all_files=False)
+    assert runner.calls == []
+    assert not (tmp_path / "out").exists()
+
+
+# ---------------------------------------------------------------- log tails and failures
+
+LOGIN_MANIFEST = (
+    MANIFEST
+    + """
+[login]
+page = "/login"
+username_label = "Username"
+password_label = "Password"
+submit = "Sign in"
+
+[test]
+briefs = "footfall/briefs"
+"""
+)
+
+
+def split_password(password: str) -> str:
+    """A log that holds the password whole, cut by a bell, and cut by a zero-width space."""
+    half = len(password) // 2
+    return (
+        f"seeding with {password}\n"
+        f"{password[:half]}\x07{password[half:]}\n"
+        f"{password[:3]}\u200b{password[3:]}\n"
+    )
+
+
+def assert_scrubbed(tail: str, password: str) -> None:
+    assert "[password]" in tail
+    assert password not in strip_invisible(clean_text(tail, 10**9))
+
+
+async def test_a_runner_log_tail_never_rebuilds_the_password(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    folder = two_pages(tmp_path, LOGIN_MANIFEST)
+    (folder / "footfall" / "briefs" / "default.md").write_text(
+        '+++\nstart = "signed-out"\n+++\nLook around.\n'
+    )
+
+    class SeedFails(FakeRunner):
+        async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> None:
+            env = rest[-1]
+            raise RunnerError(
+                "seed failed with exit code 1", split_password(env["FOOTFALL_PASSWORD"])
+            )
+
+    runner = SeedFails(lambda copy: "127.0.0.1:9")
+    with pytest.raises(RunnerError) as caught:
+        await run_folder(folder, runner, connect[0], tmp_path)
+    tail = caught.value.log_tail
+    password = re.search(r"seeding with \[password\]", tail)
+    assert password is not None
+    assert "\x07" not in tail
+    assert "\u200b" not in tail
+
+
+async def test_an_app_log_tail_never_rebuilds_the_password(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    folder = two_pages(tmp_path, LOGIN_MANIFEST)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        closed = sock.getsockname()[1]
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{closed}")
+    seen: list[str] = []
+    real_prepare = runner.prepare
+
+    async def prepare(*arguments: Any) -> None:
+        await real_prepare(*arguments)
+        seen.append(arguments[-1]["FOOTFALL_PASSWORD"])
+        runner.log_text = split_password(seen[0])
+
+    runner.prepare = prepare  # type: ignore[method-assign,assignment]
+    with pytest.raises(NotReadyError) as caught:
+        await run_folder(folder, runner, connect[0], tmp_path)
+    assert_scrubbed(caught.value.log_tail, seen[0])
+
+
+async def test_wait_ready_survives_an_endless_line() -> None:
+    async def flood(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(b"HTTP/1.1 200 " + b"x" * 70_000)
+        with contextlib.suppress(ConnectionError):
+            await writer.drain()
+            await reader.read()
+        writer.close()
+
+    server = await asyncio.start_server(flood, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        with pytest.raises(TimeoutError):
+            await wait_ready(f"127.0.0.1:{port}", "/healthz", 1)
+    finally:
+        server.close()
+
+
+async def test_a_report_that_cannot_be_written_stops_nothing(
+    tmp_path: Path,
+    app_server: AppServer,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serve_two_pages(app_server)
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    real_write = local._write_json
+
+    def write(path: Path, data: object, password: str | None) -> None:
+        runner.calls.append(("written", path.parent.name, path.name))
+        if path.parent.name == "kenji":
+            raise OSError(28, "No space left on device")
+        real_write(path, data, password)
+
+    monkeypatch.setattr(local, "_write_json", write)
+    reports = await run_folder(
+        two_pages(tmp_path), runner, connect[0], tmp_path, personas=CHROMIUM_PERSONAS
+    )
+    assert [(r.persona, r.status) for r in reports] == [
+        ("grace", "finished"),
+        ("kenji", "finished"),
+    ]
+    ops = [call[:2] for call in runner.calls]
+    assert ops.index(("stop", ops[-1][1])) == len(ops) - 1
+    assert ("written", "grace") in ops and ("written", "kenji") in ops
+
+
+async def test_every_persona_ends_before_a_failure_is_raised(
+    tmp_path: Path,
+    app_server: AppServer,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serve_two_pages(app_server)
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    real_persona = local._Run.persona
+
+    async def persona(self: Any, who: Any, *rest: Any) -> Any:
+        if who.id == "kenji":
+            raise RuntimeError("kenji's part broke at once")
+        report = await real_persona(self, who, *rest)
+        runner.calls.append(("ended", who.id))
+        return report
+
+    monkeypatch.setattr(local._Run, "persona", persona)
+    with pytest.raises(RuntimeError, match="broke at once"):
+        await run_folder(
+            two_pages(tmp_path), runner, connect[0], tmp_path, personas=CHROMIUM_PERSONAS
+        )
+    ops = runner.ops()
+    assert ops[-2:] == ["ended", "stop"]
+    grace = json.loads((tmp_path / "out" / "grace" / "report.json").read_text())
+    assert grace["status"] == "finished"  # not cut short when its browser was closed
