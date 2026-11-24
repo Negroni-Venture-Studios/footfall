@@ -3,10 +3,13 @@
 import asyncio
 import contextlib
 import json
+import resource
 import socket
 import stat
 import tempfile
+import threading
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -310,3 +313,69 @@ async def test_client_refuses_a_garbled_reply(data: bytes) -> None:
         finally:
             server.close()
             await server.wait_closed()
+
+
+async def test_stop_and_status_do_not_queue_behind_prepare(tmp_path: Path) -> None:
+    # One worker in the default pool, held by a prepare whose install step never finishes.
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+    release = threading.Event()
+    async with running(tmp_path) as live:
+        h = live.harness
+        h.engine.during_wait["install"] = lambda _: release.wait(10)
+        preparing = asyncio.create_task(
+            live.client.prepare(RUN, h.workspace(), "python3.13", "pip install x", None, [], {})
+        )
+        for _ in range(500):
+            if any(call[0] == "wait" for call in h.engine.calls):
+                break
+            await asyncio.sleep(0.01)
+        try:
+            async with asyncio.timeout(3):
+                assert await live.client.status(RUN) is None
+                await live.client.stop(RUN)
+        finally:
+            release.set()
+        with pytest.raises(RunnerError, match="was stopped"):
+            await preparing
+        assert h.engine.live == {}
+        assert h.engine.networks == {}
+
+
+async def test_connections_are_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("footfall.runner.server.MAX_CONNECTIONS", 1)
+    async with running(tmp_path) as live:
+        reader, writer = await asyncio.open_unix_connection(str(live.socket))  # the only slot
+        status = asyncio.create_task(live.client.status(RUN))
+        try:
+            await asyncio.sleep(0.3)
+            assert not status.done()
+        finally:
+            writer.write_eof()
+            await reader.read()
+            writer.close()
+            await writer.wait_closed()
+        async with asyncio.timeout(3):
+            assert await status is None
+
+
+async def test_serve_raises_the_open_file_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[int, tuple[int, int]]] = []
+    monkeypatch.setattr(resource, "getrlimit", lambda which: (256, 4096))
+    monkeypatch.setattr(resource, "setrlimit", lambda which, limits: calls.append((which, limits)))
+    async with running(tmp_path) as live:
+        assert await live.client.status(RUN) is None
+    assert calls == [(resource.RLIMIT_NOFILE, (4096, 4096))]
+
+
+async def test_serve_starts_when_the_file_limit_cannot_be_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(which: int, limits: tuple[int, int]) -> None:
+        raise ValueError("not allowed to raise maximum limit")
+
+    monkeypatch.setattr(resource, "getrlimit", lambda which: (256, resource.RLIM_INFINITY))
+    monkeypatch.setattr(resource, "setrlimit", refuse)
+    async with running(tmp_path) as live:
+        assert await live.client.status(RUN) is None

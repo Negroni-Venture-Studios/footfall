@@ -5,6 +5,8 @@ at most 64 KiB and names an op and exactly that op's fields, each of the right t
 else is refused before the service sees it. The service's methods block, so each request runs
 in a thread of its own. The socket's mode is 0660, so only the runner's user and group can use
 it.
+At most `MAX_CONNECTIONS` connections are served at once, and `stop` and `status` run in a small
+pool of their own, so that they never queue behind long preparations.
 
     {"op": "prepare", "run_id": "...", ...}
     {"ok": true, "result": ...}
@@ -17,10 +19,12 @@ import functools
 import json
 import logging
 import os
+import resource
 import socket
 import stat
 import threading
 from collections.abc import Callable, Mapping
+from concurrent.futures import Executor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Final
 
@@ -29,6 +33,9 @@ from footfall.runner.service import RunnerError, RunnerService
 logger = logging.getLogger(__name__)
 
 MAX_REQUEST: Final = 64 * 1024
+MAX_CONNECTIONS = 64
+_CONTROL_OPS: Final = frozenset({"stop", "status"})
+_CONTROL_THREADS: Final = 4
 _READ_TIMEOUT: Final = 30.0
 _DISCARD_LIMIT: Final = 1024 * 1024
 _MAX_ERROR: Final = 4000
@@ -163,7 +170,9 @@ async def _discard_line(reader: asyncio.StreamReader) -> None:
                 remaining -= len(chunk)
 
 
-async def _reply(service: RunnerService, reader: asyncio.StreamReader) -> dict[str, Any]:
+async def _reply(
+    service: RunnerService, control: Executor, reader: asyncio.StreamReader
+) -> dict[str, Any]:
     try:
         async with asyncio.timeout(_READ_TIMEOUT):
             line = await reader.readuntil(b"\n")
@@ -179,7 +188,11 @@ async def _reply(service: RunnerService, reader: asyncio.StreamReader) -> dict[s
     except _Refused as refused:
         return _failure(str(refused))
     try:
-        result = await asyncio.to_thread(_call, service, op, fields)
+        if op in _CONTROL_OPS:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(control, _call, service, op, fields)
+        else:
+            result = await asyncio.to_thread(_call, service, op, fields)
     except RunnerError as error:
         return _failure(str(error), error.log_tail)
     except Exception:
@@ -190,12 +203,17 @@ async def _reply(service: RunnerService, reader: asyncio.StreamReader) -> dict[s
 
 
 async def _handle(
-    service: RunnerService, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    service: RunnerService,
+    control: Executor,
+    gate: asyncio.Semaphore,
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
 ) -> None:
     try:
-        reply = await _reply(service, reader)
-        writer.write(json.dumps(reply).encode() + b"\n")
-        await writer.drain()
+        async with gate:
+            reply = await _reply(service, control, reader)
+            writer.write(json.dumps(reply).encode() + b"\n")
+            await writer.drain()
     except ConnectionError:
         pass  # the client went away; there is nobody to tell
     finally:
@@ -225,23 +243,39 @@ def _bind(path: Path) -> socket.socket:
     return sock
 
 
+def _raise_file_limit() -> None:
+    """Let the runner hold as many open files as it may, since walking a deep tree takes one
+    for each level."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft == hard:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except (ValueError, OSError):
+        logger.warning("could not raise the open-file limit from %s", soft)
+
+
 async def serve(service: RunnerService, socket_path: Path) -> None:
-    """Answer requests on `socket_path` until cancelled, and watch the runs' disk use meanwhile."""
+    """Answer requests on `socket_path` until cancelled, and watch the runs meanwhile."""
+    _raise_file_limit()
     sock = _bind(socket_path)
     inode = socket_path.lstat().st_ino
     stop = threading.Event()
     watcher = threading.Thread(
-        target=service.watch, args=(stop,), name="footfall-disk-watch", daemon=True
+        target=service.watch, args=(stop,), name="footfall-runner-watch", daemon=True
     )
+    control = ThreadPoolExecutor(_CONTROL_THREADS, thread_name_prefix="footfall-runner-control")
+    gate = asyncio.Semaphore(MAX_CONNECTIONS)
     try:
         server = await asyncio.start_unix_server(
-            functools.partial(_handle, service), sock=sock, limit=MAX_REQUEST
+            functools.partial(_handle, service, control, gate), sock=sock, limit=MAX_REQUEST
         )
         watcher.start()
         async with server:
             await server.serve_forever()
     finally:
         stop.set()
+        control.shutdown(wait=False, cancel_futures=True)
         sock.close()
         with contextlib.suppress(FileNotFoundError):
             if socket_path.lstat().st_ino == inode:
