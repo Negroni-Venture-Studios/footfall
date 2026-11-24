@@ -8,6 +8,7 @@ import pytest
 from playwright.async_api import Browser, async_playwright
 
 from tests.app_server import AppServer
+from tests.fake_api import Api
 
 LOOPBACK = {"127.0.0.1", "::1"}
 # Host names the browser tests use for "somewhere else". The browser resolves them to the
@@ -63,3 +64,13 @@ async def loopback_browser(other_server: AppServer) -> AsyncIterator[Browser]:
             yield browser
         finally:
             await browser.close()
+
+
+@pytest.fixture
+async def api() -> AsyncIterator[Api]:
+    """A stand-in for the Messages API; see `tests/fake_api.py`."""
+    fake = Api()
+    try:
+        yield fake
+    finally:
+        await fake.close()

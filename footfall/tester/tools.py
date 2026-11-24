@@ -420,6 +420,11 @@ class Executor:
         self._home_path = "/"
 
     @property
+    def secrets(self) -> tuple[str, ...]:
+        """The strings this executor redacts, longest first, so others can redact the same."""
+        return self._secrets
+
+    @property
     def screenshot_ids(self) -> set[str]:
         """The ids of every screenshot taken so far, which findings may cite."""
         return set(self._shots)

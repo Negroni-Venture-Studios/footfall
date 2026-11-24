@@ -1,0 +1,27 @@
+[
+  [
+    {"text": "The home page links to a second page. I will open it."},
+    {"tool": "go", "input": {"to": "/second"}}
+  ],
+  [
+    {
+      "tool": "finish",
+      "input": {
+        "summary": "Both pages load, but the second page has no way back.",
+        "score": 6,
+        "goal_reached": "partly",
+        "findings": [
+          {
+            "title": "No way back from the second page",
+            "severity": "minor",
+            "page": "/second",
+            "steps": ["Open /", "Go to /second", "Look for a link home"],
+            "expected": "A link or button back to the home page.",
+            "actual": "The page has a heading and nothing else.",
+            "screenshots": ["02"]
+          }
+        ]
+      }
+    }
+  ]
+]

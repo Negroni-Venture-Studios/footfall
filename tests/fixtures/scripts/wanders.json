@@ -1,0 +1,12 @@
+[
+  [{"tool": "look", "input": {}}],
+  [{"tool": "scroll", "input": {"direction": "down"}}],
+  [{"tool": "look", "input": {}}],
+  [{"tool": "scroll", "input": {"direction": "up"}}],
+  [{"tool": "look", "input": {}}],
+  [{"tool": "look", "input": {}}],
+  [{"tool": "look", "input": {}}],
+  [{"tool": "look", "input": {}}],
+  [{"tool": "look", "input": {}}],
+  [{"tool": "look", "input": {}}]
+]
