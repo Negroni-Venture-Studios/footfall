@@ -1,0 +1,785 @@
+"""The egress proxy's HTTP and CONNECT handling, against an upstream on loopback.
+
+The proxy's `resolve` is replaced, so test names lead to 127.0.0.1 and one name counts as
+private, and its `open_upstream` sends every connection to the local upstream's port while
+recording the address and port the proxy asked for. No test leaves loopback.
+"""
+
+import asyncio
+import contextlib
+import functools
+import logging
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+import pytest
+
+from footfall.hosts import HostError, resolve_public
+from footfall.proxy.policy import Policy
+from footfall.proxy.server import MAX_HEAD, ProxyServer
+from tests.tls_hellos import hello, real_client_hello, sni
+
+RUN = "r_abcdefghijklmnopqrstuvwxyz"
+CLIENT = "127.0.0.1"
+ALLOWED = "api.example.com"
+PRIVATE = "private.example.com"
+RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+TIMEOUT = 5.0
+
+
+@dataclass
+class Upstream:
+    """A server on loopback that echoes TLS-looking bytes and answers anything else as HTTP.
+
+    It records every byte each connection sent it, once that connection has ended.
+    """
+
+    response: bytes = RESPONSE
+    received: list[bytes] = field(default_factory=list)
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        data = bytearray()
+        try:
+            first = await reader.read(1)
+            data += first
+            if first == b"\x16":
+                writer.write(first)
+                while chunk := await reader.read(65536):
+                    data += chunk
+                    writer.write(chunk)
+                    await writer.drain()
+                return
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    return
+                data += chunk
+            head = bytes(data).split(b"\r\n\r\n", 1)[0].decode("latin-1").lower()
+            length = 0
+            for line in head.split("\r\n")[1:]:
+                if line.startswith("content-length:"):
+                    length = int(line.split(":", 1)[1])
+            while len(data) < len(head) + 4 + length:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    return
+                data += chunk
+            with contextlib.suppress(TimeoutError):  # catch anything sent after the request
+                async with asyncio.timeout(0.05):
+                    data += await reader.read(65536)
+            writer.write(self.response)
+            await writer.drain()
+        except ConnectionError:
+            pass
+        finally:
+            self.received.append(bytes(data))
+            writer.close()
+
+    async def wait_for(self, count: int) -> None:
+        async with asyncio.timeout(TIMEOUT):
+            while len(self.received) < count:
+                await asyncio.sleep(0.01)
+
+
+@dataclass
+class Live:
+    policy: Policy
+    proxy: ProxyServer
+    port: int
+    upstream: Upstream
+    connects: list[tuple[str, int]]
+    resolved: list[tuple[str, int]]
+
+
+type Resolve = Callable[[str, int], Awaitable[str]]
+
+
+@contextlib.asynccontextmanager
+async def running(resolve: Resolve | None = None, **settings: Any) -> AsyncIterator[Live]:
+    upstream = Upstream()
+    upstream_server = await asyncio.start_server(upstream.handle, "127.0.0.1", 0)
+    upstream_port = upstream_server.sockets[0].getsockname()[1]
+    connects: list[tuple[str, int]] = []
+    resolved: list[tuple[str, int]] = []
+
+    async def open_upstream(
+        address: str, port: int
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        connects.append((address, port))
+        return await asyncio.open_connection(address, upstream_port)
+
+    async def fake_resolve(host: str, port: int) -> str:
+        resolved.append((host, port))
+        if host == PRIVATE:
+            raise HostError(f"{host} resolves to 10.0.0.1, which is not a public address")
+        return "127.0.0.1"
+
+    policy = Policy()
+    settings.setdefault("open_upstream", open_upstream)
+    proxy = ProxyServer(policy, resolve or fake_resolve, **settings)
+    server = await proxy.start("127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield Live(policy, proxy, port, upstream, connects, resolved)
+    finally:
+        server.close()
+        upstream_server.close()
+        async with asyncio.timeout(TIMEOUT):
+            while proxy.connections:
+                await asyncio.sleep(0.01)
+            await server.wait_closed()
+            await upstream_server.wait_closed()
+
+
+@pytest.fixture
+async def live() -> AsyncIterator[Live]:
+    async with running() as value:
+        value.policy.allow(CLIENT, RUN, [ALLOWED, PRIVATE])
+        yield value
+
+
+async def exchange(port: int, data: bytes) -> bytes:
+    """Send bytes to the proxy and return everything it sends back before it closes."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        writer.write(data)
+        await writer.drain()
+        async with asyncio.timeout(TIMEOUT):
+            return await reader.read()
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+
+@dataclass
+class Tunnel:
+    reply: bytes
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+
+    async def close(self) -> None:
+        self.writer.close()
+        with contextlib.suppress(OSError):
+            await self.writer.wait_closed()
+
+
+@contextlib.asynccontextmanager
+async def tunnel(port: int, authority: str) -> AsyncIterator[Tunnel]:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode())
+    await writer.drain()
+    try:
+        async with asyncio.timeout(TIMEOUT):
+            reply = await reader.readuntil(b"\r\n\r\n")
+        value = Tunnel(reply, reader, writer)
+        yield value
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+
+async def first_reply(port: int) -> bytes:
+    """Connect, send nothing, and return what the proxy says before it closes.
+
+    A connection over the caps is closed without being read, so a client that had sent a
+    request might see the connection reset before it reads the reply.
+    """
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        async with asyncio.timeout(TIMEOUT):
+            return await reader.read()
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+
+async def read_to_end(reader: asyncio.StreamReader) -> bytes:
+    async with asyncio.timeout(TIMEOUT):
+        return await reader.read()
+
+
+def status(reply: bytes) -> int:
+    return int(reply.split(b" ", 2)[1])
+
+
+def get(target: str, *headers: str, method: str = "GET", body: bytes = b"") -> bytes:
+    lines = [f"{method} {target} HTTP/1.1", *headers]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
+
+
+# ---------------------------------------------------------------- CONNECT
+
+
+async def test_connect_allowed_relays_bytes(live: Live) -> None:
+    record = real_client_hello(ALLOWED)
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        assert t.reply == b"HTTP/1.1 200 Connection established\r\n\r\n"
+        t.writer.write(record + b"ping")
+        await t.writer.drain()
+        async with asyncio.timeout(TIMEOUT):
+            echoed = await t.reader.readexactly(len(record) + 4)
+        assert echoed == record + b"ping"
+        t.writer.write(b"pong")
+        await t.writer.drain()
+        async with asyncio.timeout(TIMEOUT):
+            assert await t.reader.readexactly(4) == b"pong"
+    await live.upstream.wait_for(1)
+    assert live.upstream.received == [record + b"pingpong"]
+    assert live.connects == [("127.0.0.1", 443)]
+    assert live.resolved == [(ALLOWED, 443)]
+    assert live.policy.reached(RUN) == [ALLOWED]
+
+
+async def test_connect_name_is_matched_without_case(live: Live) -> None:
+    record = hello(sni(b"API.Example.COM"))
+    async with tunnel(live.port, "Api.Example.com:443") as t:
+        assert status(t.reply) == 200
+        t.writer.write(record)
+        await t.writer.drain()
+        async with asyncio.timeout(TIMEOUT):
+            assert await t.reader.readexactly(len(record)) == record
+    assert live.connects == [("127.0.0.1", 443)]
+
+
+async def test_connect_disallowed_host_403(live: Live) -> None:
+    reply = await exchange(live.port, get("evil.example.com:443", method="CONNECT"))
+    assert status(reply) == 403
+    assert b"evil.example.com is not on this client's allow list" in reply
+    assert live.connects == []
+    assert live.resolved == []
+
+
+async def test_private_resolution_403(live: Live) -> None:
+    reply = await exchange(live.port, get(f"{PRIVATE}:443", method="CONNECT"))
+    assert status(reply) == 403
+    assert b"public" in reply
+    assert b"10.0.0.1" not in reply
+    reply = await exchange(live.port, get(f"http://{PRIVATE}/"))
+    assert status(reply) == 403
+    assert live.connects == []
+    assert live.policy.reached(RUN) == []
+
+
+async def test_metadata_address_refused_by_the_real_resolution() -> None:
+    async def metadata(host: str, port: int) -> list[str]:
+        return ["169.254.169.254"]
+
+    async with running(functools.partial(resolve_public, resolver=metadata)) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        reply = await exchange(live.port, get(f"{ALLOWED}:443", method="CONNECT"))
+        assert status(reply) == 403
+        assert live.connects == []
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [f"{ALLOWED}:8080", f"{ALLOWED}:80", f"{ALLOWED}:22", f"{ALLOWED}:0", f"{ALLOWED}:99999"],
+)
+async def test_port_8080_403(live: Live, authority: str) -> None:
+    reply = await exchange(live.port, get(authority, method="CONNECT"))
+    assert status(reply) in (400, 403)
+    assert live.connects == []
+    assert live.resolved == []
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [
+        "169.254.169.254:443",
+        "127.0.0.1:443",
+        "127.1:443",
+        "[::1]:443",
+        "[fd00::1]:443",
+        "2130706433:443",
+        f"user@{ALLOWED}:443",
+        "bücher.example:443",
+        f"{ALLOWED}.:443",
+        "localhost:443",
+    ],
+)
+async def test_connect_to_addresses_and_bad_names_403(live: Live, authority: str) -> None:
+    reply = await exchange(live.port, get(authority, method="CONNECT").decode("latin-1").encode())
+    assert status(reply) == 403
+    assert b"not a valid host name" in reply
+    assert live.resolved == []
+
+
+async def test_connect_sni_mismatch_is_closed(live: Live) -> None:
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        assert status(t.reply) == 200
+        t.writer.write(real_client_hello("evil.example.com"))
+        await t.writer.drain()
+        assert await read_to_end(t.reader) == b""
+    assert live.connects == []
+    assert live.policy.reached(RUN) == []
+
+
+async def test_connect_without_sni_is_closed(live: Live) -> None:
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        t.writer.write(real_client_hello(None))
+        await t.writer.drain()
+        assert await read_to_end(t.reader) == b""
+    assert live.connects == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"GET / HTTP/1.1\r\nHost: evil.example.com\r\n\r\n",
+        b"\x16\x03\x01\x40\x01" + b"\x01" * 100,  # a record longer than TLS allows
+        hello(sni(b"api.example.com") + sni(b"evil.example.com")),
+        hello(sni(b"api.example.com", b"evil.example.com")),
+        hello(sni(b"api.example.com"))[:-1],
+    ],
+    ids=["plain-http", "oversized-record", "repeated-sni", "two-names", "short"],
+)
+async def test_connect_without_a_matching_client_hello_is_closed(live: Live, data: bytes) -> None:
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        t.writer.write(data)
+        await t.writer.drain()
+        if data == hello(sni(b"api.example.com"))[:-1]:
+            t.writer.write_eof()  # the proxy is still waiting for the last byte
+        assert await read_to_end(t.reader) == b""
+    assert live.connects == []
+
+
+async def test_connect_waits_only_the_idle_timeout_for_the_hello() -> None:
+    async with running(idle_timeout=0.2) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            assert status(t.reply) == 200
+            t.writer.write(b"\x16\x03")  # a hello that never finishes
+            await t.writer.drain()
+            started = time.monotonic()
+            assert await read_to_end(t.reader) == b""
+            assert time.monotonic() - started < 2
+        assert live.connects == []
+
+
+async def test_connect_with_a_body_refused(live: Live) -> None:
+    reply = await exchange(
+        live.port, get(f"{ALLOWED}:443", "Content-Length: 5", method="CONNECT", body=b"hello")
+    )
+    assert status(reply) == 400
+    assert live.connects == []
+
+
+# ---------------------------------------------------------------- plain HTTP
+
+
+async def test_http_absolute_form_forwarded(live: Live, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+    reply = await exchange(
+        live.port,
+        get(
+            f"http://{ALLOWED}/path/to?q=private-query",
+            f"Host: {ALLOWED}",
+            "User-Agent: footfall-test-agent",
+            "Accept: */*",
+            "Proxy-Authorization: Basic bm90LWEtcmVhbC1zZWNyZXQ=",  # gitleaks:allow
+            "Proxy-Connection: keep-alive",
+            "Connection: keep-alive, Upgrade",
+            "Upgrade: websocket",
+            "Keep-Alive: timeout=5",
+            "TE: trailers",
+        ),
+    )
+    assert reply == RESPONSE
+    await live.upstream.wait_for(1)
+    assert live.upstream.received == [
+        b"GET /path/to?q=private-query HTTP/1.1\r\n"
+        b"Host: api.example.com\r\n"
+        b"User-Agent: footfall-test-agent\r\n"
+        b"Accept: */*\r\n"
+        b"Connection: close\r\n\r\n"
+    ]
+    assert live.connects == [("127.0.0.1", 80)]
+    assert live.resolved == [(ALLOWED, 80)]
+    # One line for the decision, with no header value and no query string.
+    lines = [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
+    assert len(lines) == 1
+    assert all(part in lines[0] for part in (CLIENT, RUN, ALLOWED, "80", "allowed"))
+    assert "private-query" not in caplog.text
+    assert "footfall-test-agent" not in caplog.text
+    assert "bm90" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("target", "origin"),
+    [
+        (f"http://{ALLOWED}", b"/"),
+        (f"HTTP://{ALLOWED.upper()}:80/a", b"/a"),
+        (f"http://{ALLOWED}?x=1", b"/?x=1"),
+    ],
+)
+async def test_http_targets_become_origin_form(live: Live, target: str, origin: bytes) -> None:
+    assert await exchange(live.port, get(target)) == RESPONSE
+    await live.upstream.wait_for(1)
+    assert live.upstream.received[0].startswith(b"GET " + origin + b" HTTP/1.1\r\n")
+    assert b"\r\nHost: api.example.com\r\n" in live.upstream.received[0]
+
+
+async def test_http_client_host_header_is_replaced(live: Live) -> None:
+    reply = await exchange(
+        live.port,
+        get(f"http://{ALLOWED}/", "Host: evil.example.com", "host: evil2.example.com"),
+    )
+    assert reply == RESPONSE
+    await live.upstream.wait_for(1)
+    sent = live.upstream.received[0]
+    assert sent == b"GET / HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n"
+
+
+async def test_http_body_forwarded_by_its_content_length(live: Live) -> None:
+    request = get(f"http://{ALLOWED}/form", "Content-Length: 5", method="POST", body=b"hello")
+    assert await exchange(live.port, request) == RESPONSE
+    await live.upstream.wait_for(1)
+    assert live.upstream.received == [
+        b"POST /form HTTP/1.1\r\nHost: api.example.com\r\n"
+        b"Content-Length: 5\r\nConnection: close\r\n\r\nhello"
+    ]
+
+
+async def test_http_second_request_is_not_forwarded(live: Live) -> None:
+    first = get(f"http://{ALLOWED}/one", "Content-Length: 5", method="POST", body=b"hello")
+    second = get("http://evil.example.com/two", "Host: evil.example.com")
+    smuggled = get("/three", "Host: evil.example.com")
+    reply = await exchange(live.port, first + second + smuggled)
+    assert reply == RESPONSE
+    await live.upstream.wait_for(1)
+    assert live.upstream.received == [
+        b"POST /one HTTP/1.1\r\nHost: api.example.com\r\n"
+        b"Content-Length: 5\r\nConnection: close\r\n\r\nhello"
+    ]
+    assert live.connects == [("127.0.0.1", 80)]
+
+
+async def test_http_large_response_is_relayed() -> None:
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        body = bytes(range(256)) * 4096  # 1 MiB
+        live.upstream.response = b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n" + body
+        reply = await exchange(live.port, get(f"http://{ALLOWED}/big"))
+        assert reply == live.upstream.response
+
+
+@pytest.mark.parametrize(
+    ("headers", "code"),
+    [
+        (("Transfer-Encoding: chunked",), 411),
+        (("Transfer-Encoding: chunked", "Content-Length: 5"), 400),
+        (("Content-Length: 5", "Content-Length: 5"), 400),
+        (("Content-Length: 5, 5",), 400),
+        (("Content-Length: -1",), 400),
+        (("Content-Length: +5",), 400),
+        (("Content-Length: 0x5",), 400),
+        (("Content-Length: " + "9" * 16,), 400),
+        (("Content-Length:",), 400),
+        (("Bad Header: x",), 400),
+        (("Bad-Header : x",), 400),
+        (("NoColon",), 400),
+        (("X-Folded: a", " b"), 400),
+        (("X-Control: a\x00b",), 400),
+        (("X-Control: a\x7fb",), 400),
+    ],
+)
+async def test_ambiguous_or_malformed_headers_refused(
+    live: Live, headers: tuple[str, ...], code: int
+) -> None:
+    request = get(f"http://{ALLOWED}/", *headers, method="POST", body=b"hello")
+    reply = await exchange(live.port, request)
+    assert status(reply) == code
+    assert live.connects == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"GET http://api.example.com/ HTTP/1.1\nHost: api.example.com\r\n\r\n",
+        b"GET http://api.example.com/ HTTP/1.1\r\nHost: api.example.com\n\r\n\r\n",
+        b"GET http://api.example.com/ HTTP/1.1\r\nX-A: 1\rX-B: 2\r\n\r\n",
+        b"GET http://api.example.com/ HTTP/1.1\r\nX-A: 1\n\n"
+        b"GET http://evil.example.com/ HTTP/1.1\r\n\r\n",
+        b"\r\nGET http://api.example.com/ HTTP/1.1\r\n\r\n",
+    ],
+    ids=["lf-request-line", "lf-header", "bare-cr", "lf-smuggle", "leading-blank"],
+)
+async def test_bare_line_endings_refused(live: Live, data: bytes) -> None:
+    reply = await exchange(live.port, data)
+    assert status(reply) == 400
+    # Refused for its line endings, not for whatever the stray CR or LF did to a field.
+    assert b"CRLF" in reply or data.startswith(b"\r\n")
+    assert live.connects == []
+
+
+@pytest.mark.parametrize(
+    ("target", "code"),
+    [
+        ("/relative", 400),
+        (f"https://{ALLOWED}/", 400),
+        (f"ftp://{ALLOWED}/", 400),
+        (f"http://{ALLOWED}/#fragment", 400),
+        (f"http://user:pw@{ALLOWED}/", 400),
+        (f"http://{ALLOWED}@evil.example.com/", 400),
+        (f"http://{ALLOWED}:/", 400),
+        (f"http://{ALLOWED}:443/", 403),
+        (f"http://{ALLOWED}:8080/", 403),
+        ("http://169.254.169.254/latest/meta-data/", 403),
+        ("http://[::1]/", 403),
+        ("http://127.1/", 403),
+        ("http://0x7f.1/", 403),
+        ("http://localhost/", 403),
+        ("http://evil.example.com/", 403),
+        ("http:///nohost", 403),
+    ],
+)
+async def test_bad_http_targets_refused(live: Live, target: str, code: int) -> None:
+    reply = await exchange(live.port, get(target))
+    assert status(reply) == code
+    assert live.connects == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "TRACE http://api.example.com/ HTTP/1.1",
+        "get http://api.example.com/ HTTP/1.1",
+        "GET http://api.example.com/ HTTP/2.0",
+        "GET http://api.example.com/  HTTP/1.1",
+        "GET http://api.example.com/ HTTP/1.1 extra",
+        "GET http://api.example.com/\x01 HTTP/1.1",
+        "GET http://api.example.com/\xe9 HTTP/1.1",
+    ],
+)
+async def test_bad_request_lines_refused(live: Live, line: str) -> None:
+    reply = await exchange(live.port, (line + "\r\n\r\n").encode("latin-1"))
+    assert status(reply) in (400, 405)
+    assert live.connects == []
+
+
+async def test_oversized_headers_refused(live: Live) -> None:
+    padding = "X-Pad: " + "p" * MAX_HEAD
+    reply = await exchange(live.port, get(f"http://{ALLOWED}/", padding))
+    assert status(reply) == 431
+    assert live.connects == []
+    assert MAX_HEAD == 16 * 1024
+
+
+async def test_headers_just_within_the_limit_are_read(live: Live) -> None:
+    request = get(f"http://{ALLOWED}/", "X-Pad: ")
+    padding = "p" * (MAX_HEAD - len(request))
+    request = get(f"http://{ALLOWED}/", "X-Pad: " + padding)
+    assert len(request) == MAX_HEAD
+    assert await exchange(live.port, request) == RESPONSE
+
+
+@pytest.mark.parametrize("extra", [1, 4])
+async def test_headers_just_over_the_limit_are_refused(live: Live, extra: int) -> None:
+    request = get(f"http://{ALLOWED}/", "X-Pad: ")
+    padding = "p" * (MAX_HEAD + extra - len(request))
+    request = get(f"http://{ALLOWED}/", "X-Pad: " + padding)
+    assert len(request) == MAX_HEAD + extra
+    reply = await exchange(live.port, request)
+    assert status(reply) == 431
+    assert live.connects == []
+
+
+async def test_too_many_headers_refused(live: Live) -> None:
+    headers = [f"X-{n}: 1" for n in range(101)]
+    reply = await exchange(live.port, get(f"http://{ALLOWED}/", *headers))
+    assert status(reply) == 431
+
+
+async def test_upstream_that_cannot_be_reached_is_502() -> None:
+    async def nowhere(address: str, port: int) -> tuple[asyncio.StreamReader, Any]:
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    async with running(open_upstream=nowhere) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        reply = await exchange(live.port, get(f"http://{ALLOWED}/"))
+        assert status(reply) == 502
+
+
+# ---------------------------------------------------------------- unknown clients (R17)
+
+
+async def test_unknown_client_403() -> None:
+    async with running(unknown_wait=0.3, unknown_poll=0.05) as live:
+        started = time.monotonic()
+        reply = await exchange(live.port, get(f"{ALLOWED}:443", method="CONNECT"))
+        waited = time.monotonic() - started
+        assert status(reply) == 403
+        assert b"unknown client" in reply
+        assert 0.3 <= waited < 2
+        assert live.resolved == []
+
+
+async def test_client_allowed_during_the_wait_is_served() -> None:
+    async with running(unknown_wait=3.0, unknown_poll=0.05) as live:
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.3, live.policy.allow, CLIENT, RUN, [ALLOWED])
+        started = time.monotonic()
+        reply = await exchange(live.port, get(f"http://{ALLOWED}/"))
+        assert reply == RESPONSE
+        assert 0.3 <= time.monotonic() - started < 2
+
+
+async def test_only_an_unknown_client_waits() -> None:
+    async with running(unknown_wait=10.0, unknown_poll=0.05) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        started = time.monotonic()
+        for request in (
+            get("evil.example.com:443", method="CONNECT"),
+            get(f"{ALLOWED}:8443", method="CONNECT"),
+            get("http://evil.example.com/"),
+            get("http://169.254.169.254/"),
+        ):
+            assert status(await exchange(live.port, request)) == 403
+        assert time.monotonic() - started < 2
+
+
+async def test_an_unknown_client_asking_for_an_address_is_refused_at_once() -> None:
+    async with running(unknown_wait=10.0, unknown_poll=0.05) as live:
+        started = time.monotonic()
+        reply = await exchange(live.port, get("169.254.169.254:443", method="CONNECT"))
+        assert status(reply) == 403
+        assert time.monotonic() - started < 2
+
+
+# ---------------------------------------------------------------- limits
+
+
+async def test_idle_client_is_closed() -> None:
+    async with running(idle_timeout=0.2) as live:
+        reader, writer = await asyncio.open_connection("127.0.0.1", live.port)
+        try:
+            started = time.monotonic()
+            writer.write(b"GET http://api.example.com/ HTTP/1.1\r\n")  # never finished
+            await writer.drain()
+            reply = await read_to_end(reader)
+            assert reply == b"" or status(reply) == 408
+            assert time.monotonic() - started < 2
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+async def test_idle_tunnel_is_closed() -> None:
+    async with running(idle_timeout=0.3) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        record = real_client_hello(ALLOWED)
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(record)
+            await t.writer.drain()
+            started = time.monotonic()
+            assert await read_to_end(t.reader) == record  # the echo, then the close
+            assert 0.3 <= time.monotonic() - started < 2
+
+
+async def test_a_busy_tunnel_is_not_idle() -> None:
+    async with running(idle_timeout=0.3) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        record = real_client_hello(ALLOWED)
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(record)
+            await t.writer.drain()
+            async with asyncio.timeout(TIMEOUT):
+                await t.reader.readexactly(len(record))
+                for _ in range(8):  # 0.8 s in all, longer than the idle timeout
+                    await asyncio.sleep(0.1)
+                    t.writer.write(b"x")
+                    await t.writer.drain()
+                    assert await t.reader.readexactly(1) == b"x"
+
+
+async def test_connections_per_client_are_capped() -> None:
+    async with running(max_per_client=2, unknown_wait=5.0) as live:
+        held = [await asyncio.open_connection("127.0.0.1", live.port) for _ in range(2)]
+        try:
+            async with asyncio.timeout(TIMEOUT):
+                while live.proxy.connections < 2:
+                    await asyncio.sleep(0.01)
+            started = time.monotonic()
+            reply = await first_reply(live.port)
+            assert status(reply) == 503
+            assert b"too many connections" in reply
+            assert time.monotonic() - started < 2
+        finally:
+            for _, writer in held:
+                writer.close()
+                await writer.wait_closed()
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        async with asyncio.timeout(TIMEOUT):
+            while live.proxy.connections:
+                await asyncio.sleep(0.01)
+        assert await exchange(live.port, get(f"http://{ALLOWED}/")) == RESPONSE
+
+
+async def test_connections_in_all_are_capped() -> None:
+    async with running(max_connections=1) as live:
+        _, writer = await asyncio.open_connection("127.0.0.1", live.port)
+        try:
+            async with asyncio.timeout(TIMEOUT):
+                while live.proxy.connections < 1:
+                    await asyncio.sleep(0.01)
+            assert status(await first_reply(live.port)) == 503
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"idle_timeout": 0},
+        {"unknown_wait": -1},
+        {"unknown_poll": 0},
+        {"max_connections": 0},
+        {"max_per_client": 0},
+    ],
+)
+def test_bad_settings_refused(settings: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match=r"."):
+        ProxyServer(Policy(), **settings)
+
+
+# ---------------------------------------------------------------- what was reached
+
+
+async def test_reached_recorded(live: Live) -> None:
+    live.policy.allow(CLIENT, RUN, [ALLOWED, "tiles.example.org"])
+    assert status(await exchange(live.port, get("http://evil.example.com/"))) == 403
+    assert live.policy.reached(RUN) == []
+    assert await exchange(live.port, get("http://tiles.example.org/a.png")) == RESPONSE
+    record = real_client_hello(ALLOWED)
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        t.writer.write(record)
+        await t.writer.drain()
+        async with asyncio.timeout(TIMEOUT):
+            await t.reader.readexactly(len(record))
+    assert live.policy.reached(RUN) == [ALLOWED, "tiles.example.org"]
+
+
+async def test_refusals_are_logged_once_without_request_text(
+    live: Live, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+    await exchange(live.port, get("http://evil.example.com/?token=private-query"))
+    await exchange(live.port, get("http://bad\x01name.example/", "X-Secret: header-value"))
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        t.writer.write(real_client_hello("evil.example.com"))
+        await t.writer.drain()
+        await read_to_end(t.reader)
+    lines = [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
+    assert len(lines) == 3
+    assert "evil.example.com" in lines[0] and "refused" in lines[0] and RUN in lines[0]
+    assert "refused" in lines[1]
+    assert "\x01" not in caplog.text
+    assert "refused" in lines[2] and "server name" in lines[2]
+    assert "private-query" not in caplog.text
+    assert "header-value" not in caplog.text

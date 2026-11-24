@@ -1,0 +1,582 @@
+"""The egress proxy: plain HTTP to port 80 and CONNECT to port 443, for allowed hosts only.
+
+Every byte a client sends comes from code under test, so the proxy reads requests strictly and
+refuses anything it cannot read one way only. A request head is at most `MAX_HEAD` bytes, every
+line ends with CRLF, header lines are never folded, and a request carrying Transfer-Encoding, or
+more than one Content-Length, is refused, so that no request can be read two ways (smuggling).
+
+A host must be a name, never an address, and must be on the allow list the runner gave the
+client's address; it must also resolve to public addresses only, and the proxy connects to the
+address it checked rather than looking the name up again. A client address with no allow list
+may be a container that has just started, so its request waits up to `unknown_wait` seconds for
+the runner's allow before it is refused. Every other refusal is immediate.
+
+No allowed name may become a route to another site on the same server (domain fronting):
+
+- Plain HTTP goes only to port 80. The proxy sends exactly one request upstream, in origin form,
+  with the Host header set to the checked name, the client's Host and Proxy-* headers dropped,
+  the body cut to its Content-Length, and `Connection: close`. It relays the response and
+  closes.
+- CONNECT goes only to port 443. After replying 200, the proxy reads the client's first TLS
+  record before it connects upstream, and closes the connection unless the ClientHello in it
+  names the CONNECT host. It sends that record upstream first and then relays both ways.
+
+A connection idle for `idle_timeout` seconds in both directions is closed, and connections are
+capped in all and per client address. The proxy logs one line per decision, with the client's
+address, the run, the host, the port and the outcome. It never logs a path, a query string, a
+header value or a body.
+"""
+
+import asyncio
+import contextlib
+import functools
+import http
+import logging
+import re
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
+from typing import Final
+
+from footfall.hosts import HostError, resolve_public, validate_host_name
+from footfall.proxy.policy import INVALID_HOST, Decision, Policy
+from footfall.proxy.tls import RECORD_HEADER, ClientHelloError, record_length, server_name
+
+__all__ = ["ESTABLISHED", "MAX_HEAD", "MAX_HEADERS", "Opener", "ProxyServer", "Resolve"]
+
+logger = logging.getLogger(__name__)
+
+type Resolve = Callable[[str, int], Awaitable[str]]
+type Opener = Callable[[str, int], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
+
+MAX_HEAD: Final = 16 * 1024
+MAX_HEADERS: Final = 100
+ESTABLISHED: Final = b"HTTP/1.1 200 Connection established\r\n\r\n"
+
+_HTTP_PORT: Final = 80
+_TLS_PORT: Final = 443
+_CHUNK: Final = 16 * 1024
+_LINGER: Final = 1.0
+_LINGER_BYTES: Final = 64 * 1024
+_METHODS: Final = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT"})
+_VERSIONS: Final = frozenset({"HTTP/1.0", "HTTP/1.1"})
+_TOKEN: Final = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_TARGET: Final = re.compile(r"[\x21-\x7e]+")
+_HOST_CHARACTERS: Final = re.compile(r"[A-Za-z0-9.-]+")
+_PORT: Final = re.compile(r"[0-9]{1,5}")
+_LENGTH: Final = re.compile(r"[0-9]{1,15}")
+_CONTROL: Final = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+_TOO_LARGE: Final = f"request headers are larger than {MAX_HEAD // 1024} KiB"
+# Never passed upstream: hop-by-hop headers, the client's Host, and Content-Length, which the
+# proxy writes itself from the length it checked.
+_DROPPED: Final = frozenset(
+    {
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
+
+class _Refusal(Exception):
+    """A request the proxy refuses, with the status and one-line reason to send back."""
+
+    def __init__(self, status: int, reason: str) -> None:
+        super().__init__(reason)
+        self.status = status
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class _Request:
+    method: str
+    host: str  # checked, in lower case
+    port: int
+    target: str  # origin form; empty for CONNECT
+    version: str
+    headers: tuple[tuple[str, str], ...]
+    length: int | None  # the Content-Length, if the request has one
+
+
+# ---------------------------------------------------------------- reading a request
+
+
+def _host(text: str) -> str:
+    """A host name from a request, checked; anything else, an address included, is refused."""
+    if not _HOST_CHARACTERS.fullmatch(text):
+        raise _Refusal(403, INVALID_HOST)
+    try:
+        return validate_host_name(text)
+    except HostError:
+        raise _Refusal(403, INVALID_HOST) from None
+
+
+def _port(text: str) -> int:
+    if not _PORT.fullmatch(text) or int(text) > 65535:
+        raise _Refusal(400, "malformed port")
+    return int(text)
+
+
+def _headers(lines: list[str]) -> tuple[tuple[str, str], ...]:
+    if len(lines) > MAX_HEADERS:
+        raise _Refusal(431, f"more than {MAX_HEADERS} header lines")
+    headers: list[tuple[str, str]] = []
+    for line in lines:
+        if line[:1] in (" ", "\t"):
+            raise _Refusal(400, "folded header lines are not allowed")
+        name, colon, value = line.partition(":")
+        if not colon or not _TOKEN.fullmatch(name):
+            raise _Refusal(400, "malformed header line")
+        value = value.strip(" \t")
+        if _CONTROL.search(value):
+            raise _Refusal(400, "control character in a header value")
+        headers.append((name, value))
+    return tuple(headers)
+
+
+def _content_length(headers: Iterable[tuple[str, str]]) -> int | None:
+    """The request's Content-Length, refusing any framing that could be read two ways."""
+    names = [name.lower() for name, _ in headers]
+    lengths = [value for name, value in headers if name.lower() == "content-length"]
+    if "transfer-encoding" in names:
+        if lengths:
+            raise _Refusal(
+                400, "a request must not carry both Content-Length and Transfer-Encoding"
+            )
+        raise _Refusal(411, "Transfer-Encoding is not supported; send Content-Length")
+    if not lengths:
+        return None
+    if len(lengths) > 1:
+        raise _Refusal(400, "more than one Content-Length")
+    if not _LENGTH.fullmatch(lengths[0]):
+        raise _Refusal(400, "Content-Length must be a whole number")
+    return int(lengths[0])
+
+
+def _authority(target: str) -> tuple[str, int]:
+    """The host and port of a CONNECT request's `host:port`."""
+    host, colon, port = target.rpartition(":")
+    if not colon:
+        raise _Refusal(400, "CONNECT needs host:port")
+    name = _host(host)
+    return name, _port(port)
+
+
+def _absolute(target: str) -> tuple[str, int, str]:
+    """The host, port and origin form of an absolute `http://` request target."""
+    if not _TARGET.fullmatch(target):
+        raise _Refusal(400, "malformed request target")
+    if target[:7].lower() != "http://":
+        raise _Refusal(400, "only absolute http:// addresses are proxied; use CONNECT for https")
+    rest = target[7:]
+    if "#" in rest:
+        raise _Refusal(400, "a request target must not carry a fragment")
+    ends = [index for index in (rest.find("/"), rest.find("?")) if index != -1]
+    end = min(ends, default=len(rest))
+    authority, origin = rest[:end], rest[end:]
+    if "@" in authority:
+        raise _Refusal(400, "user information in the address is not allowed")
+    if "[" in authority or "]" in authority:
+        raise _Refusal(403, INVALID_HOST)
+    host, colon, port = authority.partition(":")
+    number = _port(port) if colon else _HTTP_PORT
+    name = _host(host)
+    if not origin.startswith("/"):
+        origin = "/" + origin
+    return name, number, origin
+
+
+def _parse(head: bytes) -> _Request:
+    """Read a request head, which ends with an empty line, or raise _Refusal."""
+    if len(head) > MAX_HEAD:
+        raise _Refusal(431, _TOO_LARGE)
+    lines = head.decode("latin-1").removesuffix("\r\n\r\n").split("\r\n")
+    if any("\r" in line or "\n" in line for line in lines):
+        raise _Refusal(400, "every line must end with CRLF")
+    parts = lines[0].split(" ")
+    if len(parts) != 3 or not all(parts):
+        raise _Refusal(400, "malformed request line")
+    method, target, version = parts
+    if method not in _METHODS:
+        raise _Refusal(405, "method not allowed")
+    if version not in _VERSIONS:
+        raise _Refusal(400, "only HTTP/1.0 and HTTP/1.1 are spoken")
+    headers = _headers(lines[1:])
+    length = _content_length(headers)
+    if method == "CONNECT":
+        if length is not None:
+            raise _Refusal(400, "CONNECT must not carry a body")
+        host, port = _authority(target)
+        return _Request(method, host, port, "", version, headers, None)
+    host, port, origin = _absolute(target)
+    return _Request(method, host, port, origin, version, headers, length)
+
+
+def _upstream_head(request: _Request) -> bytes:
+    """The one request sent upstream: origin form, the checked Host, and `Connection: close`."""
+    lines = [f"{request.method} {request.target} {request.version}", f"Host: {request.host}"]
+    for name, value in request.headers:
+        lower = name.lower()
+        if lower not in _DROPPED and not lower.startswith("proxy-"):
+            lines.append(f"{name}: {value}")
+    if request.length is not None:
+        lines.append(f"Content-Length: {request.length}")
+    lines.append("Connection: close")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
+def _response(status: int, reason: str) -> bytes:
+    body = f"footfall egress proxy: {reason}\n".encode()
+    phrase = http.HTTPStatus(status).phrase
+    head = (
+        f"HTTP/1.1 {status} {phrase}\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n\r\n"
+    )
+    return head.encode() + body
+
+
+def _log(client: str, run_id: str | None, host: str, port: int | None, outcome: str) -> None:
+    """One line per decision. `host` is a checked name or "-", never a client's raw text."""
+    port_text = "-" if port is None else str(port)
+    logger.info("%s run=%s host=%s port=%s %s", client, run_id or "-", host, port_text, outcome)
+
+
+# ---------------------------------------------------------------- moving bytes
+
+
+class _Activity:
+    """When a connection last moved a byte in either direction, and waits bounded by that.
+
+    A tunnel that streams in one direction only is not idle, so each wait is cut short only
+    once neither direction has moved for the idle timeout.
+    """
+
+    def __init__(self, idle: float) -> None:
+        self._idle = idle
+        self._loop = asyncio.get_running_loop()
+        self._last = self._loop.time()
+
+    def touch(self) -> None:
+        self._last = self._loop.time()
+
+    async def within[T](self, step: Callable[[], Awaitable[T]]) -> T:
+        while True:
+            remaining = self._last + self._idle - self._loop.time()
+            if remaining <= 0:
+                raise TimeoutError("the connection was idle for too long")
+            scope = asyncio.timeout(remaining)
+            try:
+                async with scope:
+                    return await step()
+            except TimeoutError:
+                if not scope.expired():
+                    raise
+                # The other direction may have moved meanwhile, so look again.
+
+
+async def _pump(
+    source: asyncio.StreamReader,
+    sink: asyncio.StreamWriter,
+    activity: _Activity,
+    limit: int | None = None,
+) -> None:
+    """Copy bytes until the source ends, or until `limit` bytes if one is given."""
+    remaining = limit
+    while remaining is None or remaining > 0:
+        size = _CHUNK if remaining is None else min(remaining, _CHUNK)
+        data = await activity.within(functools.partial(source.read, size))
+        if not data:
+            return
+        activity.touch()
+        if remaining is not None:
+            remaining -= len(data)
+        sink.write(data)
+        await activity.within(sink.drain)
+        activity.touch()
+
+
+async def _finish(tasks: Iterable[asyncio.Task[None]]) -> None:
+    """Cancel tasks and collect their outcomes, so that none is left unretrieved."""
+    tasks = list(tasks)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _linger(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Half-close, then read and drop what the client still sends, briefly and boundedly.
+
+    Closing a socket that holds unread bytes resets the connection, which can destroy the
+    reply before the client reads it.
+    """
+    with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+        if writer.can_write_eof() and not writer.is_closing():
+            writer.write_eof()
+        async with asyncio.timeout(_LINGER):
+            left = _LINGER_BYTES
+            while left > 0:
+                chunk = await reader.read(min(left, _CHUNK))
+                if not chunk:
+                    return
+                left -= len(chunk)
+
+
+async def _open_upstream(
+    address: str, port: int
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    return await asyncio.open_connection(address, port, limit=_CHUNK)
+
+
+# ---------------------------------------------------------------- the server
+
+
+class ProxyServer:
+    """Serves the egress proxy for the allow lists held in `policy`.
+
+    `resolve` turns a checked name into the one public address to connect to; it raises
+    HostError for a name that does not resolve to public addresses only. `open_upstream`
+    connects to an address and port. Tests replace both, so that they stay on loopback.
+    """
+
+    def __init__(
+        self,
+        policy: Policy,
+        resolve: Resolve = resolve_public,
+        *,
+        idle_timeout: float = 60.0,
+        unknown_wait: float = 3.0,
+        unknown_poll: float = 0.1,
+        max_connections: int = 512,
+        max_per_client: int = 128,
+        open_upstream: Opener = _open_upstream,
+    ) -> None:
+        if idle_timeout <= 0 or unknown_poll <= 0 or unknown_wait < 0:
+            raise ValueError(
+                "idle_timeout and unknown_poll must be positive, unknown_wait not less"
+            )
+        if max_connections < 1 or max_per_client < 1:
+            raise ValueError("max_connections and max_per_client must be at least 1")
+        self._policy = policy
+        self._resolve = resolve
+        self._idle = idle_timeout
+        self._unknown_wait = unknown_wait
+        self._unknown_poll = unknown_poll
+        self._max_connections = max_connections
+        self._max_per_client = max_per_client
+        self._open_upstream = open_upstream
+        self._open = 0
+        self._per_client: dict[str, int] = {}
+
+    @property
+    def connections(self) -> int:
+        """How many client connections are being served."""
+        return self._open
+
+    async def start(self, host: str, port: int) -> asyncio.Server:
+        """Listen on `host` and `port`; the caller serves and closes the server it returns."""
+        return await asyncio.start_server(self._handle, host, port, limit=MAX_HEAD)
+
+    # ------------------------------------------------------------ connections
+
+    def _admit(self, client: str) -> bool:
+        count = self._per_client.get(client, 0)
+        if self._open >= self._max_connections or count >= self._max_per_client:
+            return False
+        self._open += 1
+        self._per_client[client] = count + 1
+        return True
+
+    def _release(self, client: str) -> None:
+        self._open -= 1
+        count = self._per_client[client] - 1
+        if count:
+            self._per_client[client] = count
+        else:
+            del self._per_client[client]
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        peer = writer.get_extra_info("peername")
+        client = str(peer[0]) if isinstance(peer, tuple) and peer else ""
+        if not self._admit(client):
+            # Closed without reading or lingering, so that a flood holds nothing open.
+            _log(client, None, "-", None, "refused (503): too many connections")
+            writer.write(_response(503, "too many connections"))
+            writer.close()
+            return
+        try:
+            await self._serve(client, reader, writer)
+        except (OSError, TimeoutError, asyncio.IncompleteReadError):
+            pass  # the client or the upstream went away, or went quiet
+        except Exception:
+            # Nothing from the request is logged: it may carry a secret in a header or body.
+            logger.exception("the proxy failed unexpectedly serving %s", client)
+        finally:
+            try:
+                task = asyncio.current_task()
+                if task is None or not task.cancelling():
+                    await _linger(reader, writer)
+            finally:
+                writer.close()
+                self._release(client)
+
+    async def _serve(
+        self, client: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        run_id: str | None = None
+        host, port = "-", None
+        try:
+            try:
+                async with asyncio.timeout(self._idle):
+                    head = await reader.readuntil(b"\r\n\r\n")
+            except asyncio.LimitOverrunError:
+                raise _Refusal(431, _TOO_LARGE) from None
+            except asyncio.IncompleteReadError:
+                return  # the client left before it finished a request
+            except TimeoutError:
+                raise _Refusal(408, "no request arrived in time") from None
+            request = _parse(head)
+            host, port = request.host, request.port
+            if request.method == "CONNECT" and request.port != _TLS_PORT:
+                raise _Refusal(403, "CONNECT is allowed only to port 443")
+            if request.method != "CONNECT" and request.port != _HTTP_PORT:
+                raise _Refusal(403, "plain HTTP is allowed only to port 80")
+            decision = await self._decide(client, request.host, request.port)
+            run_id = decision.run_id
+            if not decision.allowed or run_id is None:
+                raise _Refusal(403, decision.reason)
+            address = await self._resolved(request.host, request.port)
+        except _Refusal as refusal:
+            _log(client, run_id, host, port, f"refused ({refusal.status}): {refusal.reason}")
+            writer.write(_response(refusal.status, refusal.reason))
+            async with asyncio.timeout(self._idle):
+                await writer.drain()
+            return
+        if request.method == "CONNECT":
+            await self._tunnel(client, run_id, request, address, reader, writer)
+        else:
+            _log(client, run_id, host, port, "allowed")
+            self._policy.record(run_id, request.host)
+            await self._forward(client, request, address, reader, writer)
+
+    async def _decide(self, client: str, host: str, port: int) -> Decision:
+        """The policy's decision, waiting a little for the allow of a client not yet known."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._unknown_wait
+        decision = self._policy.decide(client, host, port)
+        while decision.run_id is None and loop.time() < deadline:
+            await asyncio.sleep(min(self._unknown_poll, deadline - loop.time()))
+            decision = self._policy.decide(client, host, port)
+        return decision
+
+    async def _resolved(self, host: str, port: int) -> str:
+        try:
+            async with asyncio.timeout(self._idle):
+                return await self._resolve(host, port)
+        except HostError:
+            raise _Refusal(403, f"{host} does not resolve to public addresses only") from None
+        except TimeoutError:
+            raise _Refusal(504, f"{host} did not resolve in time") from None
+
+    async def _connect(
+        self, client: str, host: str, address: str, port: int
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
+        try:
+            async with asyncio.timeout(self._idle):
+                return await self._open_upstream(address, port)
+        except (OSError, TimeoutError) as error:
+            reason = type(error).__name__
+            logger.info("%s could not reach %s port %d: %s", client, host, port, reason)
+            return None
+
+    # ------------------------------------------------------------ plain HTTP
+
+    async def _forward(
+        self,
+        client: str,
+        request: _Request,
+        address: str,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        upstream = await self._connect(client, request.host, address, request.port)
+        if upstream is None:
+            writer.write(_response(502, f"could not reach {request.host}"))
+            async with asyncio.timeout(self._idle):
+                await writer.drain()
+            return
+        upstream_reader, upstream_writer = upstream
+        try:
+            activity = _Activity(self._idle)
+            upstream_writer.write(_upstream_head(request))
+            await activity.within(upstream_writer.drain)
+            # The body goes up while the response comes down, so that a server that answers
+            # `Expect: 100-continue`, or answers early, is relayed at once. Nothing the client
+            # sends after its Content-Length is ever read.
+            upload = asyncio.create_task(
+                _pump(reader, upstream_writer, activity, request.length or 0)
+            )
+            try:
+                await _pump(upstream_reader, writer, activity)
+            finally:
+                await _finish([upload])
+        finally:
+            upstream_writer.close()
+
+    # ------------------------------------------------------------ CONNECT
+
+    async def _tunnel(
+        self,
+        client: str,
+        run_id: str,
+        request: _Request,
+        address: str,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        writer.write(ESTABLISHED)
+        refusal: str | None = None
+        try:
+            async with asyncio.timeout(self._idle):
+                await writer.drain()
+                header = await reader.readexactly(RECORD_HEADER)
+                record = header + await reader.readexactly(record_length(header))
+            name = server_name(record)
+        except ClientHelloError as error:
+            refusal = f"not a TLS ClientHello the proxy can read ({error})"
+        except (asyncio.IncompleteReadError, TimeoutError):
+            refusal = "no TLS ClientHello arrived"
+        else:
+            if name is None:
+                refusal = "the TLS ClientHello names no server"
+            elif name.lower() != request.host:
+                refusal = "the TLS server name is not the CONNECT host"
+        if refusal is not None:
+            _log(client, run_id, request.host, request.port, f"refused: {refusal}")
+            return
+        _log(client, run_id, request.host, request.port, "allowed")
+        self._policy.record(run_id, request.host)
+        upstream = await self._connect(client, request.host, address, request.port)
+        if upstream is None:
+            return
+        upstream_reader, upstream_writer = upstream
+        try:
+            activity = _Activity(self._idle)
+            upstream_writer.write(record)
+            await activity.within(upstream_writer.drain)
+            tasks = [
+                asyncio.create_task(_pump(reader, upstream_writer, activity)),
+                asyncio.create_task(_pump(upstream_reader, writer, activity)),
+            ]
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                await _finish(tasks)
+        finally:
+            upstream_writer.close()
