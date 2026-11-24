@@ -19,12 +19,12 @@ uv sync
 uv run pre-commit install
 ```
 
-The tests start no containers and never reach the internet. The isolation tests need Docker with gVisor on Linux, and run in their own workflow. On a Mac, where Docker Desktop has no gVisor, set `FOOTFALL_RUNTIME=runc` to let the runner start containers while you develop. Every command then prints a warning and the isolation tests refuse to run. Never set it on a server.
+The tests never reach the internet. Tests that start containers will need Docker with gVisor on Linux, and will run in their own workflow. For development on a Mac, where Docker Desktop has no gVisor, the runner will accept `FOOTFALL_RUNTIME=runc`, with a warning from every command and no isolation tests. Never set it on a server.
 
 ## Everyday commands
 
 ```bash
-uv run pytest                      # tests, without the isolation tests
+uv run pytest                      # tests
 uv run pytest --cov                # tests with the coverage floor
 uv run ruff check .                # lint, including security rules
 uv run ruff format .               # format
