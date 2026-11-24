@@ -134,6 +134,58 @@
     return "";
   };
 
+  // The parent in the flattened tree: a shadow root's host counts as its parent.
+  const parentOf = (node) => node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+
+  const isInert = (el) => {
+    for (let n = el; n; n = parentOf(n)) {
+      if (n.inert === true || n.hasAttribute("inert")) return true;
+    }
+    return false;
+  };
+
+  // True when an ancestor with overflow other than visible leaves nothing of `r` showing,
+  // as a collapsed accordion with max-height 0 does. Fixed elements escape their ancestors,
+  // and absolute ones escape any ancestor above their containing block.
+  const clippedAway = (el, r) => {
+    let position = getComputedStyle(el).position;
+    if (position === "fixed") return false;
+    let escaping = position === "absolute";
+    for (let a = parentOf(el); a && a !== document.documentElement; a = parentOf(a)) {
+      const style = getComputedStyle(a);
+      if (escaping && style.position === "static") continue;
+      if (style.overflowX !== "visible" || style.overflowY !== "visible") {
+        const b = a.getBoundingClientRect();
+        if (
+          Math.min(r.right, b.right) <= Math.max(r.left, b.left) ||
+          Math.min(r.bottom, b.bottom) <= Math.max(r.top, b.top)
+        ) return true;
+      }
+      escaping = style.position === "absolute";
+      if (style.position === "fixed") return false;
+    }
+    return false;
+  };
+
+  // Is the element, or something inside it, what a tap at its centre would hit?
+  const isCovered = (el, r) => {
+    const x = Math.min(width - 1, Math.max(0, Math.floor((Math.max(r.left, 0) + Math.min(r.right, width)) / 2)));
+    const y = Math.min(height - 1, Math.max(0, Math.floor((Math.max(r.top, 0) + Math.min(r.bottom, height)) / 2)));
+    let hit = document.elementFromPoint(x, y);
+    while (hit && hit.shadowRoot) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    if (!hit) return false;
+    for (let n = hit; n; n = parentOf(n)) {
+      if (n === el) return false;
+    }
+    return true;
+  };
+
+  const MAX_HIT_TESTED = 200; // the caller lists 150 at most
+
   const entries = [];
   let total = 0;
   let frames = 0;
@@ -152,6 +204,7 @@
       if (!frame && !isInteractive(el) && !el.matches(TEXT)) continue;
       const r = el.getBoundingClientRect();
       if (!visible(el, r)) continue;
+      if (isInert(el) || clippedAway(el, r)) continue;
       if (frame) {
         frames += 1;
         continue;
@@ -162,6 +215,8 @@
         entry = {
           kind: kindOf(role), role, name: nameOf(el), value: valueOf(el, role),
           x: r.left, y: r.top, w: r.width, h: r.height,
+          disabled: el.matches(":disabled") || el.getAttribute("aria-disabled") === "true",
+          readonly: el.readOnly === true || el.getAttribute("aria-readonly") === "true",
         };
       } else {
         const text = textOf(el).slice(0, TEXT_BLOCK);
@@ -172,7 +227,12 @@
         };
       }
       total += 1;
-      if (entries.length < MAX_RAW) entries.push(entry);
+      if (entries.length < MAX_RAW) {
+        entry.covered = entries.length < MAX_HIT_TESTED && isCovered(el, r);
+        entry.disabled = entry.disabled === true;
+        entry.readonly = entry.readonly === true;
+        entries.push(entry);
+      }
     }
     return true;
   };
