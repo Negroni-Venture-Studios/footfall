@@ -468,3 +468,24 @@ async def test_the_one_client_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         await bare.close()
         await client.close()
+
+
+@pytest.mark.parametrize(
+    ("setting", "enabled"), [(None, True), ("true", True), ("false", False), ("FALSE", False)]
+)
+async def test_an_operator_can_turn_tracing_off(
+    monkeypatch: pytest.MonkeyPatch, setting: str | None, enabled: bool
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    monkeypatch.setenv("ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE", "content")
+    if setting is None:
+        monkeypatch.delenv("ANTHROPIC_OPEN_TELEMETRY", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_OPEN_TELEMETRY", setting)
+    client = make_client()
+    try:
+        traces = client.open_telemetry["traces"]
+        assert traces["enabled"] is enabled
+        assert traces["content_mode"] == "metadata_only"
+    finally:
+        await client.close()

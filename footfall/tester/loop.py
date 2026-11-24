@@ -43,7 +43,7 @@ import anthropic
 
 from footfall.manifest import Brief
 from footfall.personas import Device, Persona
-from footfall.tester.model import FakeModel, ModelClient, ModelTurn
+from footfall.tester.model import CLIENT_TIMEOUT, FakeModel, ModelClient, ModelTurn
 from footfall.tester.pricing import PricingError, Usage, cost_usd, dearest_cost_usd
 from footfall.tester.prompt import system_prompt
 from footfall.tester.report import (
@@ -105,8 +105,11 @@ PAGE_STOPPED: Final = "the page stopped answering"
 NOT_A_TOOL: Final = "not run: there is no tool of that name"
 TOO_MANY: Final = "not run: more than one tool call in one turn"
 CUT_SHORT: Final = "not run: the call was cut off at the token limit"
-# Read when used, so that a test can shorten it.
-TURN_FLOOR = 60.0  # seconds any model call may take, even once the time limit has passed
+# The least time any model call is given, even once the time limit has passed. A grace
+# turn is when the tester writes its report, the heaviest turn of the run, so it gets as
+# long as one request may take. Read when used, so that a test can shorten it.
+TURN_FLOOR = CLIENT_TIMEOUT
+CUT_OFF_CALL: Final = "a model call it cut off is not counted, so the cost may read low"
 LOG = logging.getLogger(__name__)
 
 _TOOL_NAMES: Final = frozenset(t["name"] for t in TOOLS)
@@ -260,7 +263,8 @@ class _Run:
             except TimeoutError:
                 if not deadline.expired():
                     raise  # the model's own timeout, which fails the persona
-                return self.report("incomplete", self._out_of_time())
+                # The API may bill the call it cut off, which the cost leaves out.
+                return self.report("incomplete", f"{self._out_of_time()}; {CUT_OFF_CALL}")
             self._charge(turn)
             if turn.content:
                 # Appended as it came, and never touched again.

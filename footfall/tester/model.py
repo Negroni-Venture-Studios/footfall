@@ -19,6 +19,7 @@ import copy
 import json
 import logging
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
@@ -115,8 +116,14 @@ def make_client() -> anthropic.AsyncAnthropic:
     seconds and is tried `CLIENT_RETRIES` more times. Spans carry metadata only: the
     OpenTelemetry option is set here, so the SDK ignores the ANTHROPIC_OPEN_TELEMETRY_*
     variables, one of which would put every prompt and reply, typed password included, on
-    a span (the SDK's OpenTelemetry notes, read on 24 November 2026).
+    a span (the SDK's OpenTelemetry notes, read on 24 November 2026). The one variable read
+    here is ANTHROPIC_OPEN_TELEMETRY: set to "false", it turns spans off, as it would for a
+    client given no option.
     """
+    if os.environ.get("ANTHROPIC_OPEN_TELEMETRY", "").lower() == "false":
+        return anthropic.AsyncAnthropic(
+            timeout=CLIENT_TIMEOUT, max_retries=CLIENT_RETRIES, open_telemetry=False
+        )
     return anthropic.AsyncAnthropic(
         timeout=CLIENT_TIMEOUT,
         max_retries=CLIENT_RETRIES,

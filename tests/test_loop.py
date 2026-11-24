@@ -31,7 +31,14 @@ from footfall.tester.loop import (
     Budget,
     run_persona,
 )
-from footfall.tester.model import NO_USAGE, AnthropicModel, FakeModel, ModelClient, ModelTurn
+from footfall.tester.model import (
+    CLIENT_TIMEOUT,
+    NO_USAGE,
+    AnthropicModel,
+    FakeModel,
+    ModelClient,
+    ModelTurn,
+)
 from footfall.tester.pricing import Price, Usage, cost_usd
 from footfall.tester.report import PersonaReport
 from footfall.tester.tools import TOOLS, Executor
@@ -956,7 +963,15 @@ async def test_a_hung_model_call_ends_at_the_time_limit(
     report = await run(w, Hung(), budget=Budget(max_seconds=0.5), pricing=free)
     assert time.monotonic() - started < 10
     assert report.status == "incomplete"
-    assert report.reason == "the time limit of 0.5 s ran out before the tester called finish"
+    assert report.reason == (
+        "the time limit of 0.5 s ran out before the tester called finish; "
+        "a model call it cut off is not counted, so the cost may read low"
+    )
+
+
+def test_a_grace_turn_has_as_long_as_one_request() -> None:
+    # The grace turn that writes the report is the heaviest of the run.
+    assert loop.TURN_FLOOR >= CLIENT_TIMEOUT
 
 
 async def test_a_timeout_raised_by_the_model_itself_fails_the_persona(world: MakeWorld) -> None:
