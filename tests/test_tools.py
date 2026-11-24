@@ -1083,7 +1083,7 @@ async def test_a_first_look_at_a_page_that_throws_the_password_hides_it(
             await executor.first_look()
     finally:
         await context.close()
-    assert "[password]" in str(caught.value)
+    assert str(caught.value) == "the page could not be read (Error)"
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert SECRET not in caplog.text
@@ -1134,7 +1134,7 @@ async def test_a_typed_password_never_reaches_the_trace_or_the_logs(
     await tap_name(s, went, "Secret field")
     with pytest.raises(CaptureError) as caught:
         await s.executor.run("type", {"text": SECRET})
-    assert "[password]" in str(caught.value)
+    assert str(caught.value) == "the page could not be read (Error)"
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     chained: BaseException | None = caught.value
@@ -1149,3 +1149,35 @@ async def test_a_typed_password_never_reaches_the_trace_or_the_logs(
     steps = s.trace.steps()
     assert steps[1].input == {"text": "[password]"}
     assert any("You typed [password]" in event for step in steps for event in step.events)
+
+
+QUOTED_SECRET = 'Zq"7\\Wx9\\"kJ'
+
+
+async def test_a_thrown_password_with_quotes_and_backslashes_leaves_no_trace(
+    session: MakeSession,
+    app_server: AppServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    assert '"' in QUOTED_SECRET and "\\" in QUOTED_SECRET
+    app_server.page(
+        "/throws-quoted",
+        '<input type="password" aria-label="Secret field" style="width:300px;height:40px">'
+        "<script>const real = window.getComputedStyle;"
+        "window.getComputedStyle = function (element) {"
+        " const typed = document.querySelector('input').value;"
+        f" if (typed.length >= {len(QUOTED_SECRET)}) throw new Error('leak ' + typed);"
+        " return real.apply(this, arguments); };</script>",
+    )
+    s = await session("/throws-quoted", redact=frozenset({QUOTED_SECRET}))
+    await tap_name(s, s.first, "Secret field")
+    with pytest.raises(CaptureError) as caught:
+        await s.executor.run("type", {"text": QUOTED_SECRET})
+    # No run of four characters from the password, in any form, anywhere it could land.
+    runs = {QUOTED_SECRET[i : i + 4] for i in range(len(QUOTED_SECRET) - 3)}
+    places = [str(caught.value), caplog.text, str(s.trace.steps())]
+    places += [record.getMessage() for record in caplog.records]
+    for place in places:
+        for run in runs:
+            assert run not in place, (run, place[:200])
