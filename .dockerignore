@@ -1,9 +1,12 @@
-# Only what the image needs: pyproject.toml, uv.lock, README.md, LICENSE and footfall/.
+# Only what the images need: pyproject.toml, uv.lock, README.md, LICENSE and footfall/ for
+# the footfall image, and the browser image's gate and Chromium policy.
 *
 !pyproject.toml
 !uv.lock
 !README.md
 !LICENSE
 !footfall/
+!images/browsers/gate.js
+!images/browsers/chromium-policy.json
 **/__pycache__
 **/*.py[cod]

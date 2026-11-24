@@ -39,7 +39,7 @@ def free_port() -> int:
 def upgrade(path: str) -> bytes:
     return (
         f"GET {path} HTTP/1.1\r\nHost: 10.89.0.12:3000\r\nUpgrade: websocket\r\n"
-        "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"  # gitleaks:allow
         "Sec-WebSocket-Version: 13\r\nx-playwright-launch-options: {}\r\n\r\n"
     ).encode()
 
