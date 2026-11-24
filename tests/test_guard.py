@@ -542,13 +542,19 @@ async def test_an_event_source_to_another_host_is_blocked(
 async def test_a_data_frame_cannot_send_the_page_away(
     open_page: OpenPage, app_server: AppServer, other_server: AppServer
 ) -> None:
+    # The sandbox lets the frame navigate the top window. Without it, Chromium refuses the
+    # navigation before the guard ever sees a request.
     frame = "<script>top.location = 'http://evil.test/from-a-frame'</script>"
-    app_server.page("/framed", f'<iframe src="data:text/html,{frame}"></iframe>')
+    app_server.page(
+        "/framed",
+        f'<iframe sandbox="allow-scripts allow-top-navigation" src="data:text/html,{frame}">'
+        "</iframe>",
+    )
     page, guard = await open_page("/framed")
     await settle(page)
     assert evil_hits(other_server) == []
     assert page.url == app_server.origin + "/framed"
-    guard.drain()
+    assert details(guard.drain()) == ['stopped the page going to "evil.test"']
 
 
 async def test_file_chooser_left_unanswered(open_page: OpenPage, app_server: AppServer) -> None:
