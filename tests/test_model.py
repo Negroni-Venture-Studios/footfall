@@ -11,15 +11,17 @@ import pytest
 from footfall.tester.model import (
     FAKE_MODEL,
     MAX_TOKENS,
+    REQUESTABLE,
     AnthropicModel,
     FakeModel,
+    ModelSpecError,
     ModelTurn,
     ScriptError,
     model_from_spec,
 )
-from footfall.tester.pricing import PRICES, PricingError, Usage
+from footfall.tester.pricing import PRICES, Usage
 from footfall.tester.tools import TOOLS
-from tests.fake_api import KEY, Api, message
+from tests.fake_api import KEY, Api, iteration, message
 
 SCRIPTS = Path(__file__).parent / "fixtures" / "scripts"
 SYSTEM = "You are a tester."
@@ -89,18 +91,142 @@ async def test_content_round_trips_thinking_signature(api: Api) -> None:
 
 
 async def test_turn_reports_usage_and_the_model_that_answered(api: Api) -> None:
+    api.answer(message([LOOK]))
+    model = AnthropicModel(client=api.client())
+    turn = await model.turn(SYSTEM, TOOLS, FIRST)
+    assert turn.model == "claude-sonnet-5-5"
+    assert turn.usage == Usage(1200, 80, 1000, 200)
+    assert turn.charges == (("claude-sonnet-5-5", Usage(1200, 80, 1000, 200)),)
+
+
+async def test_a_fallback_turn_is_charged_for_every_attempt(api: Api) -> None:
+    # Sonnet 5.5 declines part way through, and Sonnet 5 serves the reply. The top-level
+    # usage covers only the attempt that served it.
     fallback = {
         "type": "fallback",
         "from": {"model": "claude-sonnet-5-5"},
-        "to": {"model": "claude-opus-5-5"},
+        "to": {"model": "claude-sonnet-5"},
         "trigger": {"type": "refusal", "category": "cyber"},
     }
-    api.answer(message([fallback, LOOK], model="claude-opus-5-5"))
+    api.answer(
+        message(
+            [fallback, LOOK],
+            model="claude-sonnet-5",
+            usage={
+                "input_tokens": 30,
+                "output_tokens": 40,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 9000,
+            },
+            iterations=[
+                iteration("message", "claude-sonnet-5-5", (10, 20, 5000, 0), one_hour=1200),
+                iteration("fallback_message", "claude-sonnet-5", (30, 40, 0, 9000)),
+            ],
+        )
+    )
     model = AnthropicModel(client=api.client())
     turn = await model.turn(SYSTEM, TOOLS, FIRST)
-    assert turn.model == "claude-opus-5-5"
-    assert turn.usage == Usage(1200, 80, 1000, 200)
+    assert turn.model == "claude-sonnet-5"
+    assert turn.usage == Usage(30, 40, 0, 9000)
+    assert turn.charges == (
+        ("claude-sonnet-5-5", Usage(10, 20, 5000, 0, cache_write_1h_input_tokens=1200)),
+        ("claude-sonnet-5", Usage(30, 40, 0, 9000)),
+    )
     assert turn.content[0] == fallback  # "from" keeps its name on the wire
+
+
+async def test_a_sticky_fallback_turn_is_charged_as_the_model_that_answered(api: Api) -> None:
+    # After a fallback, later turns go straight to the fallback model for a while, with no
+    # iterations and no fallback block.
+    api.answer(message([LOOK], model="claude-sonnet-5"))
+    turn = await AnthropicModel(client=api.client()).turn(SYSTEM, TOOLS, FIRST)
+    assert turn.model == "claude-sonnet-5"
+    assert turn.charges == (("claude-sonnet-5", Usage(1200, 80, 1000, 200)),)
+
+
+async def test_cache_writes_the_split_does_not_cover_are_five_minute_writes(api: Api) -> None:
+    def usage(total: int, five: int, hour: int) -> dict[str, Any]:
+        return {
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cache_creation_input_tokens": total,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": five,
+                "ephemeral_1h_input_tokens": hour,
+            },
+        }
+
+    api.answer(message([LOOK], usage=usage(1000, 300, 200)))
+    api.answer(message([LOOK], usage=usage(100, 300, 200)))
+    model = AnthropicModel(client=api.client())
+    # 500 tokens the split leaves out are kept, at the five-minute rate.
+    first = await model.turn(SYSTEM, TOOLS, FIRST)
+    assert first.usage == Usage(1, 1, 1000, 0, cache_write_1h_input_tokens=200)
+    # A split larger than the total is believed over the total.
+    second = await model.turn(SYSTEM, TOOLS, FIRST)
+    assert second.usage == Usage(1, 1, 500, 0, cache_write_1h_input_tokens=200)
+
+
+async def test_us_only_inference_is_read_for_every_attempt(api: Api) -> None:
+    body = message(
+        [LOOK],
+        model="claude-sonnet-5",
+        iterations=[
+            iteration("message", "claude-sonnet-5-5", (1, 2, 0, 0)),
+            iteration("fallback_message", "claude-sonnet-5", (3, 4, 0, 0)),
+        ],
+    )
+    body["usage"]["inference_geo"] = "us"
+    api.answer(body)
+    turn = await AnthropicModel(client=api.client()).turn(SYSTEM, TOOLS, FIRST)
+    assert turn.usage.inference_geo == "us"
+    assert [usage.inference_geo for _, usage in turn.charges] == ["us", "us"]
+
+
+def test_a_model_must_be_requestable_to_be_asked_for() -> None:
+    for name in ("claude-sonnet-5", "claude-opus-4-8", "claude-haiku-5-5"):
+        with pytest.raises(ModelSpecError, match="cannot run model"):
+            AnthropicModel(name)
+
+
+async def test_one_hour_cache_writes_are_counted_apart(api: Api) -> None:
+    api.answer(
+        message(
+            [LOOK],
+            usage={
+                "input_tokens": 5,
+                "output_tokens": 6,
+                "cache_creation_input_tokens": 700,
+                "cache_read_input_tokens": 8,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 400,
+                    "ephemeral_1h_input_tokens": 300,
+                },
+            },
+        )
+    )
+    turn = await AnthropicModel(client=api.client()).turn(SYSTEM, TOOLS, FIRST)
+    assert turn.usage == Usage(5, 6, 700, 8, cache_write_1h_input_tokens=300)
+
+
+async def test_an_attempt_without_a_model_is_charged_as_the_model_asked_for(api: Api) -> None:
+    api.answer(
+        message(
+            [LOOK],
+            model="claude-opus-5",
+            iterations=[
+                iteration("message", None, (1, 2, 3, 4)),
+                iteration("fallback_message", "claude-opus-5", (5, 6, 7, 8)),
+            ],
+        )
+    )
+    model = AnthropicModel("claude-opus-5-5", client=api.client())
+    turn = await model.turn(SYSTEM, TOOLS, FIRST)
+    assert turn.charges == (
+        ("claude-opus-5-5", Usage(1, 2, 3, 4)),
+        ("claude-opus-5", Usage(5, 6, 7, 8)),
+    )
 
 
 async def test_missing_cache_counts_are_zero(api: Api) -> None:
@@ -153,6 +279,7 @@ def test_a_model_made_without_a_client_reads_nothing_until_used(
         monkeypatch.delenv(name, raising=False)
     model = AnthropicModel()
     assert (model.model, model.effort) == ("claude-sonnet-5-5", "medium")
+    assert model._client is None
 
 
 # ------------------------------------------------------------------ the fake
@@ -250,7 +377,9 @@ def test_a_script_file_is_read(tmp_path: Path) -> None:
 def test_model_from_spec() -> None:
     fake = model_from_spec(f"fake:{SCRIPTS / 'finishes.json'}")
     assert isinstance(fake, FakeModel)
-    for name in PRICES:
+    assert REQUESTABLE == ("claude-sonnet-5-5", "claude-opus-5-5")
+    assert set(REQUESTABLE) <= set(PRICES)
+    for name in REQUESTABLE:
         claude = model_from_spec(name)
         assert isinstance(claude, AnthropicModel)
         assert claude.model == name
@@ -258,17 +387,25 @@ def test_model_from_spec() -> None:
 
 
 @pytest.mark.parametrize(
-    "spec", ["fake", "FAKE", "claude-sonnet-5", "gpt-5", "", " claude-opus-5-5"]
+    "spec", ["fake", "FAKE", "claude-sonnet-4-6", "gpt-5", "", " claude-opus-5-5"]
 )
-def test_model_from_spec_refuses_unpriced_models(spec: str) -> None:
+def test_model_from_spec_refuses_unknown_models(spec: str) -> None:
     assert spec not in PRICES
-    with pytest.raises(PricingError, match="no price for model"):
+    with pytest.raises(ModelSpecError, match="cannot run model"):
+        model_from_spec(spec)
+
+
+@pytest.mark.parametrize("spec", ["claude-sonnet-5", "claude-opus-5", "claude-opus-4-8"])
+def test_model_from_spec_refuses_a_model_priced_only_as_a_fallback(spec: str) -> None:
+    assert spec in PRICES
+    with pytest.raises(ModelSpecError, match="cannot run model"):
         model_from_spec(spec)
 
 
 def test_fake_needs_a_path() -> None:
     with pytest.raises(ScriptError, match="needs the path of a script"):
         model_from_spec("fake:")
+    assert issubclass(ScriptError, ModelSpecError)
 
 
 def test_fake_is_never_priced() -> None:

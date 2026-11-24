@@ -38,7 +38,7 @@ import anthropic
 from footfall.manifest import Brief
 from footfall.personas import Device, Persona
 from footfall.tester.model import FakeModel, ModelClient, ModelTurn
-from footfall.tester.pricing import PricingError, Usage, cost_usd
+from footfall.tester.pricing import PricingError, Usage, cost_usd, dearest_cost_usd
 from footfall.tester.prompt import system_prompt
 from footfall.tester.report import (
     CAPS,
@@ -106,14 +106,6 @@ class Budget:
             raise ValueError("a budget needs at least one action, some money and some time")
         if self.grace_turns < 0:
             raise ValueError("a budget cannot have fewer than no grace turns")
-
-
-class _Unpriced(Exception):
-    """The API answered as a model that has no price, so the run cannot be held to its cost."""
-
-    def __init__(self, model: str) -> None:
-        super().__init__()
-        self.model = model
 
 
 def _free(model: str, usage: Usage) -> float:
@@ -206,6 +198,7 @@ class _Run:
         self.idle = 0
         self.spent: str | None = None  # why the budget ran out, once it has
         self.grace_used = 0
+        self.unpriced: set[str] = set()
 
     # ------------------------------------------------------------------ the loop
 
@@ -230,10 +223,22 @@ class _Run:
                 return ended
 
     def _charge(self, turn: ModelTurn) -> None:
-        try:
-            self.cost += self.pricing(turn.model, turn.usage)
-        except PricingError:
-            raise _Unpriced(turn.model) from None
+        """Add what every attempt of the turn cost.
+
+        A model with no price, such as a fallback Footfall has never heard of, is charged at
+        the dearest rate of each kind, and the run goes on. The first time, a warning names it.
+        """
+        for model, usage in turn.charges or ((turn.model, turn.usage),):
+            try:
+                self.cost += self.pricing(model, usage)
+            except PricingError:
+                self.cost += dearest_cost_usd(usage)
+                if model not in self.unpriced:
+                    self.unpriced.add(model)
+                    LOG.warning(
+                        "model %s has no price, so it is charged at the dearest rates",
+                        quote(model, 60),
+                    )
 
     async def _answer(self, turn: ModelTurn) -> tuple[bool, dict[str, Any] | None]:
         """Reply to the turn. Returns whether an action was done, and an accepted report."""
@@ -381,10 +386,11 @@ async def run_persona(
 ) -> PersonaReport:
     """Run one persona to its report.
 
-    `brief.max_actions`, when set, replaces the budget's count of actions. Each turn is
-    priced by `pricing`, which defaults to the price table, and charges nothing for a
-    `FakeModel`. `clock` is a monotonic clock in seconds. When the page stops answering
-    the persona fails, and the caller must close its browser context.
+    `brief.max_actions`, when set, replaces the budget's count of actions. Each attempt
+    of each turn is priced by `pricing`, which defaults to the price table and charges
+    nothing for a `FakeModel`; a model it has no price for is charged at the dearest rates.
+    `clock` is a monotonic clock in seconds. When the page stops answering the persona
+    fails, and the caller must close its browser context.
     """
     run = _Run(
         persona=persona,
@@ -402,10 +408,6 @@ async def run_persona(
         return await run.go()
     except CaptureError:
         return run.report("failed", PAGE_STOPPED)
-    except _Unpriced as error:
-        return run.report(
-            "failed", f"the API answered as model {quote(error.model, 60)}, which has no price here"
-        )
     except _MalformedTurn:
         return run.report("failed", "the model's answer held a tool call without an id")
     except anthropic.APIStatusError as error:

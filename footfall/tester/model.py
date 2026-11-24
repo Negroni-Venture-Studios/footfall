@@ -28,16 +28,19 @@ from anthropic.types.beta import (
     BetaToolUnionParam,
 )
 
-from footfall.tester.pricing import PRICES, PricingError, Usage
+from footfall.tester.pricing import Usage
 
 __all__ = [
     "BETAS",
     "DEFAULT_MODEL",
     "FAKE_MODEL",
     "MAX_TOKENS",
+    "REQUESTABLE",
     "AnthropicModel",
+    "Charges",
     "FakeModel",
     "ModelClient",
+    "ModelSpecError",
     "ModelTurn",
     "ScriptError",
     "model_from_spec",
@@ -49,6 +52,12 @@ MAX_TOKENS: Final = 16_000
 BETAS: Final = ("server-side-fallback-2026-07-01",)
 FAKE_MODEL: Final = "fake"
 NO_USAGE: Final = Usage(0, 0, 0, 0)
+# The models a run may ask for. The price table also holds their fallbacks, which serve a
+# turn the model asked for declines, but which Footfall never asks for itself.
+REQUESTABLE: Final = ("claude-sonnet-5-5", "claude-opus-5-5")
+
+# What one turn costs: each attempt's model and usage.
+Charges = tuple[tuple[str, Usage], ...]
 
 
 @dataclass(frozen=True)
@@ -57,13 +66,18 @@ class ModelTurn:
 
     `content` is the assistant's blocks as plain dicts, to be appended to the conversation
     unchanged. `model` is the model that answered, which a fallback can make different
-    from the one asked for, and is the one whose price applies.
+    from the one asked for, and `usage` is what that model's attempt used.
+
+    `charges` is every attempt the turn took, each with its own model and usage: with a
+    fallback, the model asked for may run and decline before another serves the reply, and
+    both are billed. Empty means the turn is charged as `usage` on `model`.
     """
 
     content: list[dict[str, Any]]
     stop_reason: str
     usage: Usage
     model: str
+    charges: Charges = ()
 
 
 class ModelClient(Protocol):
@@ -100,6 +114,9 @@ class AnthropicModel:
         effort: str = DEFAULT_EFFORT,
         client: anthropic.AsyncAnthropic | None = None,
     ) -> None:
+        if model not in REQUESTABLE:
+            known = ", ".join(REQUESTABLE)
+            raise ModelSpecError(f"cannot run model {model!r}; use one of {known}")
         self.model = model
         self.effort = effort
         self._client = client
@@ -121,24 +138,75 @@ class AnthropicModel:
             fallbacks="default",
             betas=list(BETAS),
         )
-        usage = response.usage
+        geo = response.usage.inference_geo
+        usage = _usage(response.usage, geo)
         return ModelTurn(
             content=[block.to_dict() for block in response.content],
             stop_reason=response.stop_reason or "",
-            usage=Usage(
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_creation_input_tokens=usage.cache_creation_input_tokens or 0,
-                cache_read_input_tokens=usage.cache_read_input_tokens or 0,
-            ),
+            usage=usage,
             model=response.model,
+            charges=self._charges(response.usage.iterations, response.model, usage, geo),
         )
+
+    def _charges(self, iterations: object, answered: str, usage: Usage, geo: str | None) -> Charges:
+        """Each attempt the turn took, each to be priced at its own model's rates.
+
+        With a fallback, the top-level usage covers only the attempt that served the reply,
+        and `usage.iterations` lists every attempt: a "message" entry the model asked for
+        declined, and a "fallback_message" entry served the turn (Anthropic's refusals and
+        fallback page, https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback,
+        checked on 24 November 2026). Some declines before any output are not billed, but
+        every attempt is charged here: a cost ceiling should overcharge rather than
+        undercharge. An attempt that names no model is charged as the model asked for.
+
+        Without iterations, the turn is the top-level usage on the model that answered,
+        which after a fallback can go on being the fallback model for later turns.
+        """
+        if not isinstance(iterations, list) or not iterations:
+            return ((answered, usage),)
+        return tuple(
+            (getattr(entry, "model", None) or self.model, _usage(entry, geo))
+            for entry in iterations
+        )
+
+
+def _count(source: object, name: str) -> int:
+    value = getattr(source, name, None)
+    return value if isinstance(value, int) else 0
+
+
+def _usage(source: object, geo: str | None) -> Usage:
+    """The token counts of a response's usage or of one attempt; a count left out is 0.
+
+    `cache_creation_input_tokens` is the total of the five-minute and one-hour cache writes
+    in `cache_creation`. Tokens the split leaves out are five-minute writes, as is the
+    whole total when there is no split; a split that adds up to more than the total is
+    believed over the total. No written token is ever dropped.
+    """
+    split = getattr(source, "cache_creation", None)
+    one_hour = _count(split, "ephemeral_1h_input_tokens")
+    written = max(
+        _count(source, "cache_creation_input_tokens"),
+        _count(split, "ephemeral_5m_input_tokens") + one_hour,
+    )
+    return Usage(
+        input_tokens=_count(source, "input_tokens"),
+        output_tokens=_count(source, "output_tokens"),
+        cache_creation_input_tokens=written,
+        cache_read_input_tokens=_count(source, "cache_read_input_tokens"),
+        cache_write_1h_input_tokens=one_hour,
+        inference_geo=geo,
+    )
 
 
 # ------------------------------------------------------------------ the fake
 
 
-class ScriptError(ValueError):
+class ModelSpecError(ValueError):
+    """A model spec names nothing Footfall can run."""
+
+
+class ScriptError(ModelSpecError):
     """A fake model's script is malformed, or has no turn left."""
 
 
@@ -177,6 +245,9 @@ class FakeModel:
     `{"text": "..."}`. A turn with a tool stops for `tool_use`, and any other for
     `end_turn`. `calls` holds a deep copy of every `messages` list the fake was sent. Its
     model name is "fake", which has no price: the loop charges nothing for a fake.
+
+    A script for a whole run must end with a `finish` call. A run that asks for a turn
+    past the end gets a `ScriptError`, which fails the persona.
     """
 
     def __init__(self, script: list[list[dict[str, Any]]], *, usage: Usage = NO_USAGE) -> None:
@@ -225,15 +296,15 @@ class FakeModel:
 
 
 def model_from_spec(spec: str) -> ModelClient:
-    """`fake:<path>` gives a `FakeModel` from that script; a priced model id gives Claude."""
+    """`fake:<path>` gives a `FakeModel` from that script; a model in `REQUESTABLE`, Claude."""
     if spec.startswith("fake:"):
         path = spec.removeprefix("fake:")
         if not path:
             raise ScriptError("`fake:` needs the path of a script, as in fake:script.json")
         return FakeModel.from_file(Path(path))
-    if spec not in PRICES:
-        known = ", ".join(sorted(PRICES))
-        raise PricingError(
-            f"no price for model {spec!r}; use one of {known}, or fake:<path> for a script"
+    if spec not in REQUESTABLE:
+        known = ", ".join(REQUESTABLE)
+        raise ModelSpecError(
+            f"cannot run model {spec!r}; use one of {known}, or fake:<path> for a script"
         )
     return AnthropicModel(spec)

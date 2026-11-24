@@ -30,7 +30,7 @@ from footfall.tester.report import PersonaReport
 from footfall.tester.tools import TOOLS, Executor
 from footfall.tester.trace import Trace
 from tests.app_server import AppServer
-from tests.fake_api import KEY, Api, message
+from tests.fake_api import KEY, Api, iteration, message
 
 SCRIPTS = Path(__file__).parent / "fixtures" / "scripts"
 PHONE: ViewportSize = {"width": 390, "height": 664}
@@ -148,8 +148,9 @@ def answer(
     stop: str = "tool_use",
     usage: Usage = NO_USAGE,
     model: str = "claude-sonnet-5-5",
+    charges: tuple[tuple[str, Usage], ...] = (),
 ) -> ModelTurn:
-    return ModelTurn(list(blocks), stop, usage, model)
+    return ModelTurn(list(blocks), stop, usage, model, charges)
 
 
 def use(name: str, ident: str = "toolu_1", **data: Any) -> dict[str, Any]:
@@ -401,7 +402,7 @@ async def test_no_grace_turns_ends_at_once(world: MakeWorld) -> None:
 
 async def test_cost_ceiling_stops(world: MakeWorld) -> None:
     w = await world()
-    test_price = Price(input=0.30, output=0.0, cache_write=0.0, cache_read=0.0)
+    test_price = Price(input=0.30, output=0.0, cache_write=0.0, cache_read=0.0, cache_write_1h=0.0)
 
     def pricing(model: str, usage: Usage) -> float:
         assert model == "fake"
@@ -536,7 +537,9 @@ async def test_a_page_that_stops_answering_fails_the_persona(
     assert model.calls == []
 
 
-async def test_a_fallback_is_priced_as_the_model_that_answered(world: MakeWorld) -> None:
+async def test_a_turn_without_charges_is_priced_as_the_model_that_answered(
+    world: MakeWorld,
+) -> None:
     w = await world()
     usage = Usage(10_000, 2_000, 5_000, 40_000)
     model = Turns(
@@ -550,12 +553,53 @@ async def test_a_fallback_is_priced_as_the_model_that_answered(world: MakeWorld)
     assert cost_usd("claude-opus-5-5", usage) != cost_usd("claude-sonnet-5-5", usage)
 
 
-async def test_an_unpriced_model_fails_the_persona(world: MakeWorld) -> None:
+async def test_a_fallback_turn_is_priced_for_every_attempt(world: MakeWorld) -> None:
     w = await world()
-    model = Turns(answer(use("look"), usage=Usage(1, 1, 0, 0), model="claude-sonnet-5"))
+    declined, served = Usage(10_000, 2_000, 5_000, 0), Usage(3_000, 500, 0, 40_000)
+    model = Turns(
+        answer(
+            use("look"),
+            usage=served,
+            model="claude-sonnet-5",
+            charges=(("claude-sonnet-5-5", declined), ("claude-sonnet-5", served)),
+        ),
+        answer(FINISH_BLOCK, usage=served, model="claude-sonnet-5"),
+    )
     report = await run(w, model)
-    assert report.status == "failed"
-    assert report.reason == 'the API answered as model "claude-sonnet-5", which has no price here'
+    assert report.status == "finished"
+    expected = (
+        cost_usd("claude-sonnet-5-5", declined)
+        + cost_usd("claude-sonnet-5", served)
+        + cost_usd("claude-sonnet-5", served)
+    )
+    assert report.cost_usd == pytest.approx(expected)
+
+
+async def test_an_unpriced_model_is_charged_at_the_dearest_rates(
+    world: MakeWorld, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+    w = await world()
+    unexpected = Usage(1_000_000, 1_000_000, 0, 0)
+    model = Turns(
+        answer(
+            use("look"),
+            model="claude-opus-4-7",
+            charges=(
+                ("claude-sonnet-5-5", Usage(1_000_000, 0, 0, 0)),
+                ("claude-opus-4-7", unexpected),
+            ),
+        ),
+        answer(FINISH_BLOCK, usage=unexpected, model="claude-opus-4-7"),
+    )
+    report = await run(w, model)
+    # The run carries on, and the unknown model costs as much as the dearest known one.
+    assert report.status == "finished"
+    assert report.cost_usd == pytest.approx(2.00 + 2 * (5.00 + 25.00))
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        'model "claude-opus-4-7" has no price, so it is charged at the dearest rates'
+    ]
 
 
 async def test_the_report_is_redacted(world: MakeWorld) -> None:
@@ -697,3 +741,29 @@ async def test_an_empty_turn_after_the_nudge_leaves_the_nudge_last(world: MakeWo
     # A system message must be last or followed by the assistant, so nothing is added.
     assert model.calls[1][-1] == {"role": "system", "content": NUDGE}
     assert model.calls[2] == model.calls[1]
+
+
+async def test_a_fallback_through_the_api_is_priced_for_every_attempt(
+    world: MakeWorld, api: Api
+) -> None:
+    w = await world()
+    look = {"type": "tool_use", "id": "toolu_a", "name": "look", "input": {}}
+    api.answer(
+        message(
+            [look],
+            model="claude-sonnet-5",
+            iterations=[
+                iteration("message", "claude-sonnet-5-5", (100_000, 4_000, 0, 0)),
+                iteration("fallback_message", "claude-sonnet-5", (120_000, 3_000, 0, 0)),
+            ],
+        )
+    )
+    api.answer(message([{**FINISH_BLOCK, "id": "toolu_b"}], model="claude-sonnet-5"))
+    report = await run(w, AnthropicModel(client=api.client()))
+    assert report.status == "finished"
+    expected = (
+        cost_usd("claude-sonnet-5-5", Usage(100_000, 4_000, 0, 0))
+        + cost_usd("claude-sonnet-5", Usage(120_000, 3_000, 0, 0))
+        + cost_usd("claude-sonnet-5", Usage(1200, 80, 1000, 200))
+    )
+    assert report.cost_usd == pytest.approx(expected)

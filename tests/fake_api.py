@@ -18,9 +18,10 @@ def message(
     stop: str = "tool_use",
     model: str = "claude-sonnet-5-5",
     usage: dict[str, Any] | None = None,
+    iterations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """A Messages API response body."""
-    return {
+    """A Messages API response body, with `usage.iterations` when given."""
+    body: dict[str, Any] = {
         "id": "msg_test",
         "type": "message",
         "role": "assistant",
@@ -36,6 +37,32 @@ def message(
             "cache_read_input_tokens": 200,
         },
     }
+    if iterations is not None:
+        body["usage"] = {**body["usage"], "iterations": iterations}
+    return body
+
+
+def iteration(
+    kind: str, model: str | None, tokens: tuple[int, int, int, int], *, one_hour: int = 0
+) -> dict[str, Any]:
+    """One entry of `usage.iterations`: input, output, cache write and cache read tokens.
+
+    `one_hour` of the cache write tokens were written for an hour, the rest for five minutes.
+    """
+    entry: dict[str, Any] = {
+        "type": kind,
+        "input_tokens": tokens[0],
+        "output_tokens": tokens[1],
+        "cache_creation_input_tokens": tokens[2],
+        "cache_read_input_tokens": tokens[3],
+        "cache_creation": {
+            "ephemeral_5m_input_tokens": tokens[2] - one_hour,
+            "ephemeral_1h_input_tokens": one_hour,
+        },
+    }
+    if model is not None:
+        entry["model"] = model
+    return entry
 
 
 class Api:
