@@ -8,8 +8,9 @@ sends a second ClientHello in plain text, which must pass the same checks as the
 the ServerHello has gone by, a server takes no further plain ClientHello, so the proxy relays
 the rest untouched, including TLS 1.2's encrypted Finished, which travels as a handshake record.
 
-A ClientHello that carries the encrypted_client_hello extension is refused outright: its
-server_name would name a front, and the encrypted inner ClientHello could name any site.
+A ClientHello that carries Encrypted Client Hello, in any of its draft or final code points,
+or the older encrypted SNI, is refused outright: its server_name would name a front, and the
+encrypted inner name could be any site.
 
 The bytes come from code under test, so the parser trusts no length: every field is checked
 against what is left before it is read, and a handshake record must hold one whole ClientHello
@@ -56,7 +57,12 @@ _CONTENT_TYPES: Final = frozenset({CHANGE_CIPHER_SPEC, ALERT, HANDSHAKE, APPLICA
 _CLIENT_HELLO: Final = 0x01
 _SERVER_HELLO: Final = 0x02
 _SERVER_NAME: Final = 0x0000
-_ENCRYPTED_CLIENT_HELLO: Final = 0xFE0D
+# Extensions that hide the real server name: Encrypted Client Hello's drafts (0xfe08 to 0xfe0c,
+# and 0xff02 from draft 7) and its final code point (0xfe0d), and the encrypted SNI that came
+# before it (0xffce).
+_ENCRYPTED_NAMES: Final = frozenset(
+    {0xFE08, 0xFE09, 0xFE0A, 0xFE0B, 0xFE0C, 0xFE0D, 0xFF02, 0xFFCE}
+)
 _HOST_NAME: Final = 0x00
 _MAX_SESSION_ID: Final = 32
 _RANDOM: Final = 32
@@ -69,7 +75,7 @@ class HandshakeError(ValueError):
 
 
 class EncryptedClientHello(HandshakeError):
-    """A ClientHello carries the encrypted_client_hello extension, which hides its real name."""
+    """A ClientHello carries an extension that hides its real name (ECH or encrypted SNI)."""
 
     def __init__(self) -> None:
         super().__init__("encrypted client hello")
@@ -156,8 +162,8 @@ def server_name(record: bytes) -> str | None:
     """The host name a ClientHello asks for, or None if it has no server_name extension.
 
     `record` is exactly one TLS record, header included. Raises HandshakeError unless it holds
-    exactly one well-formed ClientHello, and EncryptedClientHello if that ClientHello carries
-    the encrypted_client_hello extension.
+    exactly one well-formed ClientHello, and EncryptedClientHello if that ClientHello carries an
+    extension that hides its real name.
     """
     cursor = _Cursor(record)
     content_type, length = record_header(bytes(cursor.take(RECORD_HEADER)))
@@ -189,7 +195,7 @@ def server_name(record: bytes) -> str | None:
     while not extensions.done:
         kind = extensions.number(2)
         data = extensions.vector(2)
-        if kind == _ENCRYPTED_CLIENT_HELLO:
+        if kind in _ENCRYPTED_NAMES:
             raise EncryptedClientHello
         if kind in seen:
             raise HandshakeError(f"the ClientHello repeats extension {kind}")

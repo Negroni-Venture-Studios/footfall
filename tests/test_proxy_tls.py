@@ -168,6 +168,18 @@ def test_encrypted_client_hello_is_refused() -> None:
 # ---------------------------------------------------------------- the server's side
 
 
+@pytest.mark.parametrize("kind", [0xFE08, 0xFE09, 0xFE0A, 0xFE0B, 0xFE0C, 0xFE0D, 0xFF02, 0xFFCE])
+def test_every_encrypted_client_hello_code_point_is_refused(kind: int) -> None:
+    with pytest.raises(EncryptedClientHello):
+        server_name(with_extension(real_client_hello("api.example.com"), kind, bytes(8)))
+
+
+@pytest.mark.parametrize("kind", [0xFE07, 0xFE0E, 0xFF03, 0xFF04, 0xFFCD, 0xFFCF])
+def test_neighbouring_code_points_are_not_refused(kind: int) -> None:
+    hello_record = with_extension(real_client_hello("api.example.com"), kind, bytes(8))
+    assert server_name(hello_record) == "api.example.com"
+
+
 def test_the_hello_retry_value_is_rfc_8446s() -> None:
     assert tls_hellos.HELLO_RETRY_RANDOM == HELLO_RETRY_RANDOM
     assert HELLO_RETRY_RANDOM.hex().startswith("cf21ad74")
