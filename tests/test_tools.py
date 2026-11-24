@@ -289,8 +289,14 @@ def test_validate_path_accepts(path: str) -> None:
         "/a\nb",
         "/a\x00",
         "/a\x7f",
-        "/a　b",
+        "/a\u3000b",
         "/a\\b",
+        "/a\u200bb",  # zero-width space (Cf)
+        "/a\u202eb",  # right-to-left override (Cf)
+        "/a\ufeffb",  # byte order mark (Cf)
+        "/a\U000e0041b",  # tag letter A (Cf)
+        "/a\ue000b",  # private use (Co)
+        "/a\u0378b",  # unassigned (Cn)
     ],
 )
 def test_validate_path_refuses(path: str) -> None:
@@ -871,6 +877,35 @@ async def test_a_navigation_during_capture_is_captured_again(
     assert (step.error, step.screenshot_after) == (None, "02")
 
 
+async def test_a_capture_retry_that_finds_the_page_off_the_app_brings_it_back(
+    session: MakeSession, app_server: AppServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+    calls = [0]
+
+    async def stub(page: Page, **options: Any) -> Screen:
+        calls[0] += 1
+        if calls[0] == 1:
+            await page.evaluate(
+                "location.href = window.URL.createObjectURL(new Blob("
+                "['<title>Not the app</title><button>Pay elsewhere</button>'],"
+                " {type: 'text/html'}))"
+            )
+            error = CaptureError("the page could not be read")
+            error.__cause__ = PlaywrightError("Execution context was destroyed")
+            raise error
+        return await capture(page, **options)
+
+    monkeypatch.setattr(tools, "capture", stub)
+    outcome = await s.executor.run("look", {})
+    assert calls[0] == 2
+    assert outcome.screen is not None and outcome.screen.path == "/buttons"
+    assert "Pay elsewhere" not in outcome.text
+    lines = outcome.text.splitlines()
+    assert "The browser left the app, so Footfall brought it back to /buttons." in lines
+    assert s.page.url == app_server.origin + "/buttons"
+
+
 async def test_a_second_capture_failure_ends_the_persona(
     session: MakeSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1017,6 +1052,43 @@ async def test_an_event_full_of_backslashes_keeps_its_closing_quote(
 SECRET = "s3cret-Pa55"
 
 
+async def test_a_first_look_at_a_page_that_throws_the_password_hides_it(
+    loopback_browser: Browser,
+    app_server: AppServer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    # The app knows its own password, so it can throw it before the tester types anything.
+    app_server.page(
+        "/throws-now",
+        "<button>Hello</button><script>window.getComputedStyle = function () {"
+        f" throw new Error('leak {SECRET}'); }};</script>",
+    )
+    context = await loopback_browser.new_context()
+    try:
+        guard = Guard(app_server.origin, frozenset())
+        await guard.install(context)
+        page = await context.new_page()
+        await page.goto(app_server.origin + "/throws-now")
+        executor = Executor(
+            page,
+            guard,
+            Trace(tmp_path / "t.jsonl"),
+            tmp_path / "shots",
+            touch=False,
+            redact=frozenset({SECRET}),
+        )
+        with pytest.raises(CaptureError) as caught:
+            await executor.first_look()
+    finally:
+        await context.close()
+    assert "[password]" in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert SECRET not in caplog.text
+
+
 async def test_a_typed_password_never_reaches_the_trace_or_the_logs(
     session: MakeSession,
     app_server: AppServer,
@@ -1032,6 +1104,15 @@ async def test_a_typed_password_never_reaches_the_trace_or_the_logs(
         f'<button style="width:300px;height:50px">Hello {SECRET}</button>',
     )
     app_server.redirect(f"/{SECRET}", "https://accounts.invalid/")
+    app_server.page(
+        "/throws",
+        '<input type="password" aria-label="Secret field" style="width:300px;height:40px">'
+        "<script>const real = window.getComputedStyle;"
+        "window.getComputedStyle = function (element) {"
+        " const typed = document.querySelector('input').value;"
+        " if (typed.length >= 11) throw new Error('leak ' + typed);"
+        " return real.apply(this, arguments); };</script>",
+    )
     s = await session("/signin", redact=frozenset({SECRET}))
     await tap_name(s, s.first, "Password")
     typed = await s.executor.run("type", {"text": SECRET})
@@ -1045,10 +1126,26 @@ async def test_a_typed_password_never_reaches_the_trace_or_the_logs(
     finished = await s.executor.run("finish", report)
     assert finished.finish is not None
     assert SECRET not in json.dumps(finished.finish)
+
+    # A page that throws the password while its screen is read ends the persona. The error
+    # raised to the caller must not hold it, in its message or anywhere in its chain.
+    went = await s.executor.run("go", {"to": "/throws"})
+    assert went.screen is not None and went.screen.path == "/throws"
+    await tap_name(s, went, "Secret field")
+    with pytest.raises(CaptureError) as caught:
+        await s.executor.run("type", {"text": SECRET})
+    assert "[password]" in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    chained: BaseException | None = caught.value
+    while chained is not None:
+        assert SECRET not in str(chained)
+        chained = chained.__cause__ or chained.__context__
     raw = s.trace.path.read_text(encoding="utf-8")
     assert SECRET not in raw
     assert "[password]" in raw
     assert SECRET not in caplog.text
+    assert all(SECRET not in record.getMessage() for record in caplog.records)
     steps = s.trace.steps()
     assert steps[1].input == {"text": "[password]"}
     assert any("You typed [password]" in event for step in steps for event in step.events)

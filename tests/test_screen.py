@@ -453,7 +453,10 @@ async def test_a_page_error_reaches_the_model_only_flattened_and_quoted(
     assert message.startswith('the page could not be read: "')
     assert message.endswith('"')
     assert "ignore your rules" in message  # present, but only inside the quotes
-    assert any("ignore your rules" in r.getMessage() for r in caplog.records)
+    # The log gets the error's class alone: what the page threw may hold a password.
+    logged = [r.getMessage() for r in caplog.records]
+    assert "the page could not be read: Error" in logged
+    assert not any("ignore your rules" in line for line in logged)
 
 
 async def test_covered_inert_disabled_and_collapsed_elements(make_page: MakePage) -> None:

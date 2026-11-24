@@ -252,7 +252,8 @@ async def capture(
             f"the page did not answer within {timeout:g} s while its screen was being read"
         ) from None
     except PlaywrightError as error:
-        LOG.debug("the page could not be read: %s", error)
+        # The class only: the message may hold anything the page threw, a password included.
+        LOG.debug("the page could not be read: %s", type(error).__name__)
         raise CaptureError(f"the page could not be read: {quote(str(error), 200)}") from error
     if not isinstance(data, dict):
         raise _unexpected(type(data).__name__)
@@ -307,7 +308,7 @@ async def capture(
             timeout=timeout * 1000,
         )
     except PlaywrightError as error:
-        LOG.debug("the screenshot could not be taken: %s", error)
+        LOG.debug("the screenshot could not be taken: %s", type(error).__name__)
         raise CaptureError(
             f"the screenshot could not be taken: {quote(str(error), 200)}"
         ) from error

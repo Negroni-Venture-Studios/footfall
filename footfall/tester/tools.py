@@ -424,18 +424,28 @@ class Executor:
         return set(self._shots)
 
     async def first_look(self) -> ToolOutcome:
-        """The screen before the first action. It is screenshot 01 and is not traced."""
-        notes = await self._settle_on_app()
-        events = self._guard.drain()
-        screen, shot = await self._look()
-        return ToolOutcome(self._compose(events, [*notes], shot, screen), screen, None, False)
+        """The screen before the first action. It is screenshot 01 and is not traced.
+
+        A `CaptureError` is raised as `run` raises it, redacted and with nothing chained.
+        """
+        try:
+            notes = await self._settle_on_app()
+            events = self._guard.drain()
+            screen, shot, again = await self._look()
+        except CaptureError as error:
+            hidden = self._hide(error)
+        else:
+            lines = notes + again
+            return ToolOutcome(self._compose(events, lines, shot, screen), screen, None, False)
+        raise hidden from None
 
     async def run(self, name: str, tool_input: dict[str, Any]) -> ToolOutcome:
         """Run one tool call. A mistake in the input comes back as an error outcome.
 
         Anything else that goes wrong is raised after the step is traced. `CaptureError`,
         raised when the page hangs or cannot be read, means the caller must end the persona
-        and close the browser context.
+        and close the browser context. Its message may quote the page, so it is raised again
+        with every secret redacted and with no exception chained to it.
         """
         if self._screen is None or self._shot is None:
             raise RuntimeError("call first_look before run")
@@ -475,7 +485,8 @@ class Executor:
                 return ToolOutcome("Your report was received.", None, report, False)
             notes = await self._settle_on_app()
             events = self._guard.drain()
-            screen, shot = await self._look()
+            screen, shot, again = await self._look()
+            notes += again
             traced = True
             self._append(
                 draft,
@@ -494,7 +505,12 @@ class Executor:
                 self._append(
                     draft, events + self._guard.drain(), error=failure, action=self._attempt
                 )
-            raise
+            if not isinstance(error, CaptureError):
+                raise
+            hidden = self._hide(error)
+        # Raised here, outside the handler, so that neither __cause__ nor __context__ holds
+        # the original error and whatever the page put in it.
+        raise hidden from None
 
     # ------------------------------------------------------------------ the tools
 
@@ -690,14 +706,21 @@ class Executor:
         await self._settle()
         return notes
 
-    async def _look(self) -> tuple[Screen, str]:
-        """Capture the screen, once more if the page moved on while it was being read."""
+    async def _look(self) -> tuple[Screen, str, list[str]]:
+        """Capture the screen, once more if the page moved on while it was being read.
+
+        Returns the screen, its screenshot id, and any notes from bringing the browser back
+        to the app before the second read.
+        """
         before = self._page.url
+        notes: list[str] = []
         try:
             screen = await capture(self._page, timeout=CAPTURE_TIMEOUT)
         except CaptureError as error:
-            # A navigation destroys the page's context mid-read, and changes the address. A
-            # timeout or an answer of the wrong shape is the page's fault, and ends here.
+            # A navigation destroys the page's context mid-read, or changes the address while
+            # the page is read. Either is read once more, even after a timeout, and a second
+            # failure ends the persona. A timeout or an answer of the wrong shape at the same
+            # address is the page's fault, and ends it at once.
             cause = error.__cause__
             moved = isinstance(cause, PlaywrightError) and not isinstance(
                 cause, PlaywrightTimeoutError
@@ -705,13 +728,14 @@ class Executor:
             if not (moved or self._page.url != before):
                 raise
             self._debug("the page moved while it was read, so it is read again: %s", error)
-            await self._settle()
+            # Where the navigation ended may be off the app; the model only ever sees the app.
+            notes = await self._settle_on_app()
             screen = await capture(self._page, timeout=CAPTURE_TIMEOUT)
         shot = self._save(screen.jpeg)
         self._screen, self._shot = screen, shot
         if self._guard.on_app(self._page.url):
             self._home, self._home_path = self._page.url, screen.path
-        return screen, shot
+        return screen, shot, notes
 
     def _save(self, jpeg: bytes) -> str:
         shot = screenshot_id(len(self._shots) + 1)
@@ -740,6 +764,13 @@ class Executor:
         if isinstance(value, dict):
             return {self._scrub(k): self._scrub(v) for k, v in value.items()}
         return value
+
+    def _hide(self, error: CaptureError) -> CaptureError:
+        """A copy of `error` to raise instead: secrets redacted, the page's error left behind.
+
+        Raise it outside the `except` block that caught `error`, and `from None`.
+        """
+        return CaptureError(self._redact(str(error)))
 
     def _debug(self, message: str, error: BaseException) -> None:
         LOG.debug(message, self._redact(str(error)))
