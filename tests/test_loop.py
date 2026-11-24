@@ -315,7 +315,7 @@ async def test_an_unknown_tool_gets_an_error_and_runs_nothing(world: MakeWorld) 
     assert report.actions == 0
     (refused, _) = w.trace.steps()
     assert (refused.tool, refused.input, refused.error) == (
-        "click",
+        "(unknown tool)",
         {},
         "not run: there is no tool of that name",
     )
@@ -889,15 +889,48 @@ async def test_a_fallback_through_the_api_is_priced_for_every_attempt(
     assert report.cost_usd == pytest.approx(expected)
 
 
+def no_run_of(secret: str, *places: str) -> None:
+    """No four characters of `secret` in a row appear in any of `places`."""
+    for place in places:
+        for run_ in {secret[i : i + 4] for i in range(len(secret) - 3)}:
+            assert run_ not in place, (run_, place[:200])
+
+
 async def test_a_refused_call_is_traced_without_its_secret(world: MakeWorld) -> None:
     w = await world(redact=frozenset({SECRET}))
-    model = FakeModel([[tool(f"x{SECRET}", text=SECRET)], finish()])
+    # Long enough that cutting it to a length first would leave part of the password.
+    model = FakeModel([[tool("a" * 30 + SECRET, text=SECRET)], finish()])
     report = await run(w, model)
     assert report.status == "finished"
-    raw = w.trace.path.read_text(encoding="utf-8")
-    for run_ in {SECRET[i : i + 4] for i in range(len(SECRET) - 3)}:
-        assert run_ not in raw, run_
-    assert w.trace.steps()[0].input == {}
+    no_run_of(SECRET, w.trace.path.read_text(encoding="utf-8"), str(w.trace.steps()))
+    refused = w.trace.steps()[0]
+    assert (refused.tool, refused.input) == ("(unknown tool)", {})
+
+
+async def test_a_report_emptied_by_invisible_characters_is_refused_and_retried(
+    world: MakeWorld,
+) -> None:
+    w = await world(redact=frozenset({SECRET}))
+    empty = [tool("finish", summary="\u200b\u00ad", score=5, goal_reached="no", findings=[])]
+    model = FakeModel([empty, finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    (result,) = results(model.calls[1][-1])
+    assert result["is_error"] is True
+    assert result["content"][0]["text"] == "`summary` must not be empty"
+
+
+async def test_the_trace_strips_invisible_characters_before_redacting(world: MakeWorld) -> None:
+    w = await world(redact=frozenset({SECRET}))
+    split = SECRET[:3] + "\u200b" + SECRET[3:9] + "\u034f" + SECRET[9:]
+    model = FakeModel([[tool("type", text=split)], finish(summary=f"I typed {split}.")])
+    report = await run(w, model)
+    assert report.status == "finished"
+    steps = w.trace.steps()
+    assert [s.tool for s in steps] == ["type", "finish"]
+    assert steps[0].input == {"text": "[password]"}
+    assert steps[1].input["summary"] == "I typed [password]."
+    no_run_of(SECRET, w.trace.path.read_text(encoding="utf-8"), str(steps))
 
 
 class Hung:

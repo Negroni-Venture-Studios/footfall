@@ -10,6 +10,7 @@ from footfall.tester.report import (
     ToolError,
     map_report_text,
     parse_finish,
+    strip_invisible,
 )
 
 SHOTS = {"s3", "s7"}
@@ -346,3 +347,10 @@ def test_map_report_text_changes_free_text_and_nothing_else() -> None:
         "summary": 1,
         "findings": "none",
     }
+
+
+def test_strip_invisible_removes_only_what_shows_nothing() -> None:
+    hidden = "a\u200bb\u00adc\u034fd\ufe0fe\U000e0100f\u2060g\ufeffh"
+    assert strip_invisible(hidden) == "abcdefgh"
+    shown = "Tab\tnew line\n caf\u00e9 \u65e5\u672c \U0001f600 [password]"
+    assert strip_invisible(shown) == shown

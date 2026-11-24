@@ -34,6 +34,7 @@ from footfall.tester.report import (
     clean_text,
     map_report_text,
     parse_finish,
+    strip_invisible,
 )
 from footfall.tester.screen import (
     SNAPSHOT_TIMEOUT,
@@ -70,6 +71,7 @@ TYPE_CHUNK: Final = 50  # characters typed under one timeout, so slow typing is 
 # Above the longest detail the guard builds (about 240 characters), so no event is cut.
 EVENT_CAP: Final = 400
 REDACTED: Final = "[password]"
+UNKNOWN_TOOL: Final = "(unknown tool)"  # what the trace calls a refused call to no tool
 UNRECORDED: Final = "unrecorded"  # the key the trace holds instead of an input it cannot store
 EVENTS_HEADING: Final = (
     "Since your last action, Footfall stopped or noticed the following "
@@ -252,6 +254,9 @@ TOOLS: Final[list[dict[str, Any]]] = [
         },
     ),
 ]
+
+
+_TOOL_NAMES: Final = frozenset(tool["name"] for tool in TOOLS)
 
 
 # ------------------------------------------------------------------ checking inputs
@@ -526,9 +531,11 @@ class Executor:
         raise hidden from None
 
     def refuse(self, name: object, reason: str) -> None:
-        """Trace a tool call the loop would not run: its name, redacted, and the reason.
+        """Trace a tool call the loop would not run, and the reason.
 
-        Nothing of its input is kept, and nothing happens in the browser.
+        The step names the tool only when it is one of the six. Any other name is the
+        model's own text, and could hold the password whole or in part, so it is traced as
+        `UNKNOWN_TOOL`. Nothing of the input is kept, and nothing happens in the browser.
         """
         if self._screen is None or self._shot is None:
             raise RuntimeError("call first_look before refuse")
@@ -537,7 +544,7 @@ class Executor:
         self._trace.append(
             Step(
                 number=self._steps,
-                tool=self._redact(clean_text(str(name), 40, single_line=True)),
+                tool=name if isinstance(name, str) and name in _TOOL_NAMES else UNKNOWN_TOOL,
                 input={},
                 target_role=None,
                 target_name=None,
@@ -567,7 +574,10 @@ class Executor:
             return await self._go(data)
         if name == "finish":
             _check_finish(data)
-            parse_finish(data, source="", device="", screenshots=self.screenshot_ids)
+            # Checked as the loop will read it, so that free text made only of characters
+            # that show nothing is refused here, where the model can try again.
+            visible = map_report_text(data, strip_invisible) if self._secrets else data
+            parse_finish(visible, source="", device="", screenshots=self.screenshot_ids)
             return _Action(finish=dict(data))
         raise ToolError(f"there is no tool called {quote(str(name), 40)}")
 
@@ -788,6 +798,12 @@ class Executor:
     # ------------------------------------------------------------------ secrets
 
     def _redact(self, text: str) -> str:
+        """`text` with every secret replaced, after the characters that show nothing are
+        removed, so that a password split by them is found too.
+        """
+        if not self._secrets:
+            return text
+        text = strip_invisible(text)
         for secret in self._secrets:
             text = text.replace(secret, REDACTED)
         return text

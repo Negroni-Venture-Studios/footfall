@@ -35,7 +35,6 @@ import logging
 import math
 import sys
 import time
-import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Final
@@ -56,6 +55,7 @@ from footfall.tester.report import (
     clean_text,
     map_report_text,
     parse_finish,
+    strip_invisible,
 )
 from footfall.tester.screen import CaptureError, quote
 from footfall.tester.tools import REDACTED, TOOLS, Executor, ToolOutcome
@@ -183,16 +183,6 @@ def _result(tool_id: str, outcome: ToolOutcome) -> dict[str, Any]:
     if outcome.error:
         block["is_error"] = True
     return block
-
-
-# Characters that show nothing, which a password can be split by without looking split:
-# format characters (such as U+200B and the soft hyphen), the combining grapheme joiner
-# and the variation selectors.
-def _shown(ch: str) -> bool:
-    code = ord(ch)
-    if unicodedata.category(ch) == "Cf" or code == 0x034F:
-        return False
-    return not (0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF)
 
 
 def _refused(tool_id: str, text: str) -> dict[str, Any]:
@@ -400,7 +390,7 @@ class _Run:
         text = clean_text(text, _UNCAPPED)
         if not self.executor.secrets:
             return text
-        return self._redact("".join(ch for ch in text if _shown(ch)))
+        return self._redact(strip_invisible(text))
 
     def _field(self, text: str, cap: int, *, single_line: bool = False) -> str:
         return clean_text(self._redact(text), cap, single_line=single_line)

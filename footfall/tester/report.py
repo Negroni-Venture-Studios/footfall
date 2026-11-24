@@ -121,6 +121,23 @@ def clean_text(text: str, cap: int, *, single_line: bool = False) -> str:
     return kept[: cap - 1] + ELLIPSIS
 
 
+def _shown(ch: str) -> bool:
+    code = ord(ch)
+    if unicodedata.category(ch) == "Cf" or code == 0x034F:
+        return False
+    return not (0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF)
+
+
+def strip_invisible(text: str) -> str:
+    """`text` without the characters that show nothing, which a password can be split by
+    without looking split: format characters (such as U+200B and the soft hyphen), the
+    combining grapheme joiner and the variation selectors.
+
+    It is applied before redaction, so it also removes the joiners in some emoji.
+    """
+    return "".join(ch for ch in text if _shown(ch))
+
+
 def _get(data: Mapping[str, Any], field: str, where: str) -> Any:
     if field not in data:
         raise ToolError(f"{where}missing field `{field}`")
