@@ -421,8 +421,12 @@ class Executor:
         self._trace = trace
         self._dir = screenshots
         self._touch = touch
-        # Longest first, so that a secret holding another is replaced whole.
-        self._secrets = tuple(sorted((x for x in redact if x), key=len, reverse=True))
+        # Stripped as the text they are looked for in is, so that a secret holding a
+        # character that shows nothing still matches; one made only of such characters
+        # would match nothing and goes. Longest first, so that a secret holding another is
+        # replaced whole.
+        visible = {strip_invisible(secret) for secret in redact}
+        self._secrets = tuple(sorted((x for x in visible if x), key=len, reverse=True))
         self._screen: Screen | None = None
         self._shot: str | None = None
         self._shots: list[str] = []
@@ -433,7 +437,9 @@ class Executor:
 
     @property
     def secrets(self) -> tuple[str, ...]:
-        """The strings this executor redacts, longest first, so others can redact the same."""
+        """The strings this executor redacts, without characters that show nothing and
+        longest first, so that others can redact the same.
+        """
         return self._secrets
 
     @property

@@ -979,3 +979,21 @@ async def test_a_timeout_raised_by_the_model_itself_fails_the_persona(world: Mak
     report = await run(w, Turns(TimeoutError("its own")), pricing=free)
     assert report.status == "failed"
     assert report.reason == "TimeoutError"
+
+
+async def test_a_secret_with_an_invisible_character_is_still_found(world: MakeWorld) -> None:
+    secret, plain = "Kp7\u200bq-vN3x-Rz4w", "Kp7q-vN3x-Rz4w"
+    # A secret made only of characters that show nothing would redact nothing, so it goes.
+    w = await world(redact=frozenset({secret, "\u200b\u00ad"}))
+    assert w.executor.secrets == (plain,)
+    script = [
+        [tool("type", text=secret)],
+        [tool("type", text=plain)],
+        finish(summary=f"I typed {secret} and {plain}."),
+    ]
+    report = await run(w, FakeModel(script))
+    assert report.status == "finished"
+    assert report.summary == "I typed [password] and [password]."
+    steps = w.trace.steps()
+    assert [s.input for s in steps[:2]] == [{"text": "[password]"}, {"text": "[password]"}]
+    no_run_of(plain, w.trace.path.read_text(encoding="utf-8"), str(steps), report.summary)
