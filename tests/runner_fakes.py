@@ -207,6 +207,13 @@ class FakeProxy:
             raise self.failures["revoke"]
         self.allowed.pop(ip, None)
 
+    def revoke_run(self, run_id: str) -> None:
+        self.calls.append(("revoke_run", run_id))
+        if "revoke_run" in self.failures:
+            raise self.failures["revoke_run"]
+        for ip in [ip for ip, (owner, _) in self.allowed.items() if owner == run_id]:
+            del self.allowed[ip]
+
     def reached(self, run_id: str) -> list[str]:
         return []
 

@@ -13,7 +13,8 @@ nothing writing to its source meanwhile. No container ever mounts the workspace,
 seed are removed before `prepared` is copied for each app.
 
 A container is allowed out through the egress proxy only once its address on the run's network is
-known, and its allow list is revoked when it goes. Each run has a disk budget, measured as what a
+known, and its allow list is revoked when it goes; a stop also revokes every list the run holds
+before its network goes. Each run has a disk budget, measured as what a
 copy of its folder would write: before and after every copy, after each preparation step, and
 every `disk_interval` seconds while it lives. A run that goes over it, or cannot be measured, is
 stopped, and `status` says why. Stopping fails closed: if a container or its allow list cannot be
@@ -101,12 +102,13 @@ class _OverBudget(Exception):
 class ProxyControl(Protocol):
     """What the runner needs from the egress proxy: an allow list for each container's address.
 
-    `allow` replaces any list already held for the address. Implementations raise OSError when
-    the proxy cannot be reached.
+    `allow` replaces any list already held for the address, and `revoke_run` revokes every list
+    held for a run. Implementations raise OSError when the proxy cannot be reached.
     """
 
     def allow(self, ip: str, run_id: str, hosts: Sequence[str]) -> None: ...
     def revoke(self, ip: str) -> None: ...
+    def revoke_run(self, run_id: str) -> None: ...
     def reached(self, run_id: str) -> list[str]: ...
 
 
@@ -937,10 +939,12 @@ class RunnerService:
     def _teardown_locked(self, run: _Run) -> list[str]:
         """Remove everything the run has, failing closed; return what could not be done.
 
-        Containers go first, each with its allow list. Only when all of them are gone does the
-        network go, since Docker may then give its addresses to another run's containers, and
-        an allow list left behind would follow the address. A run that could not be stopped
-        stays on record with its network and folder, for the watch to try again.
+        Containers go first, each with its allow list. Once all of them are gone, every allow
+        list the proxy still holds for the run is revoked, which reaches a stray whose address
+        could not be read. Only then does the network go, since Docker may then give its
+        addresses to another run's containers, and an allow list left behind would follow the
+        address. A run that could not be stopped stays on record with its network and folder,
+        for the watch to try again.
         """
         run.closed = True
         problems: list[str] = []
@@ -948,6 +952,9 @@ class RunnerService:
             self._remove_container_locked(run, name, problems)
         if not problems:
             self._remove_strays_locked(run, problems)
+        if not problems:
+            revoke_run = functools.partial(self._proxy.revoke_run, run.run_id)
+            self._attempt(problems, f"revoke the allow lists of run {run.run_id}", revoke_run)
         if not problems:
             network = run.network
             for container in (self._proxy_container, self._orchestrator_container):

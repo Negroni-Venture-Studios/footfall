@@ -1335,6 +1335,72 @@ def test_a_stray_whose_address_cannot_be_read_keeps_the_network(h: Harness) -> N
     assert h.engine.networks == {}
 
 
+def test_teardown_revokes_the_whole_run_before_removing_its_network(h: Harness) -> None:
+    prepare(h)
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, ["api.example.com"])
+    seen: list[tuple[bool, list[str]]] = []
+    revoke_run = h.proxy.revoke_run
+
+    def watched(run_id: str) -> None:
+        seen.append((NETWORK in h.engine.networks, list(h.engine.live)))
+        revoke_run(run_id)
+
+    h.proxy.revoke_run = watched  # type: ignore[method-assign]
+    h.service.stop(RUN)
+    # Called once, with every container gone and the network still there.
+    assert seen == [(True, [])]
+    assert ("revoke_run", RUN) in h.proxy.calls
+    assert_nothing_left(h)
+
+
+def test_failed_revoke_run_keeps_the_network_until_it_succeeds(h: Harness) -> None:
+    prepare(h)
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, ["api.example.com"])
+    h.proxy.failures["revoke_run"] = ConnectionRefusedError(61, "Connection refused")
+    with pytest.raises(RunnerError, match="allow lists of run"):
+        h.service.stop(RUN)
+    assert h.engine.live == {}
+    assert NETWORK in h.engine.networks
+    assert (h.runs / RUN).exists()
+    status = h.service.status(RUN)
+    assert status is not None and "Connection refused" in status
+
+    h.clock.advance(15)
+    h.service.check_runs()  # still failing: the network stays
+    assert NETWORK in h.engine.networks
+    del h.proxy.failures["revoke_run"]
+    h.clock.advance(30)
+    h.service.check_runs()
+    assert_nothing_left(h)
+    assert h.service.status(RUN) is None
+
+
+def test_a_stray_with_an_unreadable_address_loses_its_list_by_run(h: Harness) -> None:
+    # A container the runner has no record of, whose allow list survived a runner restart.
+    h.engine.networks[NETWORK] = {"footfall.run": RUN}
+    stray = plant_stray(h.engine, RUN, "stray")
+    h.proxy.allow(h.engine.ips[stray], RUN, ["api.example.com"])
+    h.engine.fail("address", EngineError("inspect failed"))
+    with pytest.raises(RunnerError, match="inspect failed"):
+        h.service.stop(RUN)
+    assert stray not in h.engine.live  # removed, but its address was never read
+    assert NETWORK in h.engine.networks
+    h.engine.failures.clear()
+
+    h.proxy.failures["revoke_run"] = ConnectionRefusedError(61, "Connection refused")
+    h.clock.advance(15)
+    h.service.check_runs()
+    assert NETWORK in h.engine.networks  # the list may live on, so the address must not move
+    assert ("remove_network", NETWORK) not in h.engine.calls
+
+    del h.proxy.failures["revoke_run"]
+    h.clock.advance(30)
+    h.service.check_runs()
+    assert h.proxy.allowed == {}
+    assert h.engine.networks == {}
+    assert h.service.status(RUN) == NEVER_PREPARED  # and nothing left to finish
+
+
 def test_relaunch_revokes_an_address_kept_after_a_failed_revoke(h: Harness) -> None:
     prepare(h)
     name = f"footfall-{RUN}-browsers-browsers"
