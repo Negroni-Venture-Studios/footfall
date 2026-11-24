@@ -22,7 +22,7 @@ from footfall.runner.service import DISK_REASON, RunnerError
 from tests.runner_fakes import Harness, make_harness
 
 RUN = "r_abcdefghijklmnopqrstuvwxyz"
-PASSWORD = "pw-7f3k2m9q4x8z"
+PASSWORD = "pw-7f3k2m9q4x8z"  # gitleaks:allow
 
 
 @dataclass

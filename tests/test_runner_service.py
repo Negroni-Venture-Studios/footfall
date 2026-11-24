@@ -42,7 +42,7 @@ OTHER = "r_" + "q" * 26
 NETWORK = f"footfall-{RUN}"
 INSTALL = f"footfall-{RUN}-install-prepare"
 SEED = f"footfall-{RUN}-seed-prepare"
-PASSWORD = "pw-7f3k2m9q4x8z"
+PASSWORD = "pw-7f3k2m9q4x8z"  # gitleaks:allow
 MIB = 1024 * 1024
 
 

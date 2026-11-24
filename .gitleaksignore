@@ -1,0 +1,5 @@
+# Findings checked by hand and known not to be secrets, by gitleaks fingerprint.
+# A made-up throwaway password used by the runner's redaction tests (24 November 2026).
+8546c7fb0a13a5298127ea6b5ef81e69d7095088:tests/test_runner_service.py:generic-api-key:39
+# The same made-up throwaway password, in the runner's protocol tests (24 November 2026).
+5e63a34485d1d61eb1c3ea23a0d4c6e65d4e3dea:tests/test_runner_protocol.py:generic-api-key:22
