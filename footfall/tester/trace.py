@@ -32,7 +32,16 @@ class Trace:
         self.path = path
 
     def append(self, step: Step) -> None:
-        line = json.dumps(asdict(step), ensure_ascii=False, separators=(",", ":")) + "\n"
+        fields = asdict(step)
+        for name, value in fields.items():
+            try:
+                json.dumps(value, allow_nan=False)
+            except (TypeError, ValueError) as error:
+                raise TraceError(
+                    f"step {step.number}: field `{name}` is not JSON: {error}"
+                ) from error
+        # ASCII only: a lone surrogate from the model is escaped, not a write error.
+        line = json.dumps(fields, ensure_ascii=True, separators=(",", ":")) + "\n"
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()

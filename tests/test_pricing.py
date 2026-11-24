@@ -31,3 +31,13 @@ def test_unknown_model_cannot_be_priced() -> None:
 
 def test_price_table_has_the_two_models() -> None:
     assert set(PRICES) == {"claude-sonnet-5-5", "claude-opus-5-5"}
+
+
+def test_prices_are_read_only() -> None:
+    with pytest.raises(TypeError):
+        PRICES["claude-x"] = PRICES["claude-sonnet-5-5"]  # type: ignore[index]
+
+
+def test_pricing_error_message_is_not_quoted() -> None:
+    message = str(PricingError("no price for model 'x'"))
+    assert message == "no price for model 'x'"

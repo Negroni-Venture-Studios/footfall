@@ -1,11 +1,16 @@
 """What a model call costs, so that every run can be held to a cost ceiling."""
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 
 
 class PricingError(KeyError):
     """A model has no price here, so Footfall will not run it."""
+
+    def __str__(self) -> str:
+        # KeyError would show the message in quotes.
+        return str(self.args[0]) if self.args else ""
 
 
 @dataclass(frozen=True)
@@ -27,10 +32,12 @@ class Price:
 
 
 # Prices as published on 3 November 2026.
-PRICES: Final = {
-    "claude-sonnet-5-5": Price(2.00, 10.00, 2.50, 0.10),
-    "claude-opus-5-5": Price(4.00, 20.00, 5.00, 0.20),
-}
+PRICES: Final = MappingProxyType(
+    {
+        "claude-sonnet-5-5": Price(2.00, 10.00, 2.50, 0.10),
+        "claude-opus-5-5": Price(4.00, 20.00, 5.00, 0.20),
+    }
+)
 
 
 def cost_usd(model: str, usage: Usage) -> float:

@@ -28,6 +28,8 @@ CAPS: Final = {
 }
 # A page is a path on the app; this is not in CAPS because it is a guard, not a report field.
 PAGE_CAP: Final = 300
+MAX_SCREENSHOTS: Final = 12
+_RANK: Final = {"blocker": 0, "major": 1, "minor": 2, "cosmetic": 3}
 ELLIPSIS: Final = "…"
 
 
@@ -91,9 +93,29 @@ class PersonaReport:
         }
 
 
-def _clean(text: str, cap: int) -> str:
-    """Drop control characters other than newline and tab, then cut to `cap` characters."""
-    kept = "".join(ch for ch in text if ch in "\n\t" or unicodedata.category(ch) != "Cc")
+# Format characters that can reorder or hide text. Other format characters stay: a
+# zero-width joiner, for one, is part of many emoji.
+_BIDI: Final = frozenset(
+    {0x061C, 0x200E, 0x200F} | set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A))
+)
+_TAGS: Final = range(0xE0000, 0xE0080)
+
+
+def _drop(ch: str) -> bool:
+    if ch in "\n\t":
+        return False
+    code = ord(ch)
+    return code in _BIDI or code in _TAGS or unicodedata.category(ch) in ("Cc", "Cs")
+
+
+def _clean(text: str, cap: int, *, single_line: bool = False) -> str:
+    """Strip control, surrogate, bidirectional and tag characters, then cut to `cap`.
+
+    A single-line field also has each run of whitespace made one space.
+    """
+    kept = "".join(ch for ch in text if not _drop(ch))
+    if single_line:
+        kept = " ".join(kept.split())
     if len(kept) <= cap:
         return kept
     return kept[: cap - 1] + ELLIPSIS
@@ -105,11 +127,19 @@ def _get(data: Mapping[str, Any], field: str, where: str) -> Any:
     return data[field]
 
 
-def _text(data: Mapping[str, Any], field: str, cap: int, where: str, *, required: bool) -> str:
+def _text(
+    data: Mapping[str, Any],
+    field: str,
+    cap: int,
+    where: str,
+    *,
+    required: bool,
+    single_line: bool = False,
+) -> str:
     value = _get(data, field, where)
     if not isinstance(value, str):
         raise ToolError(f"{where}`{field}` must be a string")
-    cleaned = _clean(value, cap)
+    cleaned = _clean(value, cap, single_line=single_line)
     if required and not cleaned.strip():
         raise ToolError(f"{where}`{field}` must not be empty")
     return cleaned
@@ -136,18 +166,22 @@ def _finding(
     severity = _get(item, "severity", where)
     if not isinstance(severity, str) or severity not in SEVERITIES:
         raise ToolError(f"{where}`severity` must be one of {', '.join(sorted(SEVERITIES))}")
-    steps = _strings(item, "steps", where)[: CAPS["steps"]]
+    steps = [_clean(s, CAPS["step"], single_line=True) for s in _strings(item, "steps", where)]
+    if len(steps) > CAPS["steps"]:
+        kept = CAPS["steps"] - 1
+        steps = [*steps[:kept], f"…and {len(steps) - kept} more steps"]
     shots = _strings(item, "screenshots", where)
     for shot in shots:
         if shot not in screenshots:
             raise ToolError(
                 f"{where}`screenshots` names {_clean(shot, 40)!r}, which was never taken"
             )
+    shots = list(dict.fromkeys(shots))[:MAX_SCREENSHOTS]
     return Finding(
-        title=_text(item, "title", CAPS["title"], where, required=True),
+        title=_text(item, "title", CAPS["title"], where, required=True, single_line=True),
         severity=severity,  # type: ignore[arg-type]  # checked against SEVERITIES above
-        page=_text(item, "page", PAGE_CAP, where, required=False),
-        steps=tuple(_clean(s, CAPS["step"]) for s in steps),
+        page=_text(item, "page", PAGE_CAP, where, required=False, single_line=True),
+        steps=tuple(steps),
         expected=_text(item, "expected", CAPS["expected"], where, required=False),
         actual=_text(item, "actual", CAPS["actual"], where, required=False),
         screenshots=tuple(shots),
@@ -170,8 +204,16 @@ def parse_finish(
     raw = _get(data, "findings", "")
     if not isinstance(raw, list):
         raise ToolError("`findings` must be a list")
-    findings = [
+    # Every finding is checked, including any that will be dropped.
+    found = [
         _finding(item, i, source=source, device=device, screenshots=screenshots)
-        for i, item in enumerate(raw[: CAPS["findings"]])
+        for i, item in enumerate(raw)
     ]
-    return summary, score, reached, findings
+    dropped = len(found) - CAPS["findings"]
+    if dropped > 0:
+        found = sorted(found, key=lambda f: _RANK[f.severity])[: CAPS["findings"]]
+        note = f"({dropped} further findings were dropped.)"
+        if len(summary) + 1 + len(note) > CAPS["summary"]:
+            summary = _clean(summary, CAPS["summary"] - 1 - len(note))
+        summary = f"{summary} {note}"
+    return summary, score, reached, found

@@ -131,7 +131,9 @@ def test_caps_truncate_with_ellipsis() -> None:
     assert len(got.expected) == CAPS["expected"] and got.expected.endswith("…")
     assert len(got.actual) == CAPS["actual"] and got.actual.endswith("…")
     assert len(got.steps) == CAPS["steps"]
-    assert all(len(s) == CAPS["step"] and s.endswith("…") for s in got.steps)
+    kept = got.steps[:-1]
+    assert all(len(s) == CAPS["step"] and s.endswith("…") for s in kept)
+    assert got.steps[-1] == "…and 19 more steps"
 
 
 def test_text_at_the_cap_is_untouched() -> None:
@@ -141,15 +143,131 @@ def test_text_at_the_cap_is_untouched() -> None:
     assert findings[0].title == "T" * CAPS["title"]
 
 
-def test_findings_over_the_cap_keep_the_first() -> None:
+def many(severities: list[str]) -> dict[str, Any]:
     data = good()
     data["findings"] = []
-    for i in range(CAPS["findings"] + 7):
+    for i, sev in enumerate(severities):
         item = good()["findings"][0]
         item["title"] = f"finding {i}"
+        item["severity"] = sev
         data["findings"].append(item)
+    return data
+
+
+def test_findings_over_the_cap_keep_the_most_severe_in_order() -> None:
+    sevs = ["minor"] * 10 + ["cosmetic"] * 10 + ["major"] * 5 + ["minor"] * 6 + ["blocker"]
+    assert len(sevs) == 32
+    data = many(sevs)
+    data["summary"] = "Short."
+    summary, _, _, findings = parse(data)
+    titles = [f.title for f in findings]
+    assert len(titles) == CAPS["findings"]
+    assert titles[0] == "finding 31"  # the blocker at position 32
+    assert titles[1:6] == [f"finding {i}" for i in range(20, 25)]  # the majors, in order
+    minors = list(range(10)) + list(range(25, 31))
+    assert titles[6:] == [f"finding {i}" for i in [*minors, 10, 11, 12]]
+    assert summary == "Short. (7 further findings were dropped.)"
+
+
+def test_blocker_at_position_26_survives() -> None:
+    data = many(["cosmetic"] * 25 + ["blocker"])
     _, _, _, findings = parse(data)
-    assert [f.title for f in findings] == [f"finding {i}" for i in range(CAPS["findings"])]
+    assert findings[0].title == "finding 25"
+    assert findings[0].severity == "blocker"
+    assert len(findings) == 25
+
+
+def test_dropped_note_fits_inside_the_summary_cap() -> None:
+    data = many(["minor"] * 30)
+    data["summary"] = "M" * 5000
+    summary, _, _, _ = parse(data)
+    assert len(summary) == CAPS["summary"]
+    assert summary.endswith(" (5 further findings were dropped.)")
+    assert "…" in summary
+
+
+def test_one_dropped_finding_is_still_counted() -> None:
+    data = many(["minor"] * 26)
+    assert parse(data)[0].endswith("(1 further findings were dropped.)")
+
+
+def test_every_finding_is_validated_even_if_dropped() -> None:
+    data = many(["minor"] * 30)
+    data["findings"][29]["severity"] = "dreadful"
+    with pytest.raises(ToolError, match="severity"):
+        parse(data)
+    data = many(["minor"] * 30)
+    data["findings"][28]["screenshots"] = ["s404"]
+    with pytest.raises(ToolError, match="s404"):
+        parse(data)
+
+
+def test_screenshots_are_deduplicated_and_capped() -> None:
+    shots = {f"s{i}" for i in range(30)}
+    data = good()
+    ids = ["s5", "s1", "s5", "s2", "s1"] + [f"s{i}" for i in range(10, 30)]
+    data["findings"][0]["screenshots"] = ids
+    _, _, _, findings = parse_finish(data, source="a", device="d", screenshots=shots)
+    assert findings[0].screenshots == ("s5", "s1", "s2", *tuple(f"s{i}" for i in range(10, 19)))
+    assert len(findings[0].screenshots) == 12
+
+
+def test_twelve_steps_are_kept_whole() -> None:
+    data = good()
+    data["findings"][0]["steps"] = [f"step {i}" for i in range(12)]
+    assert len(parse(data)[3][0].steps) == 12
+    assert parse(data)[3][0].steps[-1] == "step 11"
+
+
+def test_single_line_fields_collapse_whitespace_and_multiline_keep_newlines() -> None:
+    data = good()
+    f = data["findings"][0]
+    f["title"] = "  Two\n\nlines\t and   gaps\u00a0here \n"
+    f["page"] = "/a\n/b"
+    f["steps"] = ["Open\nthe\r\n cart", "ok"]
+    f["expected"] = "line one\nline two"
+    f["actual"] = "a\n\nb"
+    data["summary"] = "x\ny"
+    summary, _, _, findings = parse(data)
+    got = findings[0]
+    assert got.title == "Two lines and gaps here"
+    assert got.page == "/a /b"
+    assert got.steps == ("Open the cart", "ok")
+    assert got.expected == "line one\nline two" and got.actual == "a\n\nb"
+    assert summary == "x\ny"
+
+
+@pytest.mark.parametrize(
+    "char",
+    [
+        "\ud800",
+        "\udfff",
+        "\u202e",
+        "\u2066",
+        "\u2069",
+        "\u061c",
+        "\u200e",
+        "\u200f",
+        "\u202a",
+        "\U000e0041",
+        "\U000e0000",
+        "\U000e007f",
+    ],
+)
+def test_surrogates_bidi_and_tag_characters_are_stripped(char: str) -> None:
+    data = good()
+    data["summary"] = f"a{char}b"
+    data["findings"][0]["title"] = f"t{char}u"
+    summary, _, _, findings = parse(data)
+    assert summary == "ab" and findings[0].title == "tu"
+    summary.encode("utf-8")
+
+
+def test_zwj_emoji_survive() -> None:
+    family = "\U0001f469\u200d\U0001f469\u200d\U0001f467"
+    data = good()
+    data["summary"] = f"Saw {family} on the page"
+    assert parse(data)[0] == f"Saw {family} on the page"
 
 
 def test_control_characters_are_stripped_but_newline_and_tab_stay() -> None:

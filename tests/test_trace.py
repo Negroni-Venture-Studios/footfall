@@ -81,3 +81,24 @@ def test_blank_line_is_an_error(tmp_path: Path) -> None:
         f.write("\n")
     with pytest.raises(TraceError, match="line 2"):
         Trace(path).steps()
+
+
+def test_lone_surrogate_in_input_is_written_as_ascii_and_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "t.jsonl"
+    s = step(1, input={"text": "a\ud800b", "more": "café"})
+    Trace(path).append(s)
+    raw = path.read_bytes()
+    assert raw.isascii()
+    assert Trace(path).steps() == [s]
+
+
+def test_non_json_input_is_a_trace_error_and_writes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "t.jsonl"
+    trace = Trace(path)
+    trace.append(step(1))
+    before = path.read_bytes()
+    with pytest.raises(TraceError, match=r"step 2.*input"):
+        trace.append(step(2, input={"bad": object()}))
+    with pytest.raises(TraceError, match=r"step 3.*input"):
+        trace.append(step(3, input={"bad": float("nan")}))
+    assert path.read_bytes() == before
