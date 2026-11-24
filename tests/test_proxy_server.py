@@ -532,7 +532,10 @@ async def test_after_the_server_hello_records_pass_untouched() -> None:
     ],
     ids=["plain-http", "oversized", "unknown-type", "cut-short"],
 )
-async def test_bad_records_after_the_hello_close_the_tunnel(data: bytes) -> None:
+async def test_bad_records_after_the_hello_close_the_tunnel(
+    caplog: pytest.LogCaptureFixture, data: bytes
+) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
     async with running() as live:
         live.policy.allow(CLIENT, RUN, [ALLOWED])
         live.upstream.greeting = b""
@@ -546,6 +549,17 @@ async def test_bad_records_after_the_hello_close_the_tunnel(data: bytes) -> None
             assert await read_to_end(t.reader) == b""
         await live.upstream.wait_for(1)
         assert live.upstream.received == [first]
+    lines = [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
+    assert (
+        lines[-1]
+        .split(" ", 4)[4]
+        .startswith(
+            (
+                "refused: the client sent a record the proxy cannot read (",
+                "refused: the client stopped",
+            )
+        )
+    )
 
 
 @pytest.mark.parametrize(

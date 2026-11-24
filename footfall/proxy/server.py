@@ -362,7 +362,7 @@ async def _read_record(
             raise _TunnelRefused(f"the {side} stopped inside a TLS record") from None
         return None
     except HandshakeError as error:
-        raise _TunnelRefused(f"the {side} sent {error}") from None
+        raise _TunnelRefused(f"the {side} sent a record the proxy cannot read ({error})") from None
     activity.touch()
     return content_type, header + payload
 
