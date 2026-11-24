@@ -8,10 +8,12 @@
   const MAX_TEXT = 400; // characters of any string sent back; the caller cuts them shorter
   const TEXT_BLOCK = 120;
 
+  // A block a person can type into, whatever role it claims.
+  const EDITABLE = '[contenteditable]:not([contenteditable="false" i])';
   const INTERACTIVE = [
     "a[href]", "button", "input:not([type=hidden])", "select", "textarea",
     "[role=button]", "[role=link]", "[role=checkbox]", "[role=radio]", "[role=tab]",
-    "[role=menuitem]", "[role=switch]", "[role=option]",
+    "[role=menuitem]", "[role=switch]", "[role=option]", EDITABLE,
   ].join(",");
   const TEXT = "h1,h2,h3,h4,h5,h6,p,td,th";
   const SELECTOR = INTERACTIVE + ",[tabindex]," + TEXT + ",iframe,frame";
@@ -67,6 +69,7 @@
   };
 
   const interactiveRole = (el) => {
+    if (el.matches(EDITABLE)) return "textbox";
     const first = (el.getAttribute("role") || "").trim().toLowerCase().split(/\s+/)[0];
     if (EXPLICIT_ROLES.has(first)) return first;
     const role = implicitRole(el);
@@ -107,7 +110,7 @@
     let own = "";
     if (el.localName === "input" && BUTTON_INPUTS.has(inputType(el)) && inputType(el) !== "image") {
       own = squash(el.value, MAX_TEXT);
-    } else if (el.localName !== "input" && el.localName !== "textarea") {
+    } else if (el.localName !== "input" && el.localName !== "textarea" && !el.matches(EDITABLE)) {
       own = textOf(el) || imageAlts(el);
     }
     return (
@@ -125,6 +128,7 @@
       return squash(el.value, MAX_TEXT);
     }
     if (el.localName === "textarea") return squash(el.value, MAX_TEXT);
+    if (el.matches(EDITABLE)) return textOf(el);
     if (el.localName === "select") {
       return squash(Array.from(el.selectedOptions).map((o) => o.text).join(", "), MAX_TEXT);
     }

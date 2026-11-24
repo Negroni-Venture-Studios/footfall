@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
 
-from footfall.tester.report import PAGE_CAP, clean_text
+from footfall.tester.report import ELLIPSIS, PAGE_CAP, clean_text
 
 __all__ = [
     "MAX_ELEMENTS",
@@ -326,9 +326,23 @@ async def capture(
 
 
 def quote(text: str, cap: int = TEXT_CAP) -> str:
-    """Make page text one line, cut it to `cap`, and put it in quotes it cannot close early."""
+    """Make page text one line and put it in quotes it cannot close early.
+
+    The text between the quotes, escapes included, is at most `cap` characters; text cut to
+    fit ends with an ellipsis.
+    """
     flat = clean_text(text, cap, single_line=True)
-    return '"' + flat.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    pieces = ["\\" + ch if ch in '\\"' else ch for ch in flat]
+    if sum(len(piece) for piece in pieces) > cap:
+        kept: list[str] = []
+        size = 0
+        for piece in pieces:
+            if size + len(piece) > cap - len(ELLIPSIS):
+                break
+            kept.append(piece)
+            size += len(piece)
+        pieces = [*kept, ELLIPSIS]
+    return '"' + "".join(pieces) + '"'
 
 
 def describe(screen: Screen) -> str:

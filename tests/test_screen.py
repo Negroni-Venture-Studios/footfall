@@ -5,6 +5,7 @@ The pages are fixtures loaded with `set_content`, so nothing here touches the ne
 
 import html
 import logging
+import re
 import struct
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -22,6 +23,7 @@ from footfall.tester.screen import (
     Screen,
     capture,
     describe,
+    quote,
 )
 
 PAGES = Path(__file__).parent / "fixtures" / "pages"
@@ -240,6 +242,15 @@ async def test_form_state_and_text_blocks(make_page: MakePage) -> None:
 
 async def test_open_shadow_roots_are_described(make_page: MakePage) -> None:
     assert names(await shot(make_page, "shadow")) == ["Inside shadow"]
+
+
+async def test_editable_blocks_are_text_boxes(make_page: MakePage) -> None:
+    screen = await shot(make_page, "editable")
+    assert [(e.kind, e.role, e.name, e.value) for e in screen.elements] == [
+        ("field", "textbox", "Story", "Once upon a time"),
+        ("field", "textbox", "Note", ""),
+        ("field", "textbox", "Pay now", "Draft"),
+    ]
 
 
 async def test_embedded_frames_are_skipped_with_a_warning(make_page: MakePage) -> None:
@@ -482,6 +493,16 @@ def test_describe_layout() -> None:
         "… and 3 more not listed",
         "accessibility check (confirm on the screenshot): 1 control has no name: [4]",
     ]
+
+
+@pytest.mark.parametrize("text", ['"' * 300, "\\" * 300, 'a"' * 150, "ab" * 150])
+def test_quote_keeps_its_closing_quote_within_the_cap(text: str) -> None:
+    quoted = quote(text, 200)
+    body = quoted[1:-1]
+    assert quoted[0] == quoted[-1] == '"'
+    assert len(body) <= 200
+    assert body.endswith("…")
+    assert re.fullmatch(r'(\\["\\]|[^"\\])*…', body)
 
 
 def test_describe_escapes_quotes_and_backslashes_and_flattens_lines() -> None:
