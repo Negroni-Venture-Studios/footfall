@@ -1,6 +1,8 @@
 """The tester's six tools: their definitions, and the executor, against a real local Chromium."""
 
 import asyncio
+import json
+import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -9,6 +11,7 @@ from typing import Any
 
 import pytest
 from playwright.async_api import Browser, BrowserContext, Page
+from playwright.async_api import Error as PlaywrightError
 
 from footfall.manifest import Brief
 from footfall.personas import DEVICES, PERSONAS, load_devices, load_personas
@@ -16,7 +19,7 @@ from footfall.tester import tools
 from footfall.tester.guard import Guard
 from footfall.tester.prompt import system_prompt
 from footfall.tester.report import ToolError, parse_finish
-from footfall.tester.screen import CaptureError, Screen, describe
+from footfall.tester.screen import CaptureError, Screen, capture, describe
 from footfall.tester.tools import (
     EVENTS_HEADING,
     MAX_PATH_LENGTH,
@@ -27,7 +30,7 @@ from footfall.tester.tools import (
     screenshot_id,
     validate_path,
 )
-from footfall.tester.trace import Step, Trace
+from footfall.tester.trace import Step, Trace, TraceError
 from tests.app_server import AppServer
 
 ORIGIN = "http://127.0.0.1:8000"
@@ -69,7 +72,9 @@ async def session(
     app_server.page("/second", "<title>Second</title><h1>Second page</h1>")
     contexts: list[BrowserContext] = []
 
-    async def make(path: str = "/buttons", **options: Any) -> Session:
+    async def make(
+        path: str = "/buttons", *, redact: frozenset[str] = frozenset(), **options: Any
+    ) -> Session:
         options.setdefault("viewport", PHONE)
         context = await loopback_browser.new_context(service_workers="block", **options)
         contexts.append(context)
@@ -79,7 +84,9 @@ async def session(
         await page.goto(app_server.origin + path)
         trace = Trace(tmp_path / f"trace-{len(contexts)}.jsonl")
         shots = tmp_path / f"shots-{len(contexts)}"
-        executor = Executor(page, guard, trace, shots)
+        executor = Executor(
+            page, guard, trace, shots, touch=options.get("has_touch", False), redact=redact
+        )
         first = await executor.first_look()
         return Session(executor, page, guard, trace, shots, first)
 
@@ -322,7 +329,7 @@ async def test_run_before_the_first_look_is_refused(
     try:
         page = await context.new_page()
         guard = Guard(app_server.origin, frozenset())
-        executor = Executor(page, guard, Trace(tmp_path / "t.jsonl"), tmp_path / "s")
+        executor = Executor(page, guard, Trace(tmp_path / "t.jsonl"), tmp_path / "s", touch=False)
         with pytest.raises(RuntimeError, match="first_look"):
             await executor.run("look", {})
     finally:
@@ -495,12 +502,7 @@ async def test_type_into_a_text_area_and_an_editable_block(
     await tap_name(s, s.first, "Notes")
     assert (await s.executor.run("type", {"text": "line one\nline two"})).error is False
     assert await s.page.eval_on_selector("textarea", "e => e.value") == "line one\nline two"
-    # The snapshot does not list an editable block, so a person would tap where it is.
-    box = await s.page.eval_on_selector(
-        "[contenteditable]", "e => { const r = e.getBoundingClientRect(); return [r.x, r.y]; }"
-    )
-    point = {"element": None, "x": int(box[0]) + 20, "y": int(box[1]) + 20}
-    assert (await s.executor.run("tap", point)).error is False
+    await tap_name(s, s.first, "Story")
     assert (await s.executor.run("type", {"text": "Once"})).error is False
     assert await s.page.eval_on_selector("[contenteditable]", "e => e.textContent") == "Once"
 
@@ -719,7 +721,7 @@ async def test_screenshots_are_never_overwritten(
         shots = tmp_path / "shots"
         shots.mkdir()
         (shots / "01.jpg").write_bytes(b"earlier")
-        executor = Executor(page, guard, Trace(tmp_path / "t.jsonl"), shots)
+        executor = Executor(page, guard, Trace(tmp_path / "t.jsonl"), shots, touch=False)
         with pytest.raises(FileExistsError):
             await executor.first_look()
         assert (shots / "01.jpg").read_bytes() == b"earlier"
@@ -741,6 +743,8 @@ async def test_a_hung_page_raises_capture_error(
         await tap_name(s, s.first, "Freeze")
     (step,) = s.trace.steps()
     assert step.error is not None and "did not answer" in step.error
+    assert (step.target_role, step.target_name) == ("button", "Freeze")
+    assert (step.x, step.y) == (108, 38)  # the centre, inside the body's 8px margin
 
 
 # ------------------------------------------------------------------ finish and mistakes
@@ -764,6 +768,11 @@ async def test_finish_returns_the_report(session: MakeSession) -> None:
         (
             {"findings": [{**FINISH_EXAMPLE["findings"][0], "screenshots": ["77"]}]},
             "never taken",
+        ),
+        ({"mood": "cheerful"}, "unexpected field `mood`"),
+        (
+            {"findings": [{**FINISH_EXAMPLE["findings"][0], "colour": "red"}]},
+            "finding 1: unexpected field `colour`",
         ),
     ],
 )
@@ -797,3 +806,249 @@ async def test_tool_mistakes_are_errors(
     assert message in outcome.text
     (step,) = s.trace.steps()
     assert step.error == outcome.text
+
+
+def test_touch_must_be_given() -> None:
+    with pytest.raises(TypeError, match="touch"):
+        Executor(None, None, None, None)  # type: ignore[arg-type,call-arg]
+
+
+# ------------------------------------------------------------------ hard pages, failures, secrets
+
+
+async def test_go_leaves_a_page_that_asks_before_leaving(
+    session: MakeSession, app_server: AppServer
+) -> None:
+    app_server.page(
+        "/draft",
+        '<input id="f" aria-label="Notes" style="width:300px;height:50px">'
+        '<a href="/second" style="font-size:30px">Elsewhere</a>'
+        "<script>addEventListener('beforeunload', (e) => {"
+        " if (document.getElementById('f').value) { e.preventDefault(); e.returnValue = ''; }"
+        "});</script>",
+    )
+    s = await session("/draft")
+    await tap_name(s, s.first, "Notes")
+    await s.executor.run("type", {"text": "unsaved"})
+    went = await s.executor.run("go", {"to": "/second"})
+    assert went.screen is not None and went.screen.path == "/second"
+    assert "- the page asked before leaving" in went.text.splitlines()
+    back = await s.executor.run("go", {"to": "back"})
+    assert back.screen is not None and back.screen.path == "/draft"
+    await tap_name(s, back, "Notes")
+    await s.executor.run("type", {"text": "again"})
+    tapped = await tap_name(s, back, "Elsewhere")
+    assert tapped.screen is not None and tapped.screen.path == "/second"
+
+
+def flaky_capture(fails: int, cause: Exception | None) -> tuple[Any, list[int]]:
+    calls = [0]
+    real = capture
+
+    async def stub(page: Page, **options: Any) -> Screen:
+        calls[0] += 1
+        if calls[0] <= fails:
+            error = CaptureError("the page could not be read")
+            error.__cause__ = cause
+            raise error
+        return await real(page, **options)
+
+    return stub, calls
+
+
+async def test_a_navigation_during_capture_is_captured_again(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+    destroyed = PlaywrightError("Execution context was destroyed, most likely a navigation")
+    stub, calls = flaky_capture(1, destroyed)
+    monkeypatch.setattr(tools, "capture", stub)
+    outcome = await s.executor.run("look", {})
+    assert outcome.error is False
+    assert outcome.screen is not None and outcome.screen.path == "/buttons"
+    assert calls[0] == 2
+    (step,) = s.trace.steps()
+    assert (step.error, step.screenshot_after) == (None, "02")
+
+
+async def test_a_second_capture_failure_ends_the_persona(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+    destroyed = PlaywrightError("Execution context was destroyed, most likely a navigation")
+    stub, calls = flaky_capture(2, destroyed)
+    monkeypatch.setattr(tools, "capture", stub)
+    with pytest.raises(CaptureError):
+        await s.executor.run("look", {})
+    assert calls[0] == 2
+
+
+async def test_a_page_that_answers_nonsense_is_not_captured_twice(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+    stub, calls = flaky_capture(1, None)
+    monkeypatch.setattr(tools, "capture", stub)
+    with pytest.raises(CaptureError):
+        await s.executor.run("look", {})
+    assert calls[0] == 1
+
+
+async def test_slow_typing_is_not_a_hung_page(
+    session: MakeSession, app_server: AppServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_server.page(
+        "/slow",
+        '<input aria-label="Name" style="width:300px;height:50px">'
+        "<script>document.querySelector('input').addEventListener('input', () => {"
+        " const t = performance.now(); while (performance.now() - t < 8) {} });</script>",
+    )
+    s = await session("/slow")
+    await tap_name(s, s.first, "Name")
+    monkeypatch.setattr(tools, "ACTION_TIMEOUT", 1.0)
+    text = "slow " * 50
+    outcome = await s.executor.run("type", {"text": text})
+    assert outcome.error is False
+    assert await s.page.eval_on_selector("input", "e => e.value") == text
+
+
+async def test_any_failure_still_leaves_a_step(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+
+    def full(self: Executor, jpeg: bytes) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Executor, "_save", full)
+    with pytest.raises(OSError, match="disk full"):
+        await s.executor.run("look", {})
+    (step,) = s.trace.steps()
+    assert step.error == "OSError: disk full"
+
+
+async def test_a_cancelled_action_still_leaves_a_step(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+
+    async def cancelled(page: Page, **options: Any) -> Screen:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tools, "capture", cancelled)
+    beta = number_of(s.first.screen, "Beta")
+    with pytest.raises(asyncio.CancelledError):
+        await s.executor.run("tap", {"element": beta, "x": None, "y": None})
+    (step,) = s.trace.steps()
+    assert step.error == "CancelledError"
+    assert step.target_name == "Beta"
+
+
+async def test_a_trace_that_cannot_be_written_is_not_written_twice(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+    attempts: list[Step] = []
+
+    def refuse(step: Step) -> None:
+        attempts.append(step)
+        raise TraceError("the disk said no")
+
+    monkeypatch.setattr(s.trace, "append", refuse)
+    with pytest.raises(TraceError):
+        await s.executor.run("look", {})
+    assert len(attempts) == 1
+
+
+async def test_a_tapped_javascript_link_cannot_leave(
+    session: MakeSession, app_server: AppServer, other_server: AppServer
+) -> None:
+    app_server.page(
+        "/js-link",
+        '<a href="javascript:location.href=\'http://evil.test/js\'" style="font-size:30px">Go</a>',
+    )
+    s = await session("/js-link")
+    outcome = await tap_name(s, s.first, "Go")
+    assert other_server.hits == []
+    assert outcome.screen is not None and outcome.screen.path == "/js-link"
+    assert '- stopped the page going to "evil.test"' in outcome.text.splitlines()
+
+
+async def test_a_blob_page_is_left_for_the_app(session: MakeSession, app_server: AppServer) -> None:
+    app_server.page(
+        "/blobby",
+        "<button style='width:200px;height:60px' "
+        'onclick="location.href = window.URL.createObjectURL('
+        "new Blob(['<h1>Made here</h1>'], {type: 'text/html'}))\">Open</button>",
+    )
+    s = await session("/blobby")
+    outcome = await tap_name(s, s.first, "Open")
+    assert outcome.screen is not None and outcome.screen.path == "/blobby"
+    assert "The browser left the app, so Footfall brought it back to /blobby." in outcome.text
+    assert s.page.url == app_server.origin + "/blobby"
+
+
+async def test_a_link_to_a_new_window_names_its_path(
+    session: MakeSession, app_server: AppServer
+) -> None:
+    app_server.page(
+        "/blank", '<a href="/second?from=blank" target="_blank" style="font-size:30px">Open</a>'
+    )
+    s = await session("/blank")
+    outcome = await tap_name(s, s.first, "Open")
+    assert '- closed a new window for "/second?from=blank"' in outcome.text.splitlines()
+
+
+async def test_an_event_full_of_backslashes_keeps_its_closing_quote(
+    session: MakeSession, app_server: AppServer
+) -> None:
+    app_server.page(
+        "/slashes",
+        "<button style='width:200px;height:60px' onclick=\"alert('\\\\'.repeat(300))\">"
+        "Shout</button>",
+    )
+    s = await session("/slashes")
+    outcome = await tap_name(s, s.first, "Shout")
+    line = outcome.text.splitlines()[1]
+    assert line.startswith('- dismissed an alert: "\\\\')
+    assert line.endswith('…"')
+
+
+SECRET = "s3cret-Pa55"
+
+
+async def test_a_typed_password_never_reaches_the_trace_or_the_logs(
+    session: MakeSession,
+    app_server: AppServer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    app_server.page(
+        "/signin",
+        '<input type="password" aria-label="Password" style="width:300px;height:40px">'
+        '<input aria-label="Echo" style="width:300px;height:40px" '
+        "onkeyup=\"if (this.value.length === 11) alert('You typed ' + this.value)\">"
+        f'<button style="width:300px;height:50px">Hello {SECRET}</button>',
+    )
+    app_server.redirect(f"/{SECRET}", "https://accounts.invalid/")
+    s = await session("/signin", redact=frozenset({SECRET}))
+    await tap_name(s, s.first, "Password")
+    typed = await s.executor.run("type", {"text": SECRET})
+    assert typed.error is False
+    await tap_name(s, s.first, "Echo")
+    echoed = await s.executor.run("type", {"text": SECRET})
+    assert f"You typed {SECRET}" in echoed.text  # the model typed it, so it may see it
+    await tap_name(s, s.first, f"Hello {SECRET}")
+    await s.executor.run("go", {"to": f"/{SECRET}"})
+    report = {**FINISH_EXAMPLE, "summary": f"I signed in with {SECRET}."}
+    finished = await s.executor.run("finish", report)
+    assert finished.finish is not None
+    assert SECRET not in json.dumps(finished.finish)
+    raw = s.trace.path.read_text(encoding="utf-8")
+    assert SECRET not in raw
+    assert "[password]" in raw
+    assert SECRET not in caplog.text
+    steps = s.trace.steps()
+    assert steps[1].input == {"text": "[password]"}
+    assert any("You typed [password]" in event for step in steps for event in step.events)
