@@ -1013,7 +1013,10 @@ async def test_refusals_are_logged_once_without_request_text(
         await read_to_end(t.reader)
     lines = [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
     assert len(lines) == 3
-    assert "evil.example.com" in lines[0] and "refused" in lines[0] and RUN in lines[0]
+    fields = dict(part.split("=", 1) for part in lines[0].split() if "=" in part)
+    assert fields["host"] == "evil.example.com"
+    assert fields["run"] == RUN
+    assert "refused" in lines[0]
     assert "refused" in lines[1]
     assert "\x01" not in caplog.text
     assert "refused" in lines[2] and "server name" in lines[2]
