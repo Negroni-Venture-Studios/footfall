@@ -52,6 +52,7 @@ class Upstream:
     response: bytes = RESPONSE
     greeting: bytes = SERVER_HELLO
     echo: bool = True
+    half_close: bool = False  # after the greeting, as a server with nothing more to say
     received: list[bytes] = field(default_factory=list)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -65,6 +66,8 @@ class Upstream:
                 data += await reader.readexactly(int.from_bytes(header[2:4], "big"))
                 writer.write(self.greeting)
                 await writer.drain()
+                if self.half_close:
+                    writer.write_eof()
                 while chunk := await reader.read(65536):
                     data += chunk
                     if self.echo:
@@ -562,6 +565,74 @@ async def test_bad_records_after_the_hello_close_the_tunnel(
     )
 
 
+async def test_a_client_half_close_still_gets_the_reply(live: Live) -> None:
+    data = application_data(b"request")
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        t.writer.write(real_client_hello(ALLOWED))
+        await t.writer.drain()
+        async with asyncio.timeout(TIMEOUT):
+            await t.reader.readexactly(len(SERVER_HELLO))
+        t.writer.write(data)
+        await t.writer.drain()
+        t.writer.write_eof()  # the client is done sending, not done reading
+        assert await read_to_end(t.reader) == data
+
+
+async def test_a_server_half_close_still_takes_the_request() -> None:
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.echo = False
+        live.upstream.half_close = True
+        first, data = real_client_hello(ALLOWED), application_data(b"late request")
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(first)
+            await t.writer.drain()
+            assert await read_to_end(t.reader) == SERVER_HELLO  # then the server's half-close
+            t.writer.write(data)
+            await t.writer.drain()
+            t.writer.write_eof()
+            await live.upstream.wait_for(1)
+        assert live.upstream.received == [first + data]
+
+
+async def test_a_record_cut_after_its_header_is_not_a_clean_end(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.greeting = b""
+        live.upstream.echo = False
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(real_client_hello(ALLOWED) + b"\x17\x03\x03\x00\x05")
+            await t.writer.drain()
+            t.writer.write_eof()
+            assert await read_to_end(t.reader) == b""
+    lines = [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
+    assert lines[-1].endswith("refused: the client stopped inside a TLS record")
+
+
+async def test_an_unexpected_failure_in_a_tunnel_is_logged(
+    live: Live, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: Any, payload: bytes) -> None:
+        raise RuntimeError("a bug in the proxy")
+
+    monkeypatch.setattr("footfall.proxy.server.ServerHellos.feed", broken)
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+    first = real_client_hello(ALLOWED)
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        t.writer.write(first)
+        await t.writer.drain()
+        assert await read_to_end(t.reader) == b""
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "unexpectedly" in errors[0].getMessage()
+    assert errors[0].exc_info is not None
+    assert isinstance(errors[0].exc_info[1], RuntimeError)
+    assert first.hex() not in caplog.text and repr(first) not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("greeting", "relayed"),
     [
@@ -630,6 +701,8 @@ async def test_http_absolute_form_forwarded(live: Live, caplog: pytest.LogCaptur
         (f"http://{ALLOWED}", b"/"),
         (f"HTTP://{ALLOWED.upper()}:80/a", b"/a"),
         (f"http://{ALLOWED}?x=1", b"/?x=1"),
+        (f"http://{ALLOWED}//evil.example.com/x", b"/evil.example.com/x"),
+        (f"http://{ALLOWED}///x?y=//z", b"/x?y=//z"),
     ],
 )
 async def test_http_targets_become_origin_form(live: Live, target: str, origin: bytes) -> None:
@@ -677,6 +750,31 @@ async def test_underscores_in_header_names_count_as_hyphens(live: Live) -> None:
     assert live.upstream.received == [
         b"POST /form HTTP/1.1\r\nHost: api.example.com\r\nX_Custom: kept\r\n"
         b"Content-Length: 5\r\nConnection: close\r\n\r\nhello"
+    ]
+
+
+@pytest.mark.parametrize(
+    "request_bytes",
+    [
+        get(f"http://{ALLOWED}/", "Content-Length: 5", body=b"hello"),
+        get(f"http://{ALLOWED}/", "Content-Length: 1", method="HEAD", body=b"x"),
+        get(f"http://{ALLOWED}/", "Transfer-Encoding: chunked", body=b"0\r\n\r\n"),
+        get(f"http://{ALLOWED}/", "Transfer-Encoding: chunked", method="HEAD"),
+    ],
+    ids=["get-length", "head-length", "get-chunked", "head-chunked"],
+)
+async def test_get_or_head_with_a_body_refused(live: Live, request_bytes: bytes) -> None:
+    reply = await exchange(live.port, request_bytes)
+    assert status(reply) == 400
+    assert b"must not carry a body" in reply
+    assert live.connects == []
+
+
+async def test_get_with_an_empty_body_is_forwarded(live: Live) -> None:
+    assert await exchange(live.port, get(f"http://{ALLOWED}/", "Content-Length: 0")) == RESPONSE
+    await live.upstream.wait_for(1)
+    assert live.upstream.received == [
+        b"GET / HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     ]
 
 
@@ -841,6 +939,12 @@ async def test_upstream_that_cannot_be_reached_is_502() -> None:
         live.policy.allow(CLIENT, RUN, [ALLOWED])
         reply = await exchange(live.port, get(f"http://{ALLOWED}/"))
         assert status(reply) == 502
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(real_client_hello(ALLOWED))
+            await t.writer.drain()
+            assert await read_to_end(t.reader) == b""
+        # Nothing was reached, so the run's page lists nothing.
+        assert live.policy.reached(RUN) == []
 
 
 # ---------------------------------------------------------------- unknown clients (R17)

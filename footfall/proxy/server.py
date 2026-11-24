@@ -70,6 +70,7 @@ _LINGER: Final = 1.0
 _LINGER_BYTES: Final = 64 * 1024
 _METHODS: Final = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT"})
 _VERSIONS: Final = frozenset({"HTTP/1.0", "HTTP/1.1"})
+_BODILESS: Final = frozenset({"GET", "HEAD"})
 _TOKEN: Final = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _TARGET: Final = re.compile(r"[\x21-\x7e]+")
 _HOST_CHARACTERS: Final = re.compile(r"[A-Za-z0-9.-]+")
@@ -156,10 +157,16 @@ def _canonical(name: str) -> str:
     return name.lower().replace("_", "-")
 
 
-def _content_length(headers: Iterable[tuple[str, str]]) -> int | None:
-    """The request's Content-Length, refusing any framing that could be read two ways."""
+def _content_length(method: str, headers: Iterable[tuple[str, str]]) -> int | None:
+    """The request's Content-Length, refusing any framing that could be read two ways.
+
+    A GET or HEAD with a body is refused too: a server that ignores such a body would read it
+    as the next request (a CL.0 desync).
+    """
     names = [_canonical(name) for name, _ in headers]
     lengths = [value for name, value in headers if _canonical(name) == "content-length"]
+    if method in _BODILESS and ("transfer-encoding" in names or any(v != "0" for v in lengths)):
+        raise _Refusal(400, f"a {method} request must not carry a body")
     if "transfer-encoding" in names:
         if lengths:
             raise _Refusal(
@@ -203,8 +210,9 @@ def _absolute(target: str) -> tuple[str, int, str]:
     host, colon, port = authority.partition(":")
     number = _port(port) if colon else _HTTP_PORT
     name = _host(host)
-    if not origin.startswith("/"):
-        origin = "/" + origin
+    # One leading slash: `//host/path` would read as another host to code that resolves the
+    # path against a base address.
+    origin = "/" + origin.lstrip("/")
     return name, number, origin
 
 
@@ -224,7 +232,7 @@ def _parse(head: bytes) -> _Request:
     if version not in _VERSIONS:
         raise _Refusal(400, "only HTTP/1.0 and HTTP/1.1 are spoken")
     headers = _headers(lines[1:])
-    length = _content_length(headers)
+    length = _content_length(method, headers)
     if method == "CONNECT":
         if length is not None:
             raise _Refusal(400, "CONNECT must not carry a body")
@@ -304,12 +312,17 @@ async def _pump(
     activity: _Activity,
     limit: int | None = None,
 ) -> None:
-    """Copy bytes until the source ends, or until `limit` bytes if one is given."""
+    """Copy bytes until the source ends, or until `limit` bytes if one is given.
+
+    When the source ends, the sink is half-closed, so the other side learns that nothing more
+    is coming and can still answer.
+    """
     remaining = limit
     while remaining is None or remaining > 0:
         size = _CHUNK if remaining is None else min(remaining, _CHUNK)
         data = await activity.within(functools.partial(source.read, size))
         if not data:
+            _pass_end(sink)
             return
         activity.touch()
         if remaining is not None:
@@ -319,16 +332,41 @@ async def _pump(
         activity.touch()
 
 
-async def _finish(tasks: Iterable[asyncio.Task[None]]) -> None:
-    """Cancel tasks and collect their outcomes, so that none is left unretrieved."""
-    tasks = list(tasks)
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+def _pass_end(sink: asyncio.StreamWriter) -> None:
+    """Half-close `sink`, as its source did."""
+    if sink.can_write_eof() and not sink.is_closing():
+        sink.write_eof()
 
 
 class _TunnelRefused(Exception):
     """A tunnel closed for something it carried; the message is the reason to log."""
+
+
+# How a relay is expected to end, besides finishing: cancelled, a peer gone or quiet, or a
+# refusal that the tunnel logs itself.
+_EXPECTED_ENDS: Final = (
+    asyncio.CancelledError,
+    OSError,
+    TimeoutError,
+    asyncio.IncompleteReadError,
+    _TunnelRefused,
+)
+
+
+async def _finish(client: str, tasks: Iterable[asyncio.Task[None]]) -> list[object]:
+    """Cancel tasks and collect their outcomes, so that none is left unretrieved.
+
+    An outcome nobody expected is a bug in the proxy, so it is logged with its traceback, as
+    on the path that serves requests; the bytes relayed never are.
+    """
+    tasks = list(tasks)
+    for task in tasks:
+        task.cancel()
+    outcomes: list[object] = await asyncio.gather(*tasks, return_exceptions=True)
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(outcome, _EXPECTED_ENDS):
+            logger.error("the proxy failed unexpectedly relaying for %s", client, exc_info=outcome)
+    return outcomes
 
 
 def _hello_refusal(record: bytes, host: str) -> str | None:
@@ -353,16 +391,21 @@ async def _read_record(
 
     Raises _TunnelRefused for anything that is not a record the proxy can read.
     """
+    stopped = f"the {side} stopped inside a TLS record"
     try:
         header = await activity.within(functools.partial(reader.readexactly, RECORD_HEADER))
-        content_type, length = record_header(header)
-        payload = await activity.within(functools.partial(reader.readexactly, length))
     except asyncio.IncompleteReadError as error:
-        if error.partial or error.expected != RECORD_HEADER:
-            raise _TunnelRefused(f"the {side} stopped inside a TLS record") from None
-        return None
+        if error.partial:
+            raise _TunnelRefused(stopped) from None
+        return None  # the end, between records
+    try:
+        content_type, length = record_header(header)
     except HandshakeError as error:
         raise _TunnelRefused(f"the {side} sent a record the proxy cannot read ({error})") from None
+    try:
+        payload = await activity.within(functools.partial(reader.readexactly, length))
+    except asyncio.IncompleteReadError:
+        raise _TunnelRefused(stopped) from None
     activity.touch()
     return content_type, header + payload
 
@@ -379,6 +422,7 @@ async def _check_client(
     while not hellos.settled:
         read = await _read_record(reader, activity, "client")
         if read is None:
+            _pass_end(sink)
             return
         content_type, record = read
         if content_type == HANDSHAKE and not hellos.settled:
@@ -403,6 +447,7 @@ async def _follow_server(
     while not hellos.settled:
         read = await _read_record(reader, activity, "server")
         if read is None:
+            _pass_end(sink)
             return
         content_type, record = read
         if content_type == HANDSHAKE:
@@ -570,8 +615,7 @@ class ProxyServer:
             await self._tunnel(client, run_id, request, address, reader, writer)
         else:
             _log(client, run_id, host, port, "allowed")
-            self._policy.record(run_id, request.host)
-            await self._forward(client, request, address, reader, writer)
+            await self._forward(client, run_id, request, address, reader, writer)
 
     async def _decide(self, client: str, host: str, port: int) -> Decision:
         """The policy's decision, waiting a little for the allow of a client not yet known."""
@@ -608,6 +652,7 @@ class ProxyServer:
     async def _forward(
         self,
         client: str,
+        run_id: str,
         request: _Request,
         address: str,
         reader: asyncio.StreamReader,
@@ -619,6 +664,7 @@ class ProxyServer:
             async with asyncio.timeout(self._idle):
                 await writer.drain()
             return
+        self._policy.record(run_id, request.host)
         upstream_reader, upstream_writer = upstream
         try:
             activity = _Activity(self._idle)
@@ -633,7 +679,7 @@ class ProxyServer:
             try:
                 await _pump(upstream_reader, writer, activity)
             finally:
-                await _finish([upload])
+                await _finish(client, [upload])
         finally:
             upstream_writer.close()
 
@@ -664,10 +710,10 @@ class ProxyServer:
             _log(client, run_id, request.host, request.port, f"refused: {refusal}")
             return
         _log(client, run_id, request.host, request.port, "allowed")
-        self._policy.record(run_id, request.host)
         upstream = await self._connect(client, request.host, address, request.port)
         if upstream is None:
             return
+        self._policy.record(run_id, request.host)
         upstream_reader, upstream_writer = upstream
         try:
             activity = _Activity(self._idle)
@@ -680,13 +726,15 @@ class ProxyServer:
                 ),
                 asyncio.create_task(_follow_server(upstream_reader, writer, hellos, activity)),
             ]
+            # A side that ends cleanly has half-closed the other, which may still answer, so the
+            # tunnel lasts until both have ended. A refusal, a failure or the idle timeout ends
+            # both at once.
             try:
-                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    outcome = None if task.cancelled() else task.exception()
-                    if isinstance(outcome, _TunnelRefused):
-                        _log(client, run_id, request.host, request.port, f"refused: {outcome}")
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
             finally:
-                await _finish(tasks)
+                outcomes = await _finish(client, tasks)
+            for outcome in outcomes:
+                if isinstance(outcome, _TunnelRefused):
+                    _log(client, run_id, request.host, request.port, f"refused: {outcome}")
         finally:
             upstream_writer.close()
