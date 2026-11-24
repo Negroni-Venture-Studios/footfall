@@ -78,10 +78,18 @@ _TRANSLATED = tuple(
     ipaddress.ip_network(network)
     for network in ("64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32")
 )
+_GLOBAL_UNICAST = ipaddress.ip_network("2000::/3")
 
 
 def is_public_address(address: str) -> bool:
-    """Whether an IP address is on the public internet. Unparseable text is not."""
+    """Whether an IP address is on the public internet. Unparseable text is not.
+
+    It fails closed. An IPv6 address must lie in global unicast 2000::/3, be global, and
+    be outside the translated ranges; that refuses the IPv4-compatible and IPv4-translated
+    ranges, site-local and multicast addresses, which `is_global` does not catch. An
+    IPv4-mapped address is judged by the IPv4 address inside it. An IPv4 address must be
+    global and neither multicast nor reserved.
+    """
     try:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
@@ -89,9 +97,12 @@ def is_public_address(address: str) -> bool:
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.ipv4_mapped is not None:
             return is_public_address(str(ip.ipv4_mapped))
-        if any(ip in network for network in _TRANSLATED):
-            return False
-    return ip.is_global
+        return (
+            ip in _GLOBAL_UNICAST
+            and ip.is_global
+            and not any(ip in network for network in _TRANSLATED)
+        )
+    return ip.is_global and not ip.is_multicast and not ip.is_reserved
 
 
 async def system_resolver(host: str, port: int) -> list[str]:

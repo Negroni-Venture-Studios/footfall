@@ -62,6 +62,18 @@ def test_invalid_names(name: str) -> None:
         ("::ffff:10.0.0.1", False),
         ("::ffff:93.184.215.14", True),
         ("2606:4700::1111", True),
+        ("::10.0.0.1", False),
+        ("::127.0.0.1", False),
+        ("::a9fe:a9fe", False),
+        ("::ffff:0:10.0.0.1", False),
+        ("fec0::1", False),
+        ("224.0.0.1", False),
+        ("239.1.1.1", False),
+        ("240.0.0.1", False),
+        ("255.255.255.255", False),
+        ("ff02::1", False),
+        ("ff0e::1", False),
+        ("4000::1", False),
     ],
 )
 def test_public_addresses(address: str, public: bool) -> None:
