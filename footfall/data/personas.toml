@@ -1,0 +1,161 @@
+# The starting personas: a person, a device (named in devices.toml) and how they browse.
+# Profiles and goals are adapted for the web from mobile-agent-testers' personas.json
+# (MIT): https://github.com/pierridotite/mobile-agent-testers
+# `geolocation` is [latitude, longitude]; `allow_location = false` means the persona
+# refuses the location prompt. `text_scale` scales the root font size (0.5 to 3.0).
+
+[[persona]]
+id = "sven"
+profile = "Retired engineer, 80, reads Swedish, needs the largest text on a small phone."
+goal = "Complete one task: every button must stay readable and reachable."
+device = "iPhone SE"
+locale = "sv-SE"
+timezone = "Europe/Stockholm"
+color_scheme = "dark"
+reduced_motion = false
+text_scale = 2.0
+geolocation = [59.3293, 18.0686]
+allow_location = true
+
+[[persona]]
+id = "grace"
+profile = "Retired nurse, 74, low vision, keeps the text at its largest and dislikes zooming."
+goal = "Read every screen and complete one task without zooming."
+device = "Pixel 7"
+locale = "en-US"
+timezone = "America/Chicago"
+color_scheme = "light"
+reduced_motion = false
+text_scale = 2.0
+geolocation = [41.8781, -87.6298]
+allow_location = true
+
+[[persona]]
+id = "jonas"
+profile = "Engineer, 45, uses a tablet with large text and tries to break whatever he meets."
+goal = "Complete the main task, then try to break it with odd inputs."
+device = "iPad"
+locale = "de-DE"
+timezone = "Europe/Berlin"
+color_scheme = "dark"
+reduced_motion = false
+text_scale = 1.0
+geolocation = [52.52, 13.405]
+allow_location = true
+
+[[persona]]
+id = "layla"
+profile = "Pharmacist, 39, reads Arabic, expects every page to flow right to left."
+goal = "Do the main task end to end and check that text, icons and arrows are mirrored."
+device = "Pixel 7"
+locale = "ar-EG"
+timezone = "Africa/Cairo"
+color_scheme = "light"
+reduced_motion = false
+text_scale = 1.15
+geolocation = [30.0444, 31.2357]
+allow_location = true
+
+[[persona]]
+id = "noah"
+profile = "Sales rep, 41, always between meetings, impatient, reads only headings and buttons."
+goal = "Do the main task quickly, in as few steps as possible."
+device = "Laptop (Safari)"
+locale = "en-GB"
+timezone = "Europe/London"
+color_scheme = "light"
+reduced_motion = false
+text_scale = 1.0
+geolocation = [51.5072, -0.1276]
+allow_location = true
+
+[[persona]]
+id = "anna"
+profile = "Retired teacher, 68, low patience with jargon, uses large text."
+goal = "Create an account and set up her first item without help."
+device = "iPhone SE"
+locale = "en-GB"
+timezone = "Europe/London"
+color_scheme = "light"
+reduced_motion = false
+text_scale = 1.3
+geolocation = [53.4808, -2.2426]
+allow_location = true
+
+[[persona]]
+id = "kenji"
+profile = "Office worker, 29, reads Japanese, uses the site one-handed on the train."
+goal = "Finish the main task in short sessions, leaving the site and coming back."
+device = "Pixel 5"
+locale = "ja-JP"
+timezone = "Asia/Tokyo"
+color_scheme = "dark"
+reduced_motion = false
+text_scale = 1.0
+geolocation = [35.6762, 139.6503]
+allow_location = true
+
+[[persona]]
+id = "lucia"
+profile = "Teacher, 47, uses the family tablet, reads Spanish, takes her time."
+goal = "Use the main feature on the big screen and judge whether the layout uses the space."
+device = "iPad Mini"
+locale = "es-ES"
+timezone = "Europe/Madrid"
+color_scheme = "light"
+reduced_motion = false
+text_scale = 1.0
+geolocation = [40.4168, -3.7038]
+allow_location = true
+
+[[persona]]
+id = "malik"
+profile = "Student, 21, skips every text, taps fast, dark mode everywhere."
+goal = "Reach the main feature as fast as possible, skipping optional steps."
+device = "Pixel 7"
+locale = "en-US"
+timezone = "America/New_York"
+color_scheme = "dark"
+reduced_motion = false
+text_scale = 1.0
+geolocation = [40.7128, -74.006]
+allow_location = true
+
+[[persona]]
+id = "clara"
+profile = "Designer, 34, notices every misaligned pixel, refuses location access, asks for less motion."
+goal = "Explore the site and judge whether it is worth paying for."
+device = "iPhone 13"
+locale = "fr-FR"
+timezone = "Europe/Paris"
+color_scheme = "light"
+reduced_motion = true
+text_scale = 1.0
+geolocation = [48.8566, 2.3522]
+allow_location = false
+
+[[persona]]
+id = "olga"
+profile = "Translator, 36, reads Russian, spots clumsy wording and cut-off labels."
+goal = "Go through every settings page and check that each label fits."
+device = "Laptop (Chrome)"
+locale = "ru-RU"
+timezone = "Europe/Moscow"
+color_scheme = "dark"
+reduced_motion = false
+text_scale = 1.0
+geolocation = [55.7558, 37.6173]
+allow_location = true
+
+[[persona]]
+id = "mehmet"
+profile = "Engineer, 33, reads Turkish, types names with İ, ş and ğ, tries odd input."
+goal = "Fill every text field with Turkish characters, emoji and very long text."
+device = "Galaxy S9+"
+locale = "tr-TR"
+timezone = "Europe/Istanbul"
+color_scheme = "dark"
+reduced_motion = false
+text_scale = 1.0
+geolocation = [41.0082, 28.9784]
+allow_location = true
