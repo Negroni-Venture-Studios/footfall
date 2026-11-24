@@ -14,10 +14,22 @@ The guard works in three ways:
    them. What refuses them is the egress proxy, through which the browser reaches every
    host except the app, and which lets the browser reach only the asset hosts.
 
-Popups are closed, downloads cancelled, dialogs dismissed and file pickers left
-unanswered, and each is recorded. Everything in an event that came from the page is page
-text: it is cleaned, cut to `DETAIL_CAP` and quoted, and a blocked address is reported by
-its host alone, never its path or query (AGENTS.md rule 6).
+Popups are closed, downloads cancelled, dialogs dismissed (a page that asks before it is
+left is let go) and file pickers left unanswered, and each is recorded. Everything in an
+event that came from the page is page text: it is cleaned, cut to `DETAIL_CAP` and
+quoted, and a blocked address is reported by its host alone, never its path or query
+(AGENTS.md rule 6).
+
+The guard has known gaps, and the egress proxy and the container's network cover the first three:
+
+- A request made as a page unloads, such as a `sendBeacon` or a `keepalive` fetch from a
+  `pagehide` or `unload` handler, has no frame left; Playwright continues it without
+  routing it and without a request event, so the guard never sees it.
+- `<link rel=preconnect>` and `<link rel=dns-prefetch>` open a connection or look a name up
+  without making a request, so there is nothing to route.
+- WebRTC sends UDP, which is not HTTP and is not routed.
+- A service worker's requests bypass `context.route`. The guard holds only for a context
+  made with `service_workers="block"`, which `footfall test` sets.
 """
 
 import asyncio
@@ -59,12 +71,7 @@ _FURTHER: Final[dict[Kind, str]] = {
     "dialog": "dismissed further dialogs",
     "file_chooser": "left further file pickers unanswered",
 }
-_DIALOGS: Final = {
-    "alert": "an alert",
-    "confirm": "a confirm dialog",
-    "prompt": "a prompt",
-    "beforeunload": "a leave-page dialog",
-}
+_DIALOGS: Final = {"alert": "an alert", "confirm": "a confirm dialog", "prompt": "a prompt"}
 _CLOSE_POLICY: Final = 1008  # WebSocket close code: policy violation
 
 
@@ -195,13 +202,17 @@ class Guard:
                 key = (kind, _FURTHER[kind])
             else:
                 self._distinct += 1
+        if key not in self._events:
+            LOG.info("guard: %s", _loggable(*key))
         self._events[key] = self._events.get(key, 0) + 1
-        # The host of a blocked request is worth a log line; page text from a dialog is not.
-        LOG.info("guard: %s", detail if kind == "blocked_request" else kind)
 
     def drain(self) -> list[GuardEvent]:
         """Return the events since the last drain, oldest first, and forget them."""
         events = [GuardEvent(kind, detail, count) for (kind, detail), count in self._events.items()]
+        for event in events:
+            if event.count > 1:
+                what = _loggable(event.kind, event.detail)
+                LOG.info("guard: %s, %d times in all", what, event.count)
         self._events = {}
         self._distinct = 0
         return events
@@ -242,9 +253,18 @@ class Guard:
             self.record("blocked_request", f"stopped the page going to {where}")
         else:
             self.record("blocked_request", f"blocked a request to {where}")
-        # An aborted navigation leaves the page where it was, with no error page.
-        reason = "aborted" if navigation else "blockedbyclient"
+        # An aborted navigation leaves the tester's page where it was, with no error page.
+        # Anywhere else, such as a new window, an error page is shown instead: Playwright
+        # then reports the window, and the guard closes it.
+        reason = "aborted" if navigation and self._in_tester_frame(request) else "blockedbyclient"
         await _quietly(route.abort(reason), "abort a request")
+
+    def _in_tester_frame(self, request: Request) -> bool:
+        try:
+            frame = request.frame
+        except PlaywrightError:  # a window Playwright has not reported yet
+            return False
+        return frame.parent_frame is None and frame.page is self._main
 
     async def _route_socket(self, socket: WebSocketRoute) -> None:
         if self.allowed(socket.url):
@@ -280,12 +300,26 @@ class Guard:
             self._main = page
             page.on("websocket", self._watch_socket)
             return
-        self.record("popup", "closed a new window")
+        if self.on_app(page.url):
+            parts = urlsplit(page.url)
+            path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+            self.record("popup", f"closed a new window for {quote(path, DETAIL_CAP)}")
+        else:
+            self.record("popup", "closed a new window")
         task = asyncio.get_running_loop().create_task(_quietly(page.close(), "close a window"))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _dismiss(self, dialog: Dialog) -> None:
+        """Dismiss a dialog, but let the page go when it asks before it is left.
+
+        Dismissing "leave this page?" would keep the tester on a page it has typed into.
+        Wherever it goes next is still checked by the rule.
+        """
+        if dialog.type == "beforeunload":
+            self.record("dialog", "the page asked before leaving")
+            await _quietly(dialog.accept(), "accept a leave-page dialog")
+            return
         try:
             what = _DIALOGS.get(dialog.type, "a dialog")
             message = dialog.message
@@ -313,6 +347,13 @@ class Guard:
 def _in_main_frame(request: Request) -> bool:
     try:
         frame = request.frame
-    except PlaywrightError:  # a service worker's request has no frame
-        return False
+    except PlaywrightError:
+        # A new window's first page has a frame Playwright has not reported yet. A service
+        # worker's request has none, but is not a navigation.
+        return request.is_navigation_request()
     return frame.parent_frame is None
+
+
+def _loggable(kind: Kind, detail: str) -> str:
+    # The host of a blocked request is worth a log line; page text from a dialog is not.
+    return detail if kind == "blocked_request" else kind

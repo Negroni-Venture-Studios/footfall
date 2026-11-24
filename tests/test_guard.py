@@ -7,6 +7,7 @@ at the second server; the tests check that as well as what the guard reports.
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -342,27 +343,77 @@ async def test_a_websocket_the_guard_cannot_route_is_still_reported(
 # ------------------------------------------------------------------ windows, files, dialogs
 
 
+async def page_targets(page: Page) -> list[str]:
+    """Every page the browser has, including any Playwright has not reported."""
+    browser = page.context.browser
+    assert browser is not None
+    cdp = await browser.new_browser_cdp_session()
+    try:
+        infos = (await cdp.send("Target.getTargets"))["targetInfos"]
+    finally:
+        await cdp.detach()
+    return [t["url"] for t in infos if t["type"] == "page"]
+
+
 @pytest.mark.parametrize(
     ("opener", "expected"),
     [
-        ("window.open('/basic.html')", ("popup", "closed a new window")),
-        ("window.open('/basic.html', '_blank', 'noopener')", ("popup", "closed a new window")),
-        # Playwright reports a popup once its first page loads, and this one never does.
+        ("window.open('/basic.html')", [("popup", 'closed a new window for "/basic.html"')]),
+        (
+            "window.open('/basic.html?tab=2', '_blank', 'noopener')",
+            [("popup", 'closed a new window for "/basic.html?tab=2"')],
+        ),
         (
             "window.open('http://evil.test/popup')",
-            ("blocked_request", 'stopped the page going to "evil.test"'),
+            [
+                ("blocked_request", 'stopped the page going to "evil.test"'),
+                ("popup", "closed a new window"),
+            ],
         ),
     ],
 )
 async def test_popup_closed(
-    open_page: OpenPage, other_server: AppServer, opener: str, expected: tuple[str, str]
+    open_page: OpenPage,
+    other_server: AppServer,
+    opener: str,
+    expected: list[tuple[str, str]],
 ) -> None:
     page, guard = await open_page("/basic.html")
     await page.evaluate(opener)
     await settle(page)
     assert page.context.pages == [page]
+    assert await page_targets(page) == [page.url]
     assert evil_hits(other_server) == []
-    assert [(e.kind, e.detail) for e in guard.drain()] == [expected]
+    assert [(e.kind, e.detail) for e in guard.drain()] == expected
+
+
+async def test_popups_at_a_blocked_host_do_not_pile_up(
+    open_page: OpenPage, app_server: AppServer, other_server: AppServer
+) -> None:
+    app_server.page(
+        "/many-popups",
+        "<script>for (let i = 0; i < 3; i++) window.open('http://evil.test/' + i)</script>",
+    )
+    page, guard = await open_page("/many-popups")
+    await settle(page)
+    assert await page_targets(page) == [page.url]
+    assert evil_hits(other_server) == []
+    events = guard.drain()
+    assert GuardEvent("popup", "closed a new window", count=3) in events
+
+
+async def test_a_popup_aimed_at_an_asset_host_makes_no_request(
+    open_page: OpenPage, app_server: AppServer, other_server: AppServer
+) -> None:
+    app_server.page("/asset-popup", "<script>window.open('http://assets.test/page')</script>")
+    page, guard = await open_page("/asset-popup", assets=frozenset({"assets.test"}))
+    await settle(page)
+    assert evil_hits(other_server) == []
+    assert await page_targets(page) == [page.url]
+    assert [(e.kind, e.detail) for e in guard.drain()] == [
+        ("blocked_request", 'stopped the page going to "assets.test"'),
+        ("popup", "closed a new window"),
+    ]
 
 
 async def test_link_with_a_blank_target_is_closed(
@@ -373,7 +424,7 @@ async def test_link_with_a_blank_target_is_closed(
     await page.click("a")
     await settle(page)
     assert page.context.pages == [page]
-    assert details(guard.drain(), "popup") == ["closed a new window"]
+    assert details(guard.drain(), "popup") == ['closed a new window for "/basic.html"']
 
 
 async def test_download_cancelled(open_page: OpenPage, app_server: AppServer) -> None:
@@ -425,6 +476,79 @@ async def test_dialog_text_is_flattened_capped_and_quoted(
     quoted = event.detail.removeprefix("dismissed an alert: ")
     assert quoted.startswith('"') and quoted.endswith('"')
     assert len(quoted) <= DETAIL_CAP + 2 + quoted.count("\\")
+
+
+async def test_a_page_that_asks_before_leaving_is_left(
+    open_page: OpenPage, app_server: AppServer
+) -> None:
+    app_server.page(
+        "/draft",
+        '<input id="f" aria-label="Notes">'
+        "<script>addEventListener('beforeunload', (e) => {"
+        " if (document.getElementById('f').value) { e.preventDefault(); e.returnValue = ''; }"
+        "});</script>",
+    )
+    page, guard = await open_page("/draft")
+    await page.click("#f")
+    await page.keyboard.type("unsaved")
+    await page.goto(app_server.origin + "/basic.html", timeout=5000)
+    assert page.url == app_server.origin + "/basic.html"
+    assert [(e.kind, e.detail) for e in guard.drain()] == [
+        ("dialog", "the page asked before leaving")
+    ]
+
+
+@pytest.mark.parametrize("character", ['"', "\\\\"])
+async def test_a_dialog_full_of_quotes_keeps_its_closing_quote(
+    open_page: OpenPage, app_server: AppServer, character: str
+) -> None:
+    app_server.page("/quotes", f"<script>alert('{character}'.repeat(300))</script>")
+    _, guard = await open_page("/quotes")
+    (event,) = guard.drain()
+    body = event.detail.removeprefix("dismissed an alert: ")
+    assert body.startswith('"') and body.endswith('…"')
+    assert len(body) <= DETAIL_CAP + 2
+    assert re.fullmatch(r'"(\\["\\]|[^"\\])*…"', body)
+
+
+async def test_the_log_has_one_line_per_distinct_event_and_counts_at_drain(
+    open_page: OpenPage, app_server: AppServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.tester.guard")
+    images = "".join(f'<img src="http://evil.test/{n}.png">' for n in range(40))
+    app_server.page("/many", images)
+    _, guard = await open_page("/many")
+
+    def lines() -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.name == "footfall.tester.guard"]
+
+    assert lines() == ['guard: blocked a request to "evil.test"']
+    guard.drain()
+    assert lines() == [
+        'guard: blocked a request to "evil.test"',
+        'guard: blocked a request to "evil.test", 40 times in all',
+    ]
+
+
+async def test_an_event_source_to_another_host_is_blocked(
+    open_page: OpenPage, app_server: AppServer, other_server: AppServer
+) -> None:
+    app_server.page("/events", "<script>new EventSource('http://evil.test/stream')</script>")
+    _, guard = await open_page("/events")
+    assert evil_hits(other_server) == []
+    assert details(guard.drain()) == ['blocked a request to "evil.test"']
+
+
+async def test_a_data_frame_cannot_send_the_page_away(
+    open_page: OpenPage, app_server: AppServer, other_server: AppServer
+) -> None:
+    frame = "<script>top.location = 'http://evil.test/from-a-frame'</script>"
+    app_server.page("/framed", f'<iframe src="data:text/html,{frame}"></iframe>')
+    page, guard = await open_page("/framed")
+    await settle(page)
+    assert evil_hits(other_server) == []
+    assert page.url == app_server.origin + "/framed"
+    guard.drain()
 
 
 async def test_file_chooser_left_unanswered(open_page: OpenPage, app_server: AppServer) -> None:
