@@ -19,7 +19,10 @@ No allowed name may become a route to another site on the same server (domain fr
   closes.
 - CONNECT goes only to port 443. After replying 200, the proxy reads the client's first TLS
   record before it connects upstream, and closes the connection unless the ClientHello in it
-  names the CONNECT host. It sends that record upstream first and then relays both ways.
+  names the CONNECT host and does not hide its real name with Encrypted Client Hello. It sends
+  that record upstream first, then follows the records both ways until the server's
+  ServerHello settles the handshake, holding any further ClientHello to the same checks, and
+  then relays the rest untouched. `footfall.proxy.tls` says what this cannot stop.
 
 A connection idle for `idle_timeout` seconds in both directions is closed, and connections are
 capped in all and per client address. The proxy logs one line per decision, with the client's
@@ -39,7 +42,15 @@ from typing import Final
 
 from footfall.hosts import HostError, resolve_public, validate_host_name
 from footfall.proxy.policy import INVALID_HOST, Decision, Policy
-from footfall.proxy.tls import RECORD_HEADER, ClientHelloError, record_length, server_name
+from footfall.proxy.tls import (
+    HANDSHAKE,
+    RECORD_HEADER,
+    EncryptedClientHello,
+    HandshakeError,
+    ServerHellos,
+    record_header,
+    server_name,
+)
 
 __all__ = ["ESTABLISHED", "MAX_HEAD", "MAX_HEADERS", "Opener", "ProxyServer", "Resolve"]
 
@@ -310,6 +321,97 @@ async def _finish(tasks: Iterable[asyncio.Task[None]]) -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+class _TunnelRefused(Exception):
+    """A tunnel closed for something it carried; the message is the reason to log."""
+
+
+def _hello_refusal(record: bytes, host: str) -> str | None:
+    """Why a ClientHello record may not pass for the CONNECT host `host`; None if it may."""
+    try:
+        name = server_name(record)
+    except EncryptedClientHello as error:
+        return str(error)
+    except HandshakeError as error:
+        return f"not a TLS ClientHello the proxy can read ({error})"
+    if name is None:
+        return "the TLS ClientHello names no server"
+    if name.lower() != host:
+        return "the TLS server name is not the CONNECT host"
+    return None
+
+
+async def _read_record(
+    reader: asyncio.StreamReader, activity: _Activity, side: str
+) -> tuple[int, bytes] | None:
+    """One whole TLS record, with its content type, or None if the stream ended cleanly.
+
+    Raises _TunnelRefused for anything that is not a record the proxy can read.
+    """
+    try:
+        header = await activity.within(functools.partial(reader.readexactly, RECORD_HEADER))
+        content_type, length = record_header(header)
+        payload = await activity.within(functools.partial(reader.readexactly, length))
+    except asyncio.IncompleteReadError as error:
+        if error.partial or error.expected != RECORD_HEADER:
+            raise _TunnelRefused(f"the {side} stopped inside a TLS record") from None
+        return None
+    except HandshakeError as error:
+        raise _TunnelRefused(f"the {side} sent {error}") from None
+    activity.touch()
+    return content_type, header + payload
+
+
+async def _check_client(
+    reader: asyncio.StreamReader,
+    sink: asyncio.StreamWriter,
+    host: str,
+    hellos: ServerHellos,
+    activity: _Activity,
+) -> None:
+    """Relay the client's records, holding each ClientHello to the checks of the first, until
+    the server's ServerHello settles the handshake; then relay the rest untouched."""
+    while not hellos.settled:
+        read = await _read_record(reader, activity, "client")
+        if read is None:
+            return
+        content_type, record = read
+        if content_type == HANDSHAKE and not hellos.settled:
+            reason = _hello_refusal(record, host)
+            if reason is not None:
+                raise _TunnelRefused(reason)
+        sink.write(record)
+        await activity.within(sink.drain)
+        activity.touch()
+    await _pump(reader, sink, activity)
+
+
+async def _follow_server(
+    reader: asyncio.StreamReader,
+    sink: asyncio.StreamWriter,
+    hellos: ServerHellos,
+    activity: _Activity,
+) -> None:
+    """Relay the server's records, following its handshake until a ServerHello settles it;
+    then relay the rest untouched. Each record is judged before it is relayed, so the client
+    cannot answer a ServerHello the proxy has not yet seen."""
+    while not hellos.settled:
+        read = await _read_record(reader, activity, "server")
+        if read is None:
+            return
+        content_type, record = read
+        if content_type == HANDSHAKE:
+            try:
+                hellos.feed(record[RECORD_HEADER:])
+            except HandshakeError as error:
+                raise _TunnelRefused(
+                    f"the server's handshake cannot be followed ({error})"
+                ) from None
+        sink.write(record)
+        await activity.within(sink.drain)
+        activity.touch()
+    await _pump(reader, sink, activity)
+
+
 async def _linger(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Half-close, then read and drop what the client still sends, briefly and boundedly.
 
@@ -541,22 +643,17 @@ class ProxyServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         writer.write(ESTABLISHED)
-        refusal: str | None = None
         try:
             async with asyncio.timeout(self._idle):
                 await writer.drain()
                 header = await reader.readexactly(RECORD_HEADER)
-                record = header + await reader.readexactly(record_length(header))
-            name = server_name(record)
-        except ClientHelloError as error:
+                _, length = record_header(header)
+                record = header + await reader.readexactly(length)
+            refusal = _hello_refusal(record, request.host)
+        except HandshakeError as error:
             refusal = f"not a TLS ClientHello the proxy can read ({error})"
         except (asyncio.IncompleteReadError, TimeoutError):
             refusal = "no TLS ClientHello arrived"
-        else:
-            if name is None:
-                refusal = "the TLS ClientHello names no server"
-            elif name.lower() != request.host:
-                refusal = "the TLS server name is not the CONNECT host"
         if refusal is not None:
             _log(client, run_id, request.host, request.port, f"refused: {refusal}")
             return
@@ -570,12 +667,19 @@ class ProxyServer:
             activity = _Activity(self._idle)
             upstream_writer.write(record)
             await activity.within(upstream_writer.drain)
+            hellos = ServerHellos()
             tasks = [
-                asyncio.create_task(_pump(reader, upstream_writer, activity)),
-                asyncio.create_task(_pump(upstream_reader, writer, activity)),
+                asyncio.create_task(
+                    _check_client(reader, upstream_writer, request.host, hellos, activity)
+                ),
+                asyncio.create_task(_follow_server(upstream_reader, writer, hellos, activity)),
             ]
             try:
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    outcome = None if task.cancelled() else task.exception()
+                    if isinstance(outcome, _TunnelRefused):
+                        _log(client, run_id, request.host, request.port, f"refused: {outcome}")
             finally:
                 await _finish(tasks)
         finally:

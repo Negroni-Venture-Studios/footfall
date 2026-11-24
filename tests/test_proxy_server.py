@@ -19,7 +19,17 @@ import pytest
 from footfall.hosts import HostError, resolve_public
 from footfall.proxy.policy import Policy
 from footfall.proxy.server import MAX_HEAD, ProxyServer
-from tests.tls_hellos import hello, real_client_hello, sni
+from tests.tls_hellos import (
+    CHANGE_CIPHER_SPEC,
+    HELLO_RETRY,
+    SERVER_HELLO,
+    application_data,
+    hello,
+    real_client_hello,
+    record,
+    sni,
+    with_extension,
+)
 
 RUN = "r_abcdefghijklmnopqrstuvwxyz"
 CLIENT = "127.0.0.1"
@@ -31,12 +41,17 @@ TIMEOUT = 5.0
 
 @dataclass
 class Upstream:
-    """A server on loopback that echoes TLS-looking bytes and answers anything else as HTTP.
+    """A server on loopback that plays TLS server to a TLS record and answers anything else
+    as HTTP.
 
-    It records every byte each connection sent it, once that connection has ended.
+    After a first TLS record it sends `greeting`, a ServerHello unless a test changes it, and
+    then echoes what follows if `echo` is set. It records every byte each connection sent it,
+    once that connection has ended.
     """
 
     response: bytes = RESPONSE
+    greeting: bytes = SERVER_HELLO
+    echo: bool = True
     received: list[bytes] = field(default_factory=list)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -45,11 +60,16 @@ class Upstream:
             first = await reader.read(1)
             data += first
             if first == b"\x16":
-                writer.write(first)
+                header = await reader.readexactly(4)
+                data += header
+                data += await reader.readexactly(int.from_bytes(header[2:4], "big"))
+                writer.write(self.greeting)
+                await writer.drain()
                 while chunk := await reader.read(65536):
                     data += chunk
-                    writer.write(chunk)
-                    await writer.drain()
+                    if self.echo:
+                        writer.write(chunk)
+                        await writer.drain()
                 return
             while b"\r\n\r\n" not in data:
                 chunk = await reader.read(65536)
@@ -71,7 +91,7 @@ class Upstream:
                     data += await reader.read(65536)
             writer.write(self.response)
             await writer.drain()
-        except ConnectionError:
+        except (ConnectionError, asyncio.IncompleteReadError):
             pass
         finally:
             self.received.append(bytes(data))
@@ -216,33 +236,34 @@ def get(target: str, *headers: str, method: str = "GET", body: bytes = b"") -> b
 
 
 async def test_connect_allowed_relays_bytes(live: Live) -> None:
-    record = real_client_hello(ALLOWED)
+    first = real_client_hello(ALLOWED)
+    ping, pong = application_data(b"ping"), application_data(b"pong")
     async with tunnel(live.port, f"{ALLOWED}:443") as t:
         assert t.reply == b"HTTP/1.1 200 Connection established\r\n\r\n"
-        t.writer.write(record + b"ping")
+        t.writer.write(first + ping)
         await t.writer.drain()
         async with asyncio.timeout(TIMEOUT):
-            echoed = await t.reader.readexactly(len(record) + 4)
-        assert echoed == record + b"ping"
-        t.writer.write(b"pong")
+            answered = await t.reader.readexactly(len(SERVER_HELLO) + len(ping))
+        assert answered == SERVER_HELLO + ping
+        t.writer.write(pong)
         await t.writer.drain()
         async with asyncio.timeout(TIMEOUT):
-            assert await t.reader.readexactly(4) == b"pong"
+            assert await t.reader.readexactly(len(pong)) == pong
     await live.upstream.wait_for(1)
-    assert live.upstream.received == [record + b"pingpong"]
+    assert live.upstream.received == [first + ping + pong]
     assert live.connects == [("127.0.0.1", 443)]
     assert live.resolved == [(ALLOWED, 443)]
     assert live.policy.reached(RUN) == [ALLOWED]
 
 
 async def test_connect_name_is_matched_without_case(live: Live) -> None:
-    record = hello(sni(b"API.Example.COM"))
+    first = hello(sni(b"API.Example.COM"))
     async with tunnel(live.port, "Api.Example.com:443") as t:
         assert status(t.reply) == 200
-        t.writer.write(record)
+        t.writer.write(first)
         await t.writer.drain()
         async with asyncio.timeout(TIMEOUT):
-            assert await t.reader.readexactly(len(record)) == record
+            assert await t.reader.readexactly(len(SERVER_HELLO)) == SERVER_HELLO
     assert live.connects == [("127.0.0.1", 443)]
 
 
@@ -367,6 +388,186 @@ async def test_connect_with_a_body_refused(live: Live) -> None:
     )
     assert status(reply) == 400
     assert live.connects == []
+
+
+async def test_encrypted_client_hello_is_closed(
+    live: Live, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        t.writer.write(with_extension(real_client_hello(ALLOWED), 0xFE0D, bytes(40)))
+        await t.writer.drain()
+        assert await read_to_end(t.reader) == b""
+    assert live.connects == []
+    lines = [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
+    assert len(lines) == 1
+    assert lines[0].endswith("refused: encrypted client hello")
+
+
+# ---------------------------------------------------------------- records after the first
+
+
+def split_hello(name: str) -> bytes:
+    """A ClientHello for `name`, split across two handshake records."""
+    message = real_client_hello(name)[5:]
+    return record(22, message[:40]) + record(22, message[40:])
+
+
+@pytest.mark.parametrize(
+    ("second", "reason"),
+    [
+        (real_client_hello("evil.example.com"), "the TLS server name is not the CONNECT host"),
+        (real_client_hello(None), "the TLS ClientHello names no server"),
+        (with_extension(real_client_hello(ALLOWED), 0xFE0D, bytes(40)), "encrypted client hello"),
+        (hello(sni(b"api.example.com", b"evil.example.com")), "more than one host"),
+        (split_hello(ALLOWED), "truncated"),
+    ],
+    ids=["other-name", "no-name", "encrypted", "two-names", "split"],
+)
+async def test_a_second_client_hello_must_name_the_host(
+    caplog: pytest.LogCaptureFixture, second: bytes, reason: str
+) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.greeting = HELLO_RETRY + CHANGE_CIPHER_SPEC
+        live.upstream.echo = False
+        first = real_client_hello(ALLOWED)
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(first)
+            await t.writer.drain()
+            async with asyncio.timeout(TIMEOUT):
+                await t.reader.readexactly(len(live.upstream.greeting))
+            t.writer.write(CHANGE_CIPHER_SPEC + second)
+            await t.writer.drain()
+            assert await read_to_end(t.reader) == b""
+        await live.upstream.wait_for(1)
+        assert live.upstream.received == [first + CHANGE_CIPHER_SPEC]
+    lines = [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
+    assert len(lines) == 2
+    assert lines[0].endswith("allowed")
+    assert "refused" in lines[1] and reason in lines[1]
+
+
+async def test_a_second_client_hello_naming_the_host_is_relayed() -> None:
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.greeting = HELLO_RETRY
+        live.upstream.echo = False
+        first, second = real_client_hello(ALLOWED), real_client_hello(ALLOWED.upper())
+        data = application_data(b"after the handshake")
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(first)
+            await t.writer.drain()
+            async with asyncio.timeout(TIMEOUT):
+                await t.reader.readexactly(len(HELLO_RETRY))
+            t.writer.write(CHANGE_CIPHER_SPEC + second + data)
+            await t.writer.drain()
+        await live.upstream.wait_for(1)
+        assert live.upstream.received == [first + CHANGE_CIPHER_SPEC + second + data]
+
+
+async def test_a_client_hello_before_any_answer_is_checked() -> None:
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.greeting = b""  # the server has not answered yet
+        live.upstream.echo = False
+        first = real_client_hello(ALLOWED)
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(first + real_client_hello("evil.example.com"))
+            await t.writer.drain()
+            assert await read_to_end(t.reader) == b""
+        await live.upstream.wait_for(1)
+        assert live.upstream.received == [first]
+
+
+async def test_early_data_does_not_end_the_checks() -> None:
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.greeting = HELLO_RETRY
+        live.upstream.echo = False
+        first, early = real_client_hello(ALLOWED), application_data(b"0-RTT data")
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(first + early)
+            await t.writer.drain()
+            async with asyncio.timeout(TIMEOUT):
+                await t.reader.readexactly(len(HELLO_RETRY))
+            t.writer.write(real_client_hello("evil.example.com"))
+            await t.writer.drain()
+            assert await read_to_end(t.reader) == b""
+        await live.upstream.wait_for(1)
+        assert live.upstream.received == [first + early]
+
+
+async def test_after_the_server_hello_records_pass_untouched() -> None:
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.echo = False
+        first = real_client_hello(ALLOWED)
+        # As in TLS 1.2: a key exchange, then an encrypted Finished in a handshake record.
+        rest = (
+            record(22, b"\x10\x00\x00\x02\x00\x00")
+            + CHANGE_CIPHER_SPEC
+            + record(22, bytes(range(40)))
+            + application_data(b"request")
+        )
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(first)
+            await t.writer.drain()
+            async with asyncio.timeout(TIMEOUT):
+                await t.reader.readexactly(len(SERVER_HELLO))
+            t.writer.write(rest)
+            await t.writer.drain()
+        await live.upstream.wait_for(1)
+        assert live.upstream.received == [first + rest]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"GET / HTTP/1.1\r\nHost: evil.example.com\r\n\r\n",
+        b"\x17\x03\x03\x48\x01" + bytes(100),  # longer than any TLS record
+        record(24, b"heartbeat"),
+        b"\x16\x03\x03\x00",  # a header cut short, then the client stops sending
+    ],
+    ids=["plain-http", "oversized", "unknown-type", "cut-short"],
+)
+async def test_bad_records_after_the_hello_close_the_tunnel(data: bytes) -> None:
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.greeting = b""
+        live.upstream.echo = False
+        first = real_client_hello(ALLOWED)
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(first + data)
+            await t.writer.drain()
+            if data == b"\x16\x03\x03\x00":
+                t.writer.write_eof()
+            assert await read_to_end(t.reader) == b""
+        await live.upstream.wait_for(1)
+        assert live.upstream.received == [first]
+
+
+@pytest.mark.parametrize(
+    ("greeting", "relayed"),
+    [
+        (HELLO_RETRY + HELLO_RETRY, HELLO_RETRY),
+        (b"HTTP/1.1 400 Bad Request\r\n\r\n", b""),
+        (record(22, b"\x0b\x00\x00\x22" + bytes(34)), b""),
+    ],
+    ids=["two-retries", "not-tls", "not-a-server-hello"],
+)
+async def test_a_server_handshake_that_cannot_be_followed_closes_the_tunnel(
+    greeting: bytes, relayed: bytes
+) -> None:
+    async with running() as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.greeting = greeting
+        live.upstream.echo = False
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(real_client_hello(ALLOWED))
+            await t.writer.drain()
+            assert await read_to_end(t.reader) == relayed
 
 
 # ---------------------------------------------------------------- plain HTTP
@@ -672,29 +873,28 @@ async def test_idle_client_is_closed() -> None:
 async def test_idle_tunnel_is_closed() -> None:
     async with running(idle_timeout=0.3) as live:
         live.policy.allow(CLIENT, RUN, [ALLOWED])
-        record = real_client_hello(ALLOWED)
         async with tunnel(live.port, f"{ALLOWED}:443") as t:
-            t.writer.write(record)
+            t.writer.write(real_client_hello(ALLOWED))
             await t.writer.drain()
             started = time.monotonic()
-            assert await read_to_end(t.reader) == record  # the echo, then the close
+            assert await read_to_end(t.reader) == SERVER_HELLO  # the answer, then the close
             assert 0.3 <= time.monotonic() - started < 2
 
 
 async def test_a_busy_tunnel_is_not_idle() -> None:
     async with running(idle_timeout=0.3) as live:
         live.policy.allow(CLIENT, RUN, [ALLOWED])
-        record = real_client_hello(ALLOWED)
+        data = application_data(b"x")
         async with tunnel(live.port, f"{ALLOWED}:443") as t:
-            t.writer.write(record)
+            t.writer.write(real_client_hello(ALLOWED))
             await t.writer.drain()
             async with asyncio.timeout(TIMEOUT):
-                await t.reader.readexactly(len(record))
+                await t.reader.readexactly(len(SERVER_HELLO))
                 for _ in range(8):  # 0.8 s in all, longer than the idle timeout
                     await asyncio.sleep(0.1)
-                    t.writer.write(b"x")
+                    t.writer.write(data)
                     await t.writer.drain()
-                    assert await t.reader.readexactly(1) == b"x"
+                    assert await t.reader.readexactly(len(data)) == data
 
 
 async def test_connections_per_client_are_capped() -> None:
@@ -756,12 +956,11 @@ async def test_reached_recorded(live: Live) -> None:
     assert status(await exchange(live.port, get("http://evil.example.com/"))) == 403
     assert live.policy.reached(RUN) == []
     assert await exchange(live.port, get("http://tiles.example.org/a.png")) == RESPONSE
-    record = real_client_hello(ALLOWED)
     async with tunnel(live.port, f"{ALLOWED}:443") as t:
-        t.writer.write(record)
+        t.writer.write(real_client_hello(ALLOWED))
         await t.writer.drain()
         async with asyncio.timeout(TIMEOUT):
-            await t.reader.readexactly(len(record))
+            await t.reader.readexactly(len(SERVER_HELLO))
     assert live.policy.reached(RUN) == [ALLOWED, "tiles.example.org"]
 
 
