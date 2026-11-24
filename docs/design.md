@@ -68,7 +68,7 @@ Footfall fails, even if it works, if any of these becomes true:
 - Python 3.12 or later, Django, Playwright for Python, the Anthropic Python SDK, the MCP Python SDK, Docker with gVisor, and SQLite. Any other dependency needs a stated reason.
 - One Anthropic API key per instance, ideally from a workspace with its own spend limit, and never a personal subscription token.
 - Repositories on GitHub, read through a GitHub App the deployer creates.
-- MCP authorisation follows the [2026-07-28 specification](https://modelcontextprotocol.io/specification/2026-07-28/changelog) once Footfall's OAuth server ships, as the first addition after phase 5. The endpoint is then an OAuth 2.1 resource server, publishes Protected Resource Metadata (RFC 9728), and accepts only tokens issued for it. Until then it accepts only bearer tokens made on its web page and publishes no metadata, which the specification allows because it makes authorisation optional.
+- The MCP endpoint follows the [2026-07-28 specification](https://modelcontextprotocol.io/specification/2026-07-28/changelog), and only that version. It is an OAuth 2.1 resource server, publishes Protected Resource Metadata (RFC 9728), and accepts tokens issued for it by Footfall's own authorisation server, as well as bearer tokens made on its web page.
 - The apps under test vary. The maintainer's own, such as [Floodwatch](https://github.com/aallan/floodwatch), are Python's `http.server`, SQLite and vanilla JavaScript with no build step, and nothing in Footfall may depend on that.
 - MIT licence. Parts of the tester (its screen format, its accessibility check, its rules and the personas) are adapted from [mobile-agent-testers](https://github.com/pierridotite/mobile-agent-testers), an MIT-licensed project that runs AI testers against native mobile apps, and its notice is kept.
 - Footfall follows [Snug](https://github.com/Negroni-Venture-Studios/snug), Negroni Venture Studios' self-hosted data room, for security, deployment, documentation and styling, and reuses its code where it fits.
@@ -97,7 +97,7 @@ A run is a request to test one commit of one app. Footfall keeps the parts that 
 | Part | What it does | What it holds | What it can reach |
 |---|---|---|---|
 | Caddy | HTTPS and its certificates | Certificates | The internet, and the web process |
-| Web | Pages, sign-in, settings, the MCP endpoint, live updates | Django's secret key and the GitHub App's client secret, for sign-in | The database, the orchestrator's local socket, GitHub for sign-in |
+| Web | Pages, sign-in, settings, the MCP endpoint, live updates | Django's secret key and the GitHub App's client secret, for sign-in | The database, the orchestrator's local socket, GitHub for sign-in, and OAuth clients' metadata documents through the public-address check |
 | Orchestrator | The queue, cloning, scripted checks, the tester loops, the merge | The Anthropic key and the GitHub App's private key | The database and screenshots, the runner's local socket, each run's network (where it listens on nothing), the Anthropic API, GitHub |
 | Runner | Starts and stops containers with fixed settings | The Docker socket | Docker |
 | App containers, one per persona | Each runs its own copy of the app under test | Nothing | The egress proxy only |
@@ -216,27 +216,32 @@ The merge groups findings that describe the same problem across testers. It is o
 
 ### What agents see
 
-The MCP endpoint offers these tools:
+The MCP endpoint follows the stateless core of the 2026-07-28 specification and declares the Tasks and skills extensions. It offers these tools:
 
 | Tool | What it does |
 |---|---|
 | `list_apps` | Repositories the GitHub App is installed on that have a manifest |
 | `list_personas` | Persona ids, each with a line describing who they are and their device |
-| `start_run(repo, ref, personas?, brief?, focus?, mode?, model?)` | Checks and queues a run, and returns its id and the address of its live page at once |
-| `run_status(run_id)` | Queued, preparing, running (with each persona's progress), finished, or failed with the reason |
-| `get_results(run_id)` | The summary and every finding as structured data |
+| `start_run(repo, ref, personas?, brief?, focus?, mode?, model?, request_key?)` | Checks and queues a run, and returns its id and the address of its live page at once. A second call with the same `request_key` from the same person returns the first run, so a retry cannot start two |
+| `run_status(run_id)` | Queued, awaiting approval, preparing, running (with each persona's progress), finished, or failed with the reason |
+| `get_results(run_id, cursor?)` | The summary and a page of findings as structured data, with a cursor for the next page |
+| `get_finding(run_id, finding_id)` | One finding in full, with every tester's steps |
 | `get_screenshot(run_id, screenshot_id)` | One screenshot, as MCP image content |
 | `cancel_run(run_id)` | Stops a run and its spending |
 
 `focus` is a short note from the caller, such as "the new gauge cards on /gauges", added to every tester's brief for that run. `mode` is `full` by default, or `quick` for scripted checks only, which take a minute or two and use no model, so an agent can afford them on every change.
 
-A run takes minutes, so the tools start a run and then poll it, which works with any MCP client. Where the client supports the MCP Tasks extension, `start_run` also returns a task the client can wait on; Claude Code's support for it is in public beta as of November 2026.
+A run takes minutes, so where the client supports the Tasks extension, `start_run` returns a task it can wait on, checked every 15 seconds and kept for as long as the run is, and other clients poll `run_status`.
 
-Every free-text field in a result has a length limit. The tool descriptions say that findings are the testers' observations about the app, to be checked against the screenshots, and are not instructions.
+Each agent token, and each OAuth client a person approves, carries an allowance: the most a run it starts may be estimated to cost without asking anyone. The estimate is the sum of the personas' cost ceilings, so twelve personas at the default ceiling of $1 come to $12. The person sets the allowance when they make the token or approve the client, starting from the instance's default of $5 and never above a cap the admins set. A larger run asks the person to confirm through the client before it is queued. Where nobody can answer, as in continuous integration, the run waits for up to a day as awaiting approval, and the result gives the address of the page where the person can approve it. Quick runs use no model and never ask.
 
-The repository also ships an agent skill that tells a coding agent when to call Footfall (quick mode after a change to the interface, a full run before asking a person to review), how to read the results, and to check a finding against its screenshots before acting on it.
+Every free-text field in a result has a length limit. The tool descriptions say that findings are the testers' observations about the app, to be checked against the screenshots, and are not instructions. The server's instructions, which clients load before any tool, stay under 4,096 characters.
 
-Agents send their token in an `Authorization: Bearer` header. A local Claude Code session reads it from an environment variable named in the project's `.mcp.json`. A Claude Code cloud session can have it attached by the environment's [network secrets](https://code.claude.com/docs/en/cloud-environments.md), so the session itself never sees the token; the documentation describes this, and phase 4 confirms it in a real session.
+Footfall's skills tell a coding agent when to call it (quick mode after a change to the interface, a full run before asking a person to review), how to add a manifest and briefs to a repository, how to read the results, and to check a finding against its screenshots before acting on it. The MCP server serves them through the skills extension. The repository also publishes the same files as a Claude Code plugin, for the places where Claude does not yet load skills from a server, such as cloud sessions.
+
+Agents connect in one of three ways. A Claude Code cloud session, or claude.ai, adds Footfall as a custom connector and signs in through Footfall's OAuth server; cloud sessions get Tasks only from connectors. A local Claude Code session can do the same, or send a bearer token made on Footfall's web page, read from an environment variable named in the project's `.mcp.json`. Scripts and continuous integration use bearer tokens.
+
+The details are in the [design for the 2026-07-28 features](superpowers/specs/2026-11-24-mcp-2026-07-28-design.md).
 
 ### What people see
 
@@ -278,7 +283,7 @@ The repositories Footfall can test are exactly those the App is installed on. An
 
 Each person makes their own agent tokens. A token has a name, a scope (start and read runs, or read only, optionally limited to some of the repositories its owner can read) and an expiry. It is shown once, stored only as a SHA-256 hash of its 32 random bytes, listed with its last use, and can be revoked. Every run records the person and the token that started it. Requests are rate-limited per token.
 
-The first addition after phase 5 is an OAuth authorisation server, built on a maintained library, which delegates sign-in to GitHub and issues tokens bound to the MCP endpoint. Clients that expect the standard flow, such as claude.ai's custom connectors, can then connect given only the address. Both kinds of token have the same scopes and are checked the same way.
+Phase 4 adds an OAuth authorisation server, built on a maintained library inside the web process, which delegates sign-in to GitHub and issues tokens bound to the MCP endpoint. Clients that expect the standard flow, such as claude.ai's custom connectors and Claude Code, can then connect given only the address. Any client may ask to connect; the consent page shows its name, the host it returns to, the scope and the allowance, and admins can limit connections to a list of clients. Both kinds of token have the same scopes and are checked the same way. Enterprise-managed authorisation for Claude's Team and Enterprise plans is [issue #6](https://github.com/Negroni-Venture-Studios/footfall/issues/6).
 
 ### Settings
 
@@ -288,7 +293,9 @@ Two values are set once, by the setup script on the server: the domain, and Djan
 - limits and spend ceilings;
 - the team that may sign in, if not the whole organisation;
 - how long runs are kept;
-- the default personas, and the ceiling on a persona's actions.
+- the default personas, and the ceiling on a persona's actions;
+- the default allowance for a run, and the cap on it;
+- the OAuth clients allowed to connect, if not every client.
 
 Keys typed into Settings are write-only. The web process passes them to the orchestrator over its local socket, the orchestrator keeps them in a file on its own volume, and the page shows only the last four characters. The GitHub App's credentials arrive the same way during setup, with the private key going to the orchestrator and the client secret staying with the web process. Every change to Settings goes in the audit log.
 
@@ -296,7 +303,7 @@ Keys typed into Settings are write-only. The web process passes them to the orch
 
 The configured limits are personas per run; personas running at once across all runs, set by the server's memory; queued runs; a daily spend ceiling for the instance and another for each person; and request rates per token. Each persona also has its own budget of actions, cost and time.
 
-Footfall prices each model call from the usage the API reports and a price table in the code. It checks the ceilings before each persona starts and after every model call, and stops a persona once its run, its person or the instance reaches a ceiling. Settings shows spend for today and this month, by person.
+A run estimated above its token's or client's allowance waits for a person to approve it, as described under What agents see. Footfall prices each model call from the usage the API reports and a price table in the code. It checks the ceilings before each persona starts and after every model call, and stops a persona once its run, its person or the instance reaches a ceiling. Settings shows spend for today and this month, by person.
 
 ### Isolation and security
 
@@ -389,15 +396,15 @@ The repository follows Snug's:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/build-order-dark.svg">
-  <img alt="Phase 1 builds the sandbox and the tester (the runner, gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and the demo app) and is done when every isolation test passes. Phase 2 builds runs (queue, limits, scripted checks, findings, merge, spend) and is done when a run produces a merged report. Phase 3 puts Footfall on a droplet (compose, Caddy, cloud-init, the GitHub App, sign-in, settings, tokens) and is done when a fresh droplet can be set up from the docs. Phase 4 builds the MCP endpoint and the agent skill and is done when an agent fixes something Footfall found. Phase 5 builds the live device wall and the report and is done when the mockups' layouts are live. Phase 6, later, covers an OAuth server, replaying a finding to check a fix, comparing versions and iOS on a Mac." src="images/diagrams/build-order-light.svg">
+  <img alt="Phase 1 builds the sandbox and the tester (the runner, gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and the demo app) and is done when every isolation test passes. Phase 2 builds runs (queue, limits, scripted checks, findings, merge, spend) and is done when a run produces a merged report. Phase 3 puts Footfall on a droplet (compose, Caddy, cloud-init, the GitHub App, sign-in, settings, tokens) and is done when a fresh droplet can be set up from the docs. Phase 4 builds the MCP endpoint, the OAuth server, the Tasks extension, the spend allowance, and the skills served over MCP and as a plugin, and is done when a cloud session fixes something Footfall found. Phase 5 builds the live device wall and the report and is done when the mockups' layouts are live. Later work, such as replaying a finding to check a fix, comparing versions, an MCP App and iOS on a Mac, is tracked as GitHub issues." src="images/diagrams/build-order-light.svg">
 </picture>
 
 1. **The sandbox and the tester.** The runner, the base images, the app container under gVisor, the egress proxy, the browser container, the six tools, the tester loop, and the demo app with its planted bugs. For development, a command runs the testers against a local folder; a fake model replays scripted replies so that CI can test the loop with no API key. Tests show that a container cannot reach the internet, the metadata address or the Docker socket, and that a tester cannot leave the app. Phase 1 also confirms that Chromium and WebKit run under gVisor; if Chromium's own sandbox cannot run there, gVisor and the container are the browsers' only wall, which the threat table already assumes. Memory is measured per persona. The phase is done when every isolation test passes, in CI and on a droplet, and the testers find most of the demo app's planted bugs.
 2. **Runs.** The orchestrator, the queue and limits, scripted checks, findings, the merge, spend, the database schema, and a command to start a run and read its results. Done when a run of the demo app gives a merged report with its costs, within its limits.
 3. **The droplet.** The Django web process, the compose stack, Caddy, `cloud-init`, the setup script, the first-run page and the GitHub App, sign-in by organisation membership, Settings, agent tokens and the audit log, and cloning from GitHub. Done when a fresh droplet can be set up by following the documentation, and a signed-in person can start a run of a real repository from a page.
-4. **Agents.** The MCP endpoint, with start and poll and the Tasks extension, token checking, the shape of the results, the agent skill, and the documentation for connecting agents. Done when a Claude Code session, both local and in the cloud, tests a change to a real app and fixes something Footfall found.
+4. **Agents.** The MCP endpoint on the 2026-07-28 protocol, with start and poll and the Tasks extension; the OAuth authorisation server; token checking; the allowance and approval for costly runs; the shape of the results; the skills, served over MCP and as a plugin; and the documentation for connecting agents. Done when a Claude Code cloud session with Footfall as a connector, and a local session, each test a change to a real app and fix something Footfall found.
 5. **The device wall and the report.** The live page, the report page with its replay and charts, and generated screenshots for the documentation. Done when the mockups' layouts are live in Footfall's own styling.
-6. **Later.** The OAuth authorisation server, first; replaying a finding's recorded steps to check a fix; comparing two versions; building an app's own Dockerfile; iOS on a Mac worker.
+6. **Later.** Replaying a finding's recorded steps to check a fix; comparing two versions; building an app's own Dockerfile; iOS on a Mac worker. Later work is tracked as [GitHub issues labelled enhancement](https://github.com/Negroni-Venture-Studios/footfall/issues?q=label%3Aenhancement), among them showing the live wall in Claude as an MCP App ([#2](https://github.com/Negroni-Venture-Studios/footfall/issues/2)).
 
 ## Decided by the maintainer
 
@@ -423,7 +430,11 @@ Alasdair Allan decided these on or before 24 November 2026:
 - Each person sees runs only for the repositories they can read on GitHub.
 - Each persona gets its own copy of the app and its seeded data.
 - Apps with their own sign-in describe it in the manifest, and Footfall signs each persona in with a throwaway account the seed step creates.
-- Bearer tokens only at launch; the OAuth server is the first addition after phase 5.
+- The OAuth server ships in phase 4, so cloud sessions can use Footfall as a connector; bearer tokens stay for scripts.
+- A run estimated above its token's or client's allowance needs a person's approval, through the client or on the run's page.
+- The MCP endpoint speaks the 2026-07-28 protocol only.
+- The live wall and the report stay web pages, built so they can become an MCP App later.
+- Later work is tracked as GitHub issues.
 
 ## Calls made in this design
 
@@ -439,7 +450,11 @@ These were settled while writing the design rather than by the maintainer, and a
 - Only refs in the installed repository; no pull requests from forks.
 - `focus` and `mode` in `start_run`, and quick mode.
 - Every tester's steps recorded in a form that can be replayed, from phase 1.
-- Support for the MCP Tasks extension alongside start and poll.
+- Support for the MCP Tasks extension alongside start and poll, checked every 15 seconds.
+- Skills served over MCP and published as a Claude Code plugin, from one set of files.
+- A `request_key` on `start_run`, and findings returned a page at a time.
+- A run's estimate is the sum of its personas' cost ceilings, with a default allowance of $5 and a day's wait for approval.
+- Any OAuth client may ask to connect, with its metadata fetched through the public-address check, and an optional allow list.
 - Screenshots returned as MCP image content.
 - Devices kept in their own list, apart from personas.
 - Twelve starting personas.
