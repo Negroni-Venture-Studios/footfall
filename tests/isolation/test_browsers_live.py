@@ -180,8 +180,11 @@ async def test_chromium_loads_an_allowed_https_asset_through_the_proxy(
         context = await browsers.context(browser, "chromium")
         await Guard(browsers.app, frozenset(ASSETS)).install(context)
         page = await context.new_page()
-        async with page.expect_response(lambda r: r.url.startswith("https://example.com/")) as got:
-            await _goto(page, browsers.app + "/asset?src=https://example.com/")
+        # In a frame, not as a script: Chromium's opaque response blocking would stop an HTML
+        # page loaded as a script after it arrived, and report no response for it.
+        listed = lambda r: urlsplit(r.url).hostname == "example.com"  # noqa: E731
+        async with page.expect_response(listed) as got:
+            await _goto(page, browsers.app + "/frame?src=https://example.com/")
         response = await got.value
         assert response.status == 200
     finally:
