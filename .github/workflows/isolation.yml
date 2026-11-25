@@ -135,7 +135,7 @@ jobs:
     needs: isolation
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       actions: read
     steps:
@@ -147,14 +147,41 @@ jobs:
         run: |
           job=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
             --jq '.jobs[] | select(.name == "isolation") | .id')
+          if [ -z "$job" ]; then
+            echo "::error::This run has no job called isolation."
+            exit 1
+          fi
           log="$RUNNER_TEMP/isolation.log"
-          # A finished job's log can take a moment to be readable.
-          for attempt in $(seq 1 12); do
-            gh api "repos/$REPO/actions/jobs/$job/logs" > "$log" 2>/dev/null && break
+          said="$RUNNER_TEMP/gh.err"
+          # A finished job's log can take minutes to be readable, and until then the API
+          # answers with an error or a log that is not yet the job's. Only a log that names
+          # the job counts as read.
+          read=no
+          for attempt in $(seq 1 60); do
+            if gh api "repos/$REPO/actions/jobs/$job/logs" > "$log" 2> "$said" \
+              && grep -q '^\S* *Complete job name: isolation' "$log"; then
+              read=yes
+              break
+            fi
             sleep 10
           done
+          if [ "$read" != yes ]; then
+            echo "::error::Could not read the isolation job's log in 10 minutes. The API last said: $(tail -n 1 "$said" | cut -c1-200)"
+            exit 1
+          fi
+          ran=$(grep -c 'test_actions_live.py::test_a_masked_value_is_hidden_in_the_actions_log' "$log" || true)
           masked=$(grep -c 'FOOTFALL-MASK-CHECK \*\*\*' "$log" || true)
           clear=$(grep -c 'FOOTFALL-MASK-CHECK footfall-mask-check-' "$log" || true)
-          echo "Mask check lines in the isolation log: $masked masked, $clear in clear."
-          test "$masked" -ge 1
-          test "$clear" -eq 0
+          echo "In the isolation log: the mask check ran $ran times; its line masked $masked times, in clear $clear times."
+          if [ "$ran" -lt 1 ]; then
+            echo "::error::The mask check did not run, so the log shows nothing either way."
+            exit 1
+          fi
+          if [ "$clear" -gt 0 ]; then
+            echo "::error::The mask check's value is in the isolation log in clear."
+            exit 1
+          fi
+          if [ "$masked" -lt 1 ]; then
+            echo "::error::The mask check ran, but its line is not in the log masked."
+            exit 1
+          fi
