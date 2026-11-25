@@ -532,12 +532,109 @@ async def test_a_persona_that_never_ends_is_stopped_at_its_hard_limit(
     assert time.monotonic() - started < 10
     assert report.status == "failed"
     assert report.reason == (
-        "the persona ran past its hard limit of 1 s, so Footfall stopped it; "
-        "its actions and cost are not counted"
+        "the persona ran past its hard limit of 1 s, so Footfall stopped it; its actions are "
+        "not counted, and its cost leaves out the model call it stopped"
     )
     written = json.loads((tmp_path / "out" / "grace" / "report.json").read_text())
     assert written["status"] == "failed"
     assert runner.ops()[-1] == "stop"
+
+
+class NoBrowser:
+    """Stands in for the browser, its context and its page, so that a run's own accounting is
+    tested with no browser launched."""
+
+    async def new_page(self) -> "NoBrowser":
+        return self
+
+    async def goto(self, *arguments: Any, **options: Any) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def install(self, context: Any) -> None:
+        return None
+
+
+def without_a_browser(monkeypatch: pytest.MonkeyPatch) -> Connect:
+    """Every part of a persona that would use a browser, stood in for."""
+    stand_in = NoBrowser()
+
+    async def opened(*arguments: Any) -> NoBrowser:
+        return stand_in
+
+    async def connect_browser(engine: str, endpoint: str) -> Any:
+        return stand_in
+
+    monkeypatch.setattr(local, "open_context", opened)
+    monkeypatch.setattr(local, "Guard", lambda origin, assets: stand_in)
+    monkeypatch.setattr(local, "Executor", lambda *arguments, **options: stand_in)
+    return connect_browser
+
+
+async def test_a_persona_stopped_at_its_hard_limit_reports_what_it_spent(
+    tmp_path: Path, app_server: AppServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R74: a persona stopped at its hard limit reported a cost of nothing, so the
+    run's summary read low exactly when a run went wrong. It reports what its model calls
+    cost before it was stopped, which the run's spend holds."""
+    serve_two_pages(app_server)
+
+    async def spends_then_hangs(**options: Any) -> Any:
+        options["spend"].add(options["persona"].id, 0.75)
+        await asyncio.Event().wait()
+
+    connect_browser = without_a_browser(monkeypatch)
+    monkeypatch.setattr(local, "run_persona", spends_then_hangs)
+    monkeypatch.setattr(tester_loop, "MIN_TURN", 0.1)
+    monkeypatch.setattr(local, "BROWSER_ALLOWANCE", 0.4)
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    budget = Budget(max_seconds=0.5, grace_turns=0)  # a hard limit of 0.5 + 0.1 + 0.4 s
+    async with asyncio.timeout(15):
+        (report,) = await run_folder(
+            two_pages(tmp_path), runner, connect_browser, tmp_path, budget=budget
+        )
+    assert report.status == "failed"
+    assert "hard limit" in report.reason
+    assert report.cost_usd == 0.75
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert summary["cost_usd"] == 0.75
+    assert summary["personas"][0]["cost_usd"] == 0.75
+
+
+async def test_every_persona_of_a_run_shares_its_cost_ceiling(
+    tmp_path: Path, app_server: AppServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R74: the operator's ceiling reaches each persona's loop as one spend, which the
+    tested repository's manifest and brief have no say in."""
+    serve_two_pages(app_server)
+    spends: list[Any] = []
+
+    async def records(**options: Any) -> Any:
+        spends.append(options["spend"])
+        raise CaptureError("no page here")
+
+    connect_browser = without_a_browser(monkeypatch)
+    monkeypatch.setattr(local, "run_persona", records)
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    await test_folder(
+        two_pages(tmp_path),
+        persona_ids=CHROMIUM_PERSONAS,
+        brief_name="default",
+        focus=None,
+        model_spec=FINISHES,
+        out=tmp_path / "out",
+        runner=runner,
+        budget=Budget(),
+        cost_ceiling_usd=4.25,
+        connect_browser=connect_browser,
+        workspaces=tmp_path / "workspaces",
+        all_files=True,
+    )
+    assert len(spends) == 2
+    assert spends[0] is spends[1]
+    assert spends[0].ceiling_usd == 4.25
 
 
 async def test_a_context_that_never_closes_closes_the_connection_to_the_browsers(

@@ -66,7 +66,7 @@ from footfall.runner.service import RunnerError
 from footfall.tester import loop as tester_loop
 from footfall.tester.folder import FOLDER_MODE, Folder
 from footfall.tester.guard import Guard
-from footfall.tester.loop import Budget, run_persona
+from footfall.tester.loop import Budget, RunSpend, run_persona
 from footfall.tester.model import model_from_spec
 from footfall.tester.report import OBSERVATIONS, PersonaReport, clean_text, strip_invisible
 from footfall.tester.screen import quote
@@ -101,6 +101,9 @@ GIT_TIMEOUT: Final = 60.0
 # on the run's browser container is bounded here too. Read when used, so that a test can
 # shorten them.
 CLOSE_TIMEOUT = 10.0  # seconds for a persona's context to close, after which it is abandoned
+# The most a run may spend on model calls unless the operator says otherwise: the design's
+# worst case for the default personas, twelve at the default ceiling of $1 each.
+RUN_COST_CEILING_USD: Final = 12.0
 # Seconds a persona may take beyond what its model calls may: setting up its context and
 # signing in, which take at most about two and a quarter minutes by their own timeouts, and
 # the browser's part of the turns that run past the time limit, about a minute each.
@@ -239,7 +242,9 @@ def format_table(reports: Sequence[PersonaReport]) -> str:
     return "\n".join([*lines, "", OBSERVATIONS])
 
 
-def _failed(persona: Persona, device: Device, reason: str, started: float) -> PersonaReport:
+def _failed(
+    persona: Persona, device: Device, reason: str, started: float, cost_usd: float
+) -> PersonaReport:
     return PersonaReport(
         persona=persona.id,
         device=device.name,
@@ -250,7 +255,7 @@ def _failed(persona: Persona, device: Device, reason: str, started: float) -> Pe
         summary="",
         findings=[],
         actions=0,
-        cost_usd=0.0,
+        cost_usd=cost_usd,
         seconds=time.monotonic() - started,
     )
 
@@ -1020,10 +1025,12 @@ class _Run:
         out: Path,
         results: "_Results",
         budget: Budget,
+        spend: RunSpend,
         proxy_url: str,
         account: tuple[str, str] | None,
     ) -> None:
         self.run_id = run_id
+        self.spend = spend
         self.results = results
         self.manifest = manifest
         self.brief = brief
@@ -1096,20 +1103,22 @@ class _Run:
                     app_name=self.manifest.name,
                     budget=self.budget,
                     account=self.account,
+                    spend=self.spend,
                 )
         except SignInError as error:
-            report = _failed(persona, device, str(error), started)
+            report = self._failed(persona, device, str(error), started)
         except TimeoutError:
             reason = "TimeoutError"
             if deadline.expired():
                 reason = (
                     f"the persona ran past its hard limit of {limit:g} s, so Footfall stopped "
-                    "it; its actions and cost are not counted"
+                    "it; its actions are not counted, and its cost leaves out the model call "
+                    "it stopped"
                 )
-            report = _failed(persona, device, reason, started)
+            report = self._failed(persona, device, reason, started)
         except Exception as error:  # noqa: BLE001  # any failure ends this persona, not the run
             # The class alone: a message may quote the page, or what was typed into it.
-            report = _failed(persona, device, type(error).__name__, started)
+            report = self._failed(persona, device, type(error).__name__, started)
         finally:
             if context is not None:
                 await _close(context, browser)
@@ -1123,6 +1132,13 @@ class _Run:
             LOG.error("could not write %s: %s", path, error.strerror or type(error).__name__)
         LOG.info("persona %s: %s", persona.id, report.status)
         return report
+
+    def _failed(
+        self, persona: Persona, device: Device, reason: str, started: float
+    ) -> PersonaReport:
+        """A failed persona's report, with what its model calls cost so far, which the run's
+        spend holds even when the persona was stopped in the middle of its loop."""
+        return _failed(persona, device, reason, started, self.spend.spent_by(persona.id))
 
     def summary(self, reports: Sequence[PersonaReport]) -> dict[str, Any]:
         return {
@@ -1334,6 +1350,7 @@ async def test_folder(
     out: Path,
     runner: Runner,
     budget: Budget,
+    cost_ceiling_usd: float = RUN_COST_CEILING_USD,
     connect_browser: ConnectBrowser | None = None,
     workspaces: Path = DEFAULT_WORKSPACES,
     proxy_container: str = DEFAULT_PROXY_CONTAINER,
@@ -1348,6 +1365,9 @@ async def test_folder(
     outside git needs, every file is copied; the two cannot be asked for together, and
     ValueError says so.
 
+    `budget` is each persona's; `cost_ceiling_usd` is the most the whole run may spend on
+    model calls, after which no persona starts another turn.
+
     `connect_browser` takes an engine and the run's Playwright endpoint and returns a
     browser; by default it connects to the run's browser container. Writes the results into
     `out` and prints a table of them. The runner is asked to stop the run however this ends.
@@ -1357,6 +1377,7 @@ async def test_folder(
     """
     if all_files and untracked:
         raise ValueError("untracked and all_files cannot both be asked for")
+    spend = RunSpend(cost_ceiling_usd)
     manifest = load_manifest(folder)
     brief = load_brief(folder, manifest, brief_name)
     devices = load_devices()
@@ -1398,6 +1419,7 @@ async def test_folder(
             out=out,
             results=results,
             budget=budget,
+            spend=spend,
             proxy_url=f"http://{proxy_container}:{PROXY_PORT}",
             account=account,
         )

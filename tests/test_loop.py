@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Final, cast
 
 import pytest
 from playwright.async_api import Browser, BrowserContext, ViewportSize
@@ -31,6 +31,7 @@ from footfall.tester.loop import (
     PAGE_STOPPED,
     REMINDER,
     Budget,
+    RunSpend,
     run_persona,
 )
 from footfall.tester.model import (
@@ -44,7 +45,7 @@ from footfall.tester.model import (
 )
 from footfall.tester.pricing import Price, Usage, cost_usd
 from footfall.tester.report import PersonaReport
-from footfall.tester.tools import TOOLS, Executor
+from footfall.tester.tools import TOOLS, Executor, Redactor, ToolOutcome
 from footfall.tester.trace import Trace
 from tests.app_server import AppServer
 from tests.fake_api import KEY, Api, iteration, message
@@ -505,6 +506,83 @@ async def test_cost_ceiling_stops(world: MakeWorld) -> None:
     assert nudged(model.calls[4][-1])
     assert report.cost_usd == pytest.approx(1.80)
     assert report.actions == 4
+
+
+class NoBrowser:
+    """An executor with no browser behind it, for the tests of what a run spends: every look
+    shows the same words, and nothing finishes."""
+
+    def __init__(self) -> None:
+        self.redactor = Redactor()
+        self.screenshot_ids: set[str] = set()
+
+    async def first_look(self) -> ToolOutcome:
+        return ToolOutcome("A page.", None, None, False)
+
+    async def run(self, tool: str, data: Any) -> ToolOutcome:
+        return ToolOutcome("A page.", None, None, False)
+
+    def refuse(self, name: object, why: str) -> None:
+        pass
+
+
+THIRTY_CENTS: Final = Usage(1_000_000, 0, 0, 0)  # at the test price below, $0.30 a turn
+
+
+def thirty_cents(model: str, usage: Usage) -> float:
+    return usage.input_tokens * 0.30 / 1_000_000
+
+
+async def spend_run(model: FakeModel, spend: RunSpend, persona: Persona = PERSONA) -> PersonaReport:
+    return await run_persona(
+        persona=persona,
+        device=DEVICE,
+        executor=cast(Executor, NoBrowser()),
+        model=model,
+        brief=BRIEF,
+        focus=None,
+        app_name="Test app",
+        budget=Budget(max_cost_usd=5.00),
+        pricing=thirty_cents,
+        spend=spend,
+    )
+
+
+async def test_the_runs_cost_ceiling_stops_every_persona_starting_another_turn() -> None:
+    """Ruling R74: the run's spend is checked before each persona's turn, so once it reaches
+    the operator's ceiling no persona starts another, its own budget notwithstanding, and no
+    grace turn is spent past it."""
+    spend = RunSpend(1.00)
+    first = FakeModel([LOOK] * 10, usage=THIRTY_CENTS)
+    report = await spend_run(first, spend)
+    assert len(first.calls) == 4  # $1.20 after four turns
+    assert report.status == "incomplete"
+    assert report.reason == (
+        "the run's cost ceiling of $1.00 was reached before the tester called finish"
+    )
+    assert report.cost_usd == pytest.approx(1.20)
+    assert spend.spent_usd == pytest.approx(1.20)
+    second = FakeModel([LOOK] * 10, usage=THIRTY_CENTS)
+    other = await spend_run(second, spend, _PERSONAS["grace"])
+    assert second.calls == []
+    assert (other.status, other.cost_usd, other.reason) == ("incomplete", 0.0, report.reason)
+    assert spend.spent_by(PERSONA.id) == pytest.approx(1.20)
+    assert spend.spent_by("grace") == 0.0
+
+
+async def test_a_run_under_its_cost_ceiling_is_not_stopped_by_it() -> None:
+    spend = RunSpend(12.00)
+    model = FakeModel([LOOK] * 3, usage=THIRTY_CENTS)
+    report = await spend_run(model, spend)
+    assert len(model.calls) == 4  # the fourth turn was asked for, past the script's end
+    assert report.reason == "ScriptError"
+    assert spend.spent_usd == pytest.approx(report.cost_usd) == pytest.approx(0.90)
+
+
+@pytest.mark.parametrize("ceiling", [0.0, -1.0, math.nan, math.inf, True])
+def test_a_runs_cost_ceiling_must_be_a_positive_amount(ceiling: Any) -> None:
+    with pytest.raises(ValueError, match="cost ceiling"):
+        RunSpend(ceiling)
 
 
 async def test_a_fake_model_costs_nothing(world: MakeWorld) -> None:

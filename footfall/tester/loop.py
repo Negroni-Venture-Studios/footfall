@@ -15,6 +15,13 @@ the end of the run are decided here. A turn that breaks the rules (no tool call,
 one, an unknown tool, a call cut off at the token limit) gets a reply that keeps the
 conversation valid and counts as a turn in which nothing was done.
 
+The whole run has a cost ceiling too, which the operator sets and the tested repository
+cannot raise. Every persona of the run shares one `RunSpend`, adds the cost of each of its
+model calls to it, and checks it before each turn: once the run's spend reaches the ceiling,
+the persona starts no other turn, grace turns included, and ends as incomplete. A turn under
+way when another persona reaches it finishes, so a run can go past its ceiling by at most one
+turn for each persona running.
+
 Each persona has a budget of actions, cost and time, checked after every turn. Once any of
 the three runs out, a line after that turn's tool results tells the tester to finish, and
 it has `grace_turns` more turns to do so. In those turns a `finish` is honoured, and any
@@ -91,6 +98,7 @@ __all__ = [
     "REMINDER",
     "Budget",
     "Pricing",
+    "RunSpend",
     "run_persona",
 ]
 
@@ -162,6 +170,40 @@ class Budget:
             raise ValueError("a budget needs a finite, positive cost ceiling and time limit")
         if not _whole(self.grace_turns) or self.grace_turns < 0:
             raise ValueError("a budget needs a whole number of grace turns, none or more")
+
+
+class RunSpend:
+    """What a whole run has spent on model calls, by persona, against the run's cost ceiling.
+
+    Every persona of a run shares one, on one event loop. Each adds what each of its model
+    calls cost, and asks before each turn whether the ceiling has been reached.
+    """
+
+    def __init__(self, ceiling_usd: float) -> None:
+        if not _amount(ceiling_usd):
+            raise ValueError("a run's cost ceiling must be a finite, positive number of dollars")
+        self.ceiling_usd = float(ceiling_usd)
+        self._spent: dict[str, float] = {}
+
+    def add(self, spender: str, usd: float) -> None:
+        self._spent[spender] = self._spent.get(spender, 0.0) + usd
+
+    def spent_by(self, spender: str) -> float:
+        return self._spent.get(spender, 0.0)
+
+    @property
+    def spent_usd(self) -> float:
+        return sum(self._spent.values())
+
+    def reached(self) -> bool:
+        return self.spent_usd >= self.ceiling_usd
+
+    @property
+    def reason(self) -> str:
+        return (
+            f"the run's cost ceiling of ${self.ceiling_usd:.2f} was reached before the tester "
+            "called finish"
+        )
 
 
 def _whole(value: object) -> bool:
@@ -257,8 +299,10 @@ class _Run:
         pricing: Pricing,
         clock: Callable[[], float],
         account: tuple[str, str] | None,
+        spend: RunSpend | None,
     ) -> None:
         self.persona = persona
+        self.spend = spend
         self.device = device
         self.executor = executor
         self.model = model
@@ -290,6 +334,9 @@ class _Run:
             details.append(_text(ACCOUNT.format(username=username, password=password)))
         self.messages.append({"role": "user", "content": [*look, *details, _text(BEGIN)]})
         while True:
+            if self.spend is not None and self.spend.reached():
+                # The run's ceiling: no turn is started past it, not even a grace turn.
+                return self.report("incomplete", self.spend.reason)
             # The time limit holds even when a call hangs: a call is given the time left,
             # but never less than MIN_TURN. A call in the grace turns, once the budget is
             # spent, is given at least TURN_FLOOR, so that the report is not cut off.
@@ -335,15 +382,18 @@ class _Run:
         """
         for model, usage in turn.charges or ((turn.model, turn.usage),):
             try:
-                self.cost += self.pricing(model, usage)
+                charge = self.pricing(model, usage)
             except PricingError:
-                self.cost += dearest_cost_usd(usage)
+                charge = dearest_cost_usd(usage)
                 if model not in self.unpriced:
                     self.unpriced.add(model)
                     LOG.warning(
                         "model %s has no price, so it is charged at the dearest rates",
                         quote(model, 60),
                     )
+            self.cost += charge
+            if self.spend is not None:
+                self.spend.add(self.persona.id, charge)
 
     async def _answer(
         self, turn: ModelTurn
@@ -489,6 +539,7 @@ async def run_persona(
     pricing: Pricing | None = None,
     clock: Callable[[], float] = time.monotonic,
     account: tuple[str, str] | None = None,
+    spend: RunSpend | None = None,
 ) -> PersonaReport:
     """Run one persona to its report.
 
@@ -498,7 +549,8 @@ async def run_persona(
     `clock` is a monotonic clock in seconds. When the page stops answering the persona
     fails, and the caller must close its browser context. `account` is the username and
     password of the app's throwaway account, which the first message gives the tester; the
-    executor must redact that password.
+    executor must redact that password. `spend`, shared by every persona of the run, holds
+    the run's cost ceiling, and has each model call's cost added under the persona's id.
     """
     run = _Run(
         persona=persona,
@@ -512,6 +564,7 @@ async def run_persona(
         pricing=pricing or (_free if isinstance(model, FakeModel) else cost_usd),
         clock=clock,
         account=account,
+        spend=spend,
     )
     try:
         return await run.go()

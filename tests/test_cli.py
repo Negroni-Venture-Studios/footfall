@@ -74,6 +74,7 @@ def test_settings_have_the_documented_defaults() -> None:
         orchestrator_container="footfall-orchestrator",
         disk_budget=8 * 1024**3,
         run_lifetime=90 * 60,
+        run_cost_ceiling=12.0,
     )
 
 
@@ -89,6 +90,7 @@ def test_settings_come_from_the_environment() -> None:
             "FOOTFALL_ORCHESTRATOR_CONTAINER": "dev-orchestrator",
             "FOOTFALL_DISK_BUDGET_MIB": "96",
             "FOOTFALL_RUN_LIFETIME_MINUTES": "45",
+            "FOOTFALL_RUN_COST_CEILING_USD": "7.50",
         }
     )
     assert settings == Settings(
@@ -101,6 +103,7 @@ def test_settings_come_from_the_environment() -> None:
         orchestrator_container="dev-orchestrator",
         disk_budget=96 * 1024**2,
         run_lifetime=45 * 60,
+        run_cost_ceiling=7.5,
     )
 
 
@@ -118,6 +121,17 @@ def test_settings_come_from_the_environment() -> None:
         ("FOOTFALL_DISK_BUDGET_MIB", "99999999999"),
         ("FOOTFALL_DISK_BUDGET_MIB", ""),  # set, but empty: never the default in silence
         ("FOOTFALL_DISK_BUDGET_MIB", " 512"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "0"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "0.00"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "-12"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "12.345"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "1e3"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "nan"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "inf"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "1000.01"),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "\uff11\uff12"),  # full-width digits
+        ("FOOTFALL_RUN_COST_CEILING_USD", ""),
+        ("FOOTFALL_RUN_COST_CEILING_USD", "$12"),
     ],
 )
 def test_bad_settings_are_refused(
@@ -166,6 +180,7 @@ def test_cli_test_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         "model_spec": "fake:script.json",
         "out": Path("results"),
         "budget": Budget(),
+        "cost_ceiling_usd": 12.0,
         "workspaces": tmp_path / "workspaces",
         "proxy_container": "dev-proxy",
         "all_files": False,
@@ -186,6 +201,33 @@ def test_cli_test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert options["out"] == Path("footfall-results")
     assert options["workspaces"] == Path("/var/lib/footfall/workspaces")
     assert options["proxy_container"] == "footfall-proxy"
+
+
+def test_the_runs_cost_ceiling_comes_from_the_flag_then_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ruling R74: the operator sets the run's cost ceiling, by flag or environment; the
+    tested repository has no say in it."""
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    monkeypatch.setenv("FOOTFALL_RUN_COST_CEILING_USD", "20")
+    assert main(["test", "app", "--model", "fake:s.json"]) == 0
+    assert main(["test", "app", "--model", "fake:s.json", "--cost-ceiling", "3.5"]) == 0
+    assert [options["cost_ceiling_usd"] for _, options in recorder.calls] == [20.0, 3.5]
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "lots", "1001", "2.999", "nan"])
+def test_a_bad_cost_ceiling_flag_is_a_setting_error(
+    value: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    with pytest.raises(SystemExit) as stopped:
+        main(["test", "app", "--model", "fake:s.json", f"--cost-ceiling={value}"])
+    assert stopped.value.code == 2
+    said = capsys.readouterr().err
+    assert "--cost-ceiling" in said and "dollars from 0.01 to 1000" in said
+    assert recorder.calls == []
 
 
 def test_all_files_copies_every_file_with_a_warning(

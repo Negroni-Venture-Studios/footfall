@@ -1,7 +1,7 @@
 """Footfall's command line.
 
     footfall test <folder> [--personas ids] [--brief name] [--focus text] [--model spec]
-                           [--out dir] [--untracked | --all-files]
+                           [--out dir] [--cost-ceiling dollars] [--untracked | --all-files]
     footfall runner
     footfall proxy
 
@@ -25,12 +25,16 @@ Settings come from the environment:
 | `FOOTFALL_ORCHESTRATOR_CONTAINER` | `footfall-orchestrator` |
 | `FOOTFALL_DISK_BUDGET_MIB` | `8192` |
 | `FOOTFALL_RUN_LIFETIME_MINUTES` | `90` |
+| `FOOTFALL_RUN_COST_CEILING_USD` | `12` |
 
 `FOOTFALL_RUNTIME=runc` starts containers without gVisor, for development on a machine that
 lacks it, and every command then prints a warning. `FOOTFALL_DISK_BUDGET_MIB` is the most
 disk, in MiB, that the runner lets one run use, counting every copy of its app.
 `FOOTFALL_RUN_LIFETIME_MINUTES` is the longest a run may last before the runner stops it,
-whether or not its caller is still there. `FOOTFALL_RUNS` must belong to root and be writable
+whether or not its caller is still there. `FOOTFALL_RUN_COST_CEILING_USD`, which
+`--cost-ceiling` overrides, is the most a `footfall test` run may spend on model calls, in
+dollars from 0.01 to 1000: once its personas together reach it, none starts another turn. The
+tested repository cannot raise it. `FOOTFALL_RUNS` must belong to root and be writable
 by root alone, as must every folder above it, or the runner will not start. The runner sees
 the folders above it only as its own container shows them, so on the host, where Docker finds
 the folder, each folder above it must be root's alone too.
@@ -79,6 +83,8 @@ _CONTAINER_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 _MIB: Final = 1024**2
 _MOST_MIB: Final = 16 * 1024**2  # 16 TiB, far beyond any disk a run could have
 _MOST_MINUTES: Final = 7 * 24 * 60  # a week, far beyond any run's own limits
+_MOST_DOLLARS: Final = 1000  # far beyond the default personas' worst case, $12
+_DOLLARS: Final = re.compile(r"[0-9]{1,4}(\.[0-9]{1,2})?")
 _LOG_TAIL_CAP: Final = 20_000
 # What each line of the app's output is printed behind: not white space, which the GitHub
 # Actions runner trims before it looks for a command, and not a character it can skip.
@@ -100,11 +106,24 @@ _DEFAULTS: Final = {
     # A persona stops by its own limits within about an hour of the run's start, install and
     # seed included (docs/design.md, Limits and spend), so this is margin, not a limit on work.
     "FOOTFALL_RUN_LIFETIME_MINUTES": "90",
+    # The design's worst case for a run of the default personas: twelve at $1 each.
+    "FOOTFALL_RUN_COST_CEILING_USD": "12",
 }
 
 
 class SettingsError(ValueError):
     """A setting in the environment that Footfall cannot use."""
+
+
+def dollars(text: str, name: str) -> float:
+    """A cost ceiling in dollars, from 0.01 to `_MOST_DOLLARS`, with at most two decimal
+    places. Raises SettingsError, naming `name`, for anything else."""
+    if not _DOLLARS.fullmatch(text) or not 0 < float(text) <= _MOST_DOLLARS:
+        raise SettingsError(
+            f"{name} must be a number of dollars from 0.01 to {_MOST_DOLLARS}, such as 12 or "
+            f"7.50, not {text!r}"
+        )
+    return float(text)
 
 
 @dataclass(frozen=True)
@@ -120,6 +139,7 @@ class Settings:
     orchestrator_container: str
     disk_budget: int  # bytes
     run_lifetime: int  # seconds
+    run_cost_ceiling: float  # dollars, for every model call of a footfall test run
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -163,6 +183,13 @@ class Settings:
             orchestrator_container=container("FOOTFALL_ORCHESTRATOR_CONTAINER"),
             disk_budget=whole("FOOTFALL_DISK_BUDGET_MIB", "MiB", _MOST_MIB) * _MIB,
             run_lifetime=whole("FOOTFALL_RUN_LIFETIME_MINUTES", "minutes", _MOST_MINUTES) * 60,
+            # Set but empty is an error too, as for the limits above.
+            run_cost_ceiling=dollars(
+                env.get(
+                    "FOOTFALL_RUN_COST_CEILING_USD", _DEFAULTS["FOOTFALL_RUN_COST_CEILING_USD"]
+                ),
+                "FOOTFALL_RUN_COST_CEILING_USD",
+            ),
         )
 
 
@@ -287,6 +314,9 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
                 out=args.out,
                 runner=RunnerClient(settings.runner_socket),
                 budget=Budget(),
+                cost_ceiling_usd=(
+                    settings.run_cost_ceiling if args.cost_ceiling is None else args.cost_ceiling
+                ),
                 workspaces=settings.workspaces,
                 proxy_container=settings.proxy_container,
                 all_files=args.all_files,
@@ -314,6 +344,13 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
 
 
 # ---------------------------------------------------------------- the command line
+
+
+def _cost_ceiling(text: str) -> float:
+    try:
+        return dollars(text, "--cost-ceiling")
+    except SettingsError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -350,6 +387,16 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_OUT,
         help=f"the folder for the results (default: {DEFAULT_OUT})",
+    )
+    test.add_argument(
+        "--cost-ceiling",
+        type=_cost_ceiling,
+        default=None,
+        metavar="DOLLARS",
+        help=(
+            "the most the run may spend on model calls, in dollars; once its personas reach "
+            "it, none starts another turn (default: FOOTFALL_RUN_COST_CEILING_USD, or 12)"
+        ),
     )
     # --all-files already copies every untracked file, so the two together are refused.
     copied = test.add_mutually_exclusive_group()

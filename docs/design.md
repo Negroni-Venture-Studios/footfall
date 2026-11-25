@@ -303,7 +303,7 @@ Keys typed into Settings are write-only. The web process passes them to the orch
 
 The configured limits are personas per run; personas running at once across all runs, set by the server's memory; queued runs; a daily spend ceiling for the instance and another for each person; and request rates per token. Each persona also has its own budget of actions, cost and time.
 
-A run estimated above its token's or client's allowance waits for a person to approve it, as described under What agents see. Footfall prices each model call from the usage the API reports and a price table in the code. It checks the ceilings before each persona starts and after every model call, and stops a persona once its run, its person or the instance reaches a ceiling. Settings shows spend for today and this month, by person.
+A run estimated above its token's or client's allowance waits for a person to approve it, as described under What agents see. A `footfall test` run, which has no token, has a cost ceiling the operator sets with `--cost-ceiling` or `FOOTFALL_RUN_COST_CEILING_USD`, $12 unless set, the worst case for the default personas; the tested repository cannot raise it. Each persona checks the run's spend before each turn and starts no other once the run has reached it, so the run can pass it by at most one turn for each persona running. Footfall prices each model call from the usage the API reports and a price table in the code. It checks the ceilings before each persona starts and after every model call, and stops a persona once its run, its person or the instance reaches a ceiling. Settings shows spend for today and this month, by person.
 
 ### Isolation and security
 
