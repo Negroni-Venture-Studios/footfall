@@ -8,9 +8,11 @@ published.
 
 The command goes straight to file descriptor 1, unbuffered, so it reaches the log before
 anything written after it, and it reaches it even while pytest captures `sys.stdout`. A
-command the runner did not read as one would print the value it was meant to hide, so a
-value that could break the command's line, or that the runner would read differently, is
-refused rather than written.
+command the runner did not read as one would print the value it was meant to hide. The
+runner reads a command only at the start of a line, so the command is written after a new
+line of its own, whatever was written before it, such as the name of the test pytest -v is
+running. A value that could break the command's line, or that the runner would read
+differently, is refused rather than written.
 """
 
 import os
@@ -35,6 +37,6 @@ def mask(value: str, *, environ: Mapping[str, str] | None = None, fd: int = 1) -
         return
     if not value.strip() or any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value):
         raise ValueError("a value to mask must be one line of printable text")
-    line = f"::add-mask::{value.translate(_ESCAPES)}\n".encode()
+    line = f"\n::add-mask::{value.translate(_ESCAPES)}\n".encode()
     while line:
         line = line[os.write(fd, line) :]

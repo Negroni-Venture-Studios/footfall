@@ -33,8 +33,13 @@ def written(reader: int, writer: int) -> str:
 def test_in_actions_the_value_is_registered_on_a_line_of_its_own(
     pipe: tuple[int, int],
 ) -> None:
+    """The command starts a line of its own, whatever was written before it without a new
+    line, such as the name of the test pytest -v is running. In the middle of a line it would
+    be no command, and would print the value it was meant to hide."""
+    os.write(pipe[1], b"tests/test_x.py::test_y ")
     mask(VALUE, environ=IN_ACTIONS, fd=pipe[1])
-    assert written(*pipe) == f"::add-mask::{VALUE}\n"
+    lines = written(*pipe).split("\n")
+    assert lines == ["tests/test_x.py::test_y ", f"::add-mask::{VALUE}", ""]
 
 
 @pytest.mark.parametrize("setting", [{}, {"GITHUB_ACTIONS": ""}, {"GITHUB_ACTIONS": "false"}])
@@ -46,7 +51,7 @@ def test_outside_actions_nothing_is_written(pipe: tuple[int, int], setting: dict
 def test_a_percent_sign_is_escaped_so_the_value_itself_is_masked(pipe: tuple[int, int]) -> None:
     # The runner reads %0A in a command as a new line; the value must arrive as it is.
     mask("abc%0Adef", environ=IN_ACTIONS, fd=pipe[1])
-    assert written(*pipe) == "::add-mask::abc%250Adef\n"
+    assert written(*pipe) == "\n::add-mask::abc%250Adef\n"
 
 
 @pytest.mark.parametrize(
@@ -67,4 +72,4 @@ def test_the_command_goes_to_standard_output_by_default(
 ) -> None:
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     mask(VALUE)
-    assert capfd.readouterr().out == f"::add-mask::{VALUE}\n"
+    assert capfd.readouterr().out == f"\n::add-mask::{VALUE}\n"
