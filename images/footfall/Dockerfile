@@ -27,7 +27,7 @@ RUN uv sync --locked --no-dev \
  && /app/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /app/footfall
 
 # ---------------------------------------------------------------- runtime
-FROM python:3.14.10-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
+FROM python:3.14.10-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/Negroni-Venture-Studios/footfall" \
       org.opencontainers.image.description="Footfall: tests web apps with AI personas on emulated devices" \
@@ -70,3 +70,26 @@ WORKDIR /var/lib/footfall
 # `footfall test`, `footfall runner` or `footfall proxy`; deploy/dev/compose.yaml
 # runs all three.
 ENTRYPOINT ["footfall"]
+
+# ---------------------------------------------------------------- test
+# The isolation tests' orchestrator: the image above with the development
+# dependencies and tests/, so that pytest runs in a container on each run's
+# network, as footfall test does. Built only with `--target test`, in the
+# isolation workflow; deploy/dev/compose.test.yaml uses it.
+FROM runtime AS test
+
+USER root
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+WORKDIR /app
+RUN uv sync --locked \
+ && rm /usr/local/bin/uv
+COPY tests ./tests
+USER footfall
+
+# ---------------------------------------------------------------- the default
+# Last, so that a build without --target is the runtime image.
+FROM runtime

@@ -102,3 +102,21 @@ def test_the_image_makes_the_socket_folders() -> None:
     dockerfile = (ROOT / "images" / "footfall" / "Dockerfile").read_text()
     assert "--owner root --group footfall --mode 0750 /run/footfall " in dockerfile
     assert "--owner footfall --group footfall --mode 0700 /run/footfall-proxy" in dockerfile
+
+
+TEST_OVERLAY = (ROOT / "deploy" / "dev" / "compose.test.yaml").read_text()
+
+
+def test_the_test_overlay_widens_nothing() -> None:
+    # The isolation tests must test the stack's own settings, so the overlay may add test
+    # plumbing but never a socket, a port, a capability, a privilege or a host network.
+    body = "\n".join(
+        line for line in TEST_OVERLAY.splitlines() if not line.lstrip().startswith("#")
+    )
+    for word in ("docker.sock", "ports:", "cap_add", "privileged", "user:", "network_mode"):
+        assert word not in body
+    for word in ("read_only", "cap_drop", "security_opt", "init:", "tmpfs"):
+        assert word not in body  # left as compose.yaml sets them
+    assert "    image: footfall:test" in body
+    assert body.count("image:") == 1  # only the orchestrator's image changes
+    assert 'FOOTFALL_DISK_BUDGET_MIB: "128"' in body

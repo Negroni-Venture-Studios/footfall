@@ -1,0 +1,123 @@
+name: Isolation
+
+# The sandbox's own tests, on the real stack: Docker with gVisor, the four images,
+# the dev compose file, the runner, the egress proxy and the browser container.
+# Phase 1 is done when every one passes, here and on a droplet. They are the only
+# tests that reach the internet, and only pypi.org and example.com, through the
+# egress proxy.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# As in ci.yml: a newer push to a pull request cancels the older run, and every
+# commit on main keeps a completed run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  isolation:
+    name: isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      COMPOSE: docker compose -f compose.yaml -f compose.test.yaml
+      PYTEST: pytest -m isolation -p no:cacheprovider -v
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
+        with:
+          python-version: "3.12"
+      - name: Install gVisor's runsc
+        # The release Snug pins, installed as Snug's image workflow does.
+        run: |
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases 20261026 main" \
+            | sudo tee /etc/apt/sources.list.d/gvisor.list
+          sudo apt-get update -qq
+          sudo apt-get install --yes -qq runsc
+          sudo runsc install
+          sudo systemctl restart docker
+          runsc --version
+          docker info --format '{{json .Runtimes}}'
+          docker version
+      - name: Build the four images, and the footfall image's test stage
+        run: |
+          docker build -t footfall:dev -f images/footfall/Dockerfile .
+          docker build --target test -t footfall:test -f images/footfall/Dockerfile .
+          docker build -t footfall-python3.13:dev -f images/python/Dockerfile .
+          docker build -t footfall-node22:dev -f images/node/Dockerfile .
+          docker build -t footfall-browsers:dev -f images/browsers/Dockerfile .
+      - run: uv sync --locked
+      - name: Make the folders the stack mounts
+        run: |
+          sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/footfall /var/lib/footfall/workspaces
+          sudo install -d -o 10001 -g 10001 -m 0755 /var/lib/footfall/test-logs
+      - name: Listen on every address of the host
+        # An app container must not reach the host. This gives the tests a port that
+        # certainly answers on each of the host's addresses, to try.
+        run: |
+          nohup uv run python -m http.server 8765 --bind 0.0.0.0 --directory "$(mktemp -d)" \
+            > "$RUNNER_TEMP/host-listener.log" 2>&1 &
+          addresses=$(hostname -I | tr ' ' '\n' | grep -v ':' | tr '\n' ' ')
+          echo "FOOTFALL_TEST_HOST_PORT=8765" >> "$GITHUB_ENV"
+          echo "FOOTFALL_TEST_HOST_ADDRESSES=$addresses" >> "$GITHUB_ENV"
+          echo "The host's addresses: $addresses"
+      - name: Start the dev stack
+        working-directory: deploy/dev
+        run: |
+          $COMPOSE up -d
+          $COMPOSE ps
+      - name: The sandbox, the proxy, the runner and the browsers
+        working-directory: deploy/dev
+        run: |
+          $COMPOSE exec -T orchestrator $PYTEST tests/isolation \
+            --ignore=tests/isolation/test_end_to_end.py \
+            --ignore=tests/isolation/test_docker_host.py
+      - name: footfall test end to end, with each container's memory measured
+        if: success() || failure()
+        working-directory: deploy/dev
+        run: |
+          uv run python ../../scripts/measure_memory.py --out "$RUNNER_TEMP/memory.json" \
+            --summary "$GITHUB_STEP_SUMMARY" &
+          sampler=$!
+          status=0
+          $COMPOSE exec -T orchestrator $PYTEST tests/isolation/test_end_to_end.py || status=$?
+          kill -TERM "$sampler"
+          wait "$sampler"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: success() || failure()
+        with:
+          name: memory
+          path: ${{ runner.temp }}/memory.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: On the host, how Docker answers, and that no run left anything behind
+        if: success() || failure()
+        env:
+          FOOTFALL_ISOLATION: "1"
+          FOOTFALL_ISOLATION_HOST: "1"
+          FOOTFALL_TEST_RESULTS: ${{ runner.temp }}/test-results
+        run: |
+          sudo cp -r /var/lib/footfall/test-results "$FOOTFALL_TEST_RESULTS" || mkdir -p "$FOOTFALL_TEST_RESULTS"
+          sudo chown -R "$(id -u):$(id -g)" "$FOOTFALL_TEST_RESULTS"
+          uv run $PYTEST tests/isolation/test_docker_host.py
+      - name: The stack's logs
+        if: always()
+        working-directory: deploy/dev
+        run: |
+          $COMPOSE logs --no-color --timestamps || true
+          sudo cat /var/lib/footfall/test-logs/proxy.log || true
+      - name: Stop the dev stack
+        if: always()
+        working-directory: deploy/dev
+        run: $COMPOSE down --volumes || true

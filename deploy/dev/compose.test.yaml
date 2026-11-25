@@ -1,0 +1,34 @@
+# The isolation tests' additions to compose.yaml, for .github/workflows/isolation.yml
+# alone. Nothing here is for a real deployment. From this folder:
+#
+#   docker compose -f compose.yaml -f compose.test.yaml up -d
+#   docker compose -f compose.yaml -f compose.test.yaml exec -T orchestrator \
+#     pytest -m isolation -p no:cacheprovider tests/isolation
+#
+# The orchestrator runs the footfall image's test stage, which adds pytest and
+# tests/, so the tests run where footfall test does, on each run's network. The
+# runner gets a disk budget of 128 MiB, so that a seed can go over it in seconds.
+# The proxy also copies its log to a file the orchestrator can read, so that a
+# test can see what the proxy decided; the workflow makes the folder, owned by
+# the proxy's user, 10001.
+
+services:
+  proxy:
+    entrypoint:
+      - sh
+      - -c
+      - 'footfall "$$@" 2>&1 | tee -a /var/lib/footfall-test/proxy.log'
+      - sh
+    volumes:
+      - /var/lib/footfall/test-logs:/var/lib/footfall-test
+
+  runner:
+    environment:
+      FOOTFALL_DISK_BUDGET_MIB: "128"
+
+  orchestrator:
+    image: footfall:test
+    environment:
+      - FOOTFALL_ISOLATION=1
+      - FOOTFALL_TEST_HOST_ADDRESSES=${FOOTFALL_TEST_HOST_ADDRESSES:-}
+      - FOOTFALL_TEST_HOST_PORT=${FOOTFALL_TEST_HOST_PORT:-}

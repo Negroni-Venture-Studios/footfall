@@ -17,14 +17,30 @@ def test_all_four_dockerfiles_exist() -> None:
     assert {path.parent.name for path in DOCKERFILES} == IMAGES
 
 
+def from_images(text: str) -> list[str]:
+    """The images a Dockerfile's FROM lines start from, leaving out its own earlier stages."""
+    images: list[str] = []
+    stages: set[str] = set()
+    for line in text.splitlines():
+        parts = line.split()
+        if parts and parts[0].upper() == "FROM":
+            words = [p for p in parts[1:] if not p.startswith("--")]
+            if words[0] not in stages:
+                images.append(words[0])
+            if len(words) == 3 and words[1].upper() == "AS":
+                stages.add(words[2])
+    return images
+
+
+def test_a_stage_named_before_is_not_an_image() -> None:
+    text = "FROM a:1@sha256:x AS base\nFROM base AS test\nFROM base\nFROM test\nFROM other"
+    assert from_images(text) == ["a:1@sha256:x", "other"]
+
+
 def test_every_from_is_pinned_by_digest() -> None:
-    froms = []
-    for path in DOCKERFILES:
-        for line in path.read_text().splitlines():
-            parts = line.split()
-            if parts and parts[0].upper() == "FROM":
-                image = next(p for p in parts[1:] if not p.startswith("--"))
-                froms.append((path.parent.name, image))
+    froms = [
+        (path.parent.name, image) for path in DOCKERFILES for image in from_images(path.read_text())
+    ]
     assert froms
     unpinned = [(name, image) for name, image in froms if not DIGEST.search(image)]
     assert unpinned == []
@@ -40,6 +56,19 @@ def test_runtime_images_run_as_10010(name: str) -> None:
     assert "/usr/sbin/nologin" in text
     assert re.search(r"^USER 10010:10010$", text, re.MULTILINE)
     assert re.search(r"^WORKDIR /workspace$", text, re.MULTILINE)
+
+
+def test_footfall_images_test_stage_is_built_only_when_asked_for() -> None:
+    text = (ROOT / "images" / "footfall" / "Dockerfile").read_text()
+    stages = re.findall(r"^FROM (\S+)(?: AS (\S+))?$", text, re.MULTILINE)
+    # A build without --target builds the last stage, which must be the runtime image.
+    assert stages[-1] == ("runtime", "")
+    assert ("runtime", "test") in stages
+    test = text.split("FROM runtime AS test", 1)[1].split("\nFROM ", 1)[0]
+    assert "COPY tests ./tests" in test
+    assert re.search(r"^RUN uv sync --locked \\$", test, re.MULTILINE)
+    instructions = [line for line in test.splitlines() if line and not line.startswith("#")]
+    assert instructions[-1] == "USER footfall"
 
 
 def test_footfall_image_runs_as_10001() -> None:
