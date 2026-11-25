@@ -934,7 +934,8 @@ async def test_folder(
     browser; by default it connects to the run's browser container. Writes the results into
     `out` and prints a table of them. The runner is asked to stop the run however this ends.
     Raises ManifestError, PersonaError, ModelSpecError, OutputError, NotReadyError,
-    RunnerError or BrowserConnectError when the run cannot go ahead.
+    RunnerError, BrowserConnectError, or MaskError when a secret could not be masked in a
+    GitHub Actions log, when the run cannot go ahead.
     """
     manifest = load_manifest(folder)
     brief = load_brief(folder, manifest, brief_name)

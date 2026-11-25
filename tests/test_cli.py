@@ -13,6 +13,7 @@ import pytest
 
 import footfall.__main__ as cli
 from footfall.__main__ import ALL_FILES_WARNING, RUNC_WARNING, Settings, main
+from footfall.actions import MaskError
 from footfall.local import NotReadyError
 from footfall.manifest import ManifestError
 from footfall.proxy.control import ProxyControlClient
@@ -223,6 +224,7 @@ def test_the_exit_code_says_whether_a_persona_failed(monkeypatch: pytest.MonkeyP
         ManifestError(["app.port: is required"]),
         RunnerError("seed failed with exit code 1", "Traceback\n\x1b[2JValueError: bad seed"),
         NotReadyError("the copy of the app for grace did not answer /", "Listening\nCrashed"),
+        MaskError("the mask for a secret Footfall made could not be written"),
     ],
 )
 def test_a_run_that_cannot_go_ahead_says_why(

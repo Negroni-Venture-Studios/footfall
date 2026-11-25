@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from footfall.actions import MaskError
 from footfall.browsers import BrowserConnectError
 from footfall.local import PROXY_PORT, LocalRunError, test_folder
 from footfall.manifest import ManifestError
@@ -244,7 +245,14 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
             tail = clean_text(error.log_tail, _LOG_TAIL_CAP)
             print(f"The app's last output:\n{tail}", file=sys.stderr)
         return 1
-    except (ManifestError, PersonaError, ModelSpecError, BrowserConnectError, OSError) as error:
+    except (
+        ManifestError,
+        PersonaError,
+        ModelSpecError,
+        BrowserConnectError,
+        MaskError,
+        OSError,
+    ) as error:
         say(str(error))
         return 1
     print(f"The results are in {args.out}.")

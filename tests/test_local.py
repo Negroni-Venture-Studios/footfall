@@ -26,6 +26,7 @@ import pytest
 from playwright.async_api import Browser, async_playwright
 
 from footfall import local
+from footfall.actions import MaskError
 from footfall.browsers import BrowserConnectError, open_context
 from footfall.local import (
     LocalRunError,
@@ -1761,3 +1762,28 @@ def test_files_linked_to_each_other_in_the_worktree_are_copied(tmp_path: Path) -
         linked=listing.linked,
     )
     assert (tmp_path / "copy" / "serve-again.py").read_text() == "print('not run in these tests')\n"
+
+
+async def test_a_mask_that_cannot_be_written_stops_the_run_before_the_browsers_are_used(
+    tmp_path: Path, app_server: AppServer
+) -> None:
+    """The browsers' path must not be used unmasked: a MaskError when it arrives stops the
+    run, and the run is still stopped."""
+    serve_two_pages(app_server)
+    folder = two_pages(tmp_path)
+    connected: list[str] = []
+
+    class MaskFails(FakeRunner):
+        async def start_browsers(self, run_id: str, assets: Sequence[str]) -> str:
+            await super().start_browsers(run_id, assets)
+            raise MaskError("the mask for a secret Footfall made could not be written")
+
+    async def never(engine: str, endpoint: str) -> Browser:
+        connected.append(endpoint)
+        raise AssertionError("the browsers were used")
+
+    runner = MaskFails(lambda copy: f"127.0.0.1:{app_server.port}")
+    with pytest.raises(MaskError):
+        await run_folder(folder, runner, never, tmp_path)
+    assert connected == []
+    assert runner.ops()[-1] == "stop"
