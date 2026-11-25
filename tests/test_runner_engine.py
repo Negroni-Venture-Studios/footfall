@@ -124,6 +124,9 @@ def test_create_network_is_internal(docker: tuple[FakeDocker, DockerEngine]) -> 
         "Internal": True,
         "Labels": {"footfall.run": "r_x"},
         "CheckDuplicate": True,
+        # Without this the host takes the network's first address on its bridge, and every
+        # container on the network can reach whatever the host serves there, its SSH too.
+        "Options": {"com.docker.network.bridge.inhibit_ipv4": "true"},
     }
 
 
@@ -152,6 +155,25 @@ def test_disconnect_missing_is_success(docker: tuple[FakeDocker, DockerEngine]) 
     fake, engine = docker
     fake.on("POST", "/networks/n1/disconnect", json_reply(404, {"message": "no such network"}))
     engine.disconnect("n1", "c1")
+
+
+@pytest.mark.parametrize("network", ["the network", "network"])
+def test_disconnect_not_connected_is_success(
+    docker: tuple[FakeDocker, DockerEngine], network: str
+) -> None:
+    # What dockerd 28 answers, forced or not, for a container already off the network, and
+    # for a network that has gone (recorded by the isolation workflow).
+    fake, engine = docker
+    message = f"container 0a1b is not connected to {network} footfall-r_x"
+    fake.on("POST", "/networks/n1/disconnect", json_reply(500, {"message": message}))
+    engine.disconnect("n1", "c1")
+
+
+def test_disconnect_other_server_errors_raise(docker: tuple[FakeDocker, DockerEngine]) -> None:
+    fake, engine = docker
+    fake.on("POST", "/networks/n1/disconnect", json_reply(500, {"message": "the disk is full"}))
+    with pytest.raises(EngineError, match="the disk is full"):
+        engine.disconnect("n1", "c1")
 
 
 def test_remove_network(docker: tuple[FakeDocker, DockerEngine]) -> None:

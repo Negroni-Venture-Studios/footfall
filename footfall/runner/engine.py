@@ -9,6 +9,7 @@ which is simple and fast enough for the handful of calls a run makes.
 import contextlib
 import http.client
 import json
+import re
 import socket
 from collections.abc import Mapping
 from pathlib import Path
@@ -18,6 +19,9 @@ from urllib.parse import quote, urlencode
 DEFAULT_SOCKET: Final = Path("/var/run/docker.sock")
 _TIMEOUT: Final = 30.0
 _FRAME_HEADER: Final = 8
+# Leaves the host's side of a network's bridge without an address.
+_NO_HOST_ADDRESS: Final = "com.docker.network.bridge.inhibit_ipv4"
+_NOT_CONNECTED: Final = re.compile(r"^container \S+ is not connected to (?:the )?network \S+$")
 
 
 class EngineError(RuntimeError):
@@ -174,11 +178,21 @@ class DockerEngine:
         self._request("DELETE", f"/containers/{_seg(container)}?force=1", ok=frozenset({404}))
 
     def create_network(self, name: str, labels: Mapping[str, str]) -> None:
-        """Create an internal network (no route out); an existing one of that name is an error."""
+        """Create an internal network (no route out); an existing one of that name is an error.
+
+        The host's bridge for it has no address, so a container on it cannot reach the host,
+        and with it whatever the host serves on every address, as Docker otherwise allows.
+        """
         self._request(
             "POST",
             "/networks/create",
-            {"Name": name, "Internal": True, "Labels": dict(labels), "CheckDuplicate": True},
+            {
+                "Name": name,
+                "Internal": True,
+                "Labels": dict(labels),
+                "CheckDuplicate": True,
+                "Options": {_NO_HOST_ADDRESS: "true"},
+            },
         )
 
     def connect(self, network: str, container: str) -> None:
@@ -186,13 +200,19 @@ class DockerEngine:
         self._request("POST", f"/networks/{_seg(network)}/connect", {"Container": container})
 
     def disconnect(self, network: str, container: str) -> None:
-        """Detach a container from a network; one already detached or gone counts as done."""
-        self._request(
+        """Detach a container from a network; one already detached or gone counts as done.
+
+        dockerd answers 500 for a container that is not on the network, and for a network
+        that has gone, so that answer counts as done too, by its message alone.
+        """
+        status, data = self._request(
             "POST",
             f"/networks/{_seg(network)}/disconnect",
             {"Container": container, "Force": True},
-            ok=frozenset({404}),
+            ok=frozenset({404, 500}),
         )
+        if status == 500 and not _NOT_CONNECTED.search(_message(data)):
+            raise EngineError(f"POST /networks/{network}/disconnect failed (500): {_message(data)}")
 
     def remove_network(self, name: str) -> None:
         """Remove a network; one that is already gone counts as removed."""
