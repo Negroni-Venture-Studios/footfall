@@ -239,13 +239,20 @@ class _Linked:
     """The files in the repository's git folders that have more than one name.
 
     A hostile archive, once extracted, can leave a hard link in the worktree to any file in
-    the git folder: the repository's configuration, a submodule's in `modules/`, or another
-    worktree's in `worktrees/`, each of which can hold a token. Walking the git folders is
-    costly, so they are walked only when a file to copy has another name too, and then once.
+    the git folder: the repository's configuration, a submodule's in `modules/`, another
+    worktree's in `worktrees/`, or, for a submodule, its superproject's, each of which can
+    hold a token. Walking the git folders is costly, so they are walked only when a file to
+    copy has another name too, and then once, each folder once: a folder that lies inside
+    another, as a linked worktree's lies in the common one, is walked with it. The walk
+    fails closed: a folder in it that cannot be read refuses the copy.
     """
 
     def __init__(self, folders: Sequence[Path] = ()) -> None:
-        self._folders = tuple(folders)
+        tops: list[Path] = []
+        for folder in sorted({Path(os.path.realpath(f)) for f in folders}, key=lambda p: p.parts):
+            if not any(folder.is_relative_to(top) for top in tops):
+                tops.append(folder)
+        self._folders = tuple(tops)
         self._found: frozenset[_Identity] | None = None
 
     def holds(self, info: os.stat_result) -> bool:
@@ -257,14 +264,24 @@ class _Linked:
         return (info.st_dev, info.st_ino) in self._found
 
     def _collect(self) -> frozenset[_Identity]:
+        def unreadable(error: OSError) -> None:
+            why = error.strerror or type(error).__name__
+            raise LocalRunError(
+                f"a file to copy has another name, and {_shown(error.filename)}, in the "
+                f"repository's git folder, could not be read to check that the other name is "
+                f"not there ({why}); {_GIT_ADVICE}"
+            )
+
         found: set[_Identity] = set()
         for top in self._folders:
-            for path, _, files in os.walk(top):  # never into a link
+            for path, _, files in os.walk(top, onerror=unreadable):  # never into a link
                 for name in files:
                     try:
                         info = (Path(path) / name).lstat()
-                    except OSError:
-                        continue
+                    except FileNotFoundError:
+                        continue  # gone since the folder was read, as git tidies up
+                    except OSError as error:
+                        unreadable(error)
                     if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
                         found.add((info.st_dev, info.st_ino))
         return frozenset(found)
@@ -367,6 +384,13 @@ def _git_folder_paths(git: str, folder: Path) -> list[Path]:
     return paths
 
 
+def _superproject_git_folders(git: str, folder: Path) -> list[Path]:
+    """When `folder` is in a submodule, its superproject's git folders; otherwise none."""
+    where = _run_git(git, folder, ["rev-parse", "--show-superproject-working-tree"])
+    superproject = os.fsdecode(where.removesuffix(b"\n"))
+    return _git_folder_paths(git, Path(superproject)) if superproject else []
+
+
 def _git_folders(
     git: str, folder: Path, paths: Sequence[Path] | None = None
 ) -> frozenset[_Identity]:
@@ -415,7 +439,7 @@ def _git_files(folder: Path) -> _Listing:
         sorted(tracked | untracked),
         _git_folders(git, folder, paths),
         frozenset(untracked),
-        _Linked(paths),
+        _Linked([*paths, *_superproject_git_folders(git, folder)]),
     )
 
 
@@ -431,7 +455,8 @@ def _known_linked(folder: Path) -> _Linked:
     """The linked files of the git folders of the repository `folder` is in, or none when
     git cannot say."""
     try:
-        return _Linked(_git_folder_paths(_git(), folder))
+        git = _git()
+        return _Linked([*_git_folder_paths(git, folder), *_superproject_git_folders(git, folder)])
     except LocalRunError:
         return _Linked()
 

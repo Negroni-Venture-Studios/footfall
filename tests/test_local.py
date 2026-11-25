@@ -1207,7 +1207,10 @@ def test_git_runs_with_a_bare_environment_and_no_input(
     monkeypatch.setattr(subprocess, "run", run)
     listing = local._git_files(folder)
     assert PurePosixPath("footfall.toml") in listing.names
-    assert len(calls) == 4  # ls-files twice, then rev-parse for the git folder and the common one
+    # ls-files twice, then rev-parse for the git folder, the common one and a superproject,
+    # each run the same safe way.
+    assert len(calls) == 5
+    assert "--show-superproject-working-tree" in calls[-1][0]
     allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL"}
     for command, options in calls:
         assert not any("safe.directory" in part for part in command)
@@ -1787,3 +1790,141 @@ async def test_a_mask_that_cannot_be_written_stops_the_run_before_the_browsers_a
         await run_folder(folder, runner, never, tmp_path)
     assert connected == []
     assert runner.ops()[-1] == "stop"
+
+
+def commit_all(folder: Path) -> None:
+    git(folder, "add", "-A")
+    git(
+        folder,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "x",
+    )
+
+
+def walked(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every folder the linked-file walk starts from."""
+    tops: list[str] = []
+    real_walk = os.walk
+
+    def recording(top: Any, *args: Any, **kwargs: Any) -> Any:
+        tops.append(str(top))
+        return real_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr(os, "walk", recording)
+    return tops
+
+
+def test_the_git_folder_is_walked_once_for_linked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repository's own git folder is its common folder too; walk it once."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    os.link(folder / "serve.py", folder / "serve-again.py")
+    tops = walked(monkeypatch)
+    listing = local._git_files(folder)
+    assert not listing.linked.holds((folder / "serve-again.py").lstat())
+    assert tops == [str((folder / ".git").resolve())]
+
+
+def test_a_worktrees_git_folder_inside_the_common_one_is_not_walked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main"
+    app_files(main)
+    git(main, "init", "-q")
+    commit_all(main)
+    git(main, "worktree", "add", "-q", str(tmp_path / "other"))
+    other = tmp_path / "other"
+    os.link(other / "serve.py", other / "serve-again.py")
+    tops = walked(monkeypatch)
+    listing = local._git_files(other)
+    assert not listing.linked.holds((other / "serve-again.py").lstat())
+    assert tops == [str((main / ".git").resolve())]
+
+
+def test_a_git_folder_that_cannot_be_read_refuses_the_copy_of_a_linked_file(
+    tmp_path: Path,
+) -> None:
+    """The walk fails closed: a folder it cannot read might hold the file's other name."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    locked = folder / ".git" / "modules"
+    locked.mkdir()
+    os.link(folder / "serve.py", folder / "serve-again.py")
+    listing = local._git_files(folder)
+    locked.chmod(0)
+    try:
+        with pytest.raises(LocalRunError, match="could not be read"):
+            local._copy_files(
+                folder,
+                tmp_path / "copy",
+                listing.names,
+                tmp_path / "out",
+                git_dirs=listing.git_dirs,
+                untracked=listing.untracked,
+                linked=listing.linked,
+            )
+    finally:
+        locked.chmod(0o755)
+
+
+def test_a_file_with_one_name_needs_no_walk_however_unreadable_the_git_folder(
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    locked = folder / ".git" / "modules"
+    locked.mkdir()
+    listing = local._git_files(folder)
+    locked.chmod(0)
+    try:
+        local._copy_files(
+            folder,
+            tmp_path / "copy",
+            listing.names,
+            tmp_path / "out",
+            git_dirs=listing.git_dirs,
+            untracked=listing.untracked,
+            linked=listing.linked,
+        )
+    finally:
+        locked.chmod(0o755)
+    assert (tmp_path / "copy" / "serve.py").exists()
+
+
+def test_a_link_to_the_superprojects_git_configuration_is_refused(tmp_path: Path) -> None:
+    """Testing a submodule's folder, a hard link to the superproject's configuration, whose
+    remote can hold a token, is refused like one to the submodule's own."""
+    source = tmp_path / "library"
+    app_files(source)
+    git(source, "init", "-q")
+    commit_all(source)
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    git(outer, "init", "-q")
+    (outer / "README.md").write_text("outer\n")
+    commit_all(outer)
+    git(outer, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(source), "lib")
+    git(outer, "config", "remote.origin.url", TOKEN_URL)
+    folder = outer / "lib"
+    os.link(outer / ".git" / "config", folder / "notes.cfg")
+    listing = local._git_files(folder)
+    with pytest.raises(LocalRunError, match="git configuration"):
+        local._copy_files(
+            folder,
+            tmp_path / "copy",
+            listing.names,
+            tmp_path / "out",
+            git_dirs=listing.git_dirs,
+            untracked=listing.untracked,
+            linked=listing.linked,
+        )
