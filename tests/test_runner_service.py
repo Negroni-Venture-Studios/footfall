@@ -1872,7 +1872,8 @@ def test_no_failure_to_start_the_browsers_leads_back_to_their_path(
     h: Harness, monkeypatch: pytest.MonkeyPatch, names_it: str
 ) -> None:
     """Whatever kind of error it is, and wherever in its chain the path is, the runner raises
-    one of its own, apart from it, so neither its message nor a logged traceback holds it."""
+    one of its own, apart from it, so neither its message nor its chain holds the path. That
+    the log never holds it either is the test after next."""
     prepare(h)
     real_start = h.engine.start
 
