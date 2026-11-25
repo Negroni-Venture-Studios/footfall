@@ -1,10 +1,16 @@
 """Host-name rules and the public-address check."""
 
+import socket
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
 import pytest
 
 from footfall.hosts import (
     HostError,
     is_public_address,
+    pooled_resolver,
     resolve_public,
     system_resolver,
     validate_host_name,
@@ -156,6 +162,20 @@ async def test_system_resolver_resolves_localhost_locally() -> None:
     addresses = await system_resolver("localhost", 80)
     assert addresses
     assert all(not is_public_address(address) for address in addresses)
+
+
+async def test_pooled_resolver_looks_up_on_its_own_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads: list[str] = []
+
+    def lookup(host: str, port: int, *args: Any, **kwargs: Any) -> list[Any]:
+        threads.append(threading.current_thread().name)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", lookup)
+    with ThreadPoolExecutor(1, thread_name_prefix="own-pool") as pool:
+        assert await pooled_resolver(pool)("example.com", 443) == ["93.184.215.14"]
+    assert len(threads) == 1
+    assert threads[0].startswith("own-pool")
 
 
 async def test_resolve_public_refuses_localhost() -> None:

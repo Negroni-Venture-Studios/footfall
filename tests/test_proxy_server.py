@@ -9,8 +9,11 @@ import asyncio
 import contextlib
 import functools
 import logging
+import socket
+import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections import Counter
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -120,7 +123,11 @@ type Resolve = Callable[[str, int], Awaitable[str]]
 
 
 @contextlib.asynccontextmanager
-async def running(resolve: Resolve | None = None, **settings: Any) -> AsyncIterator[Live]:
+async def running(
+    resolve: Resolve | None = None, *, real_resolve: bool = False, **settings: Any
+) -> AsyncIterator[Live]:
+    """A proxy on loopback. With `real_resolve` it keeps its own resolver, so that a test can
+    stub `socket.getaddrinfo` under it."""
     upstream = Upstream()
     upstream_server = await asyncio.start_server(upstream.handle, "127.0.0.1", 0)
     upstream_port = upstream_server.sockets[0].getsockname()[1]
@@ -141,7 +148,10 @@ async def running(resolve: Resolve | None = None, **settings: Any) -> AsyncItera
 
     policy = Policy()
     settings.setdefault("open_upstream", open_upstream)
-    proxy = ProxyServer(policy, resolve or fake_resolve, **settings)
+    if real_resolve:
+        proxy = ProxyServer(policy, **settings)
+    else:
+        proxy = ProxyServer(policy, resolve or fake_resolve, **settings)
     server = await proxy.start("127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     try:
@@ -154,6 +164,7 @@ async def running(resolve: Resolve | None = None, **settings: Any) -> AsyncItera
                 await asyncio.sleep(0.01)
             await server.wait_closed()
             await upstream_server.wait_closed()
+        await proxy.close()
 
 
 @pytest.fixture
@@ -1103,11 +1114,172 @@ async def test_connections_in_all_are_capped() -> None:
         {"max_per_client": 0},
         {"port": -1},
         {"port": 65536},
+        {"max_lookups_per_client": 0},
+        {"max_lookups_per_run": 0},
+        {"lookup_threads": 0},
     ],
 )
 def test_bad_settings_refused(settings: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match=r"."):
         ProxyServer(Policy(), **settings)
+
+
+# ---------------------------------------------------------------- name lookups (F-04)
+
+OTHER_RUN = "r_" + "q" * 26
+SECOND = "::1"  # a second client address on loopback, so that two clients can be told apart
+
+
+class Lookups:
+    """Stands in for `socket.getaddrinfo` under the proxy's own resolver.
+
+    A name that starts with `slow` blocks its thread until `released` is set, as a lookup
+    whose name server never answers does; every other name answers at once with a public
+    address. It counts the lookups of each name, and how many threads are blocked.
+    """
+
+    def __init__(self) -> None:
+        self.released = threading.Event()
+        self.calls: Counter[str] = Counter()
+        self.blocked = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, host: str, port: int, *args: Any, **kwargs: Any) -> list[Any]:
+        with self._lock:
+            self.calls[host] += 1
+        if host.startswith("slow"):
+            with self._lock:
+                self.blocked += 1
+            try:
+                self.released.wait(TIMEOUT)
+            finally:
+                with self._lock:
+                    self.blocked -= 1
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port))]
+
+    async def wait_blocked(self, count: int) -> None:
+        async with asyncio.timeout(TIMEOUT):
+            while self.blocked < count:
+                await asyncio.sleep(0.01)
+
+
+@pytest.fixture
+def lookups(monkeypatch: pytest.MonkeyPatch) -> Iterator[Lookups]:
+    stub = Lookups()
+    monkeypatch.setattr(socket, "getaddrinfo", stub)
+    try:
+        yield stub
+    finally:
+        stub.released.set()
+
+
+@contextlib.asynccontextmanager
+async def second_listener(live: Live) -> AsyncIterator[int]:
+    """The proxy listening on ::1 too; returns the port."""
+    server = await live.proxy.start(SECOND, 0)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+
+
+@contextlib.asynccontextmanager
+async def connecting(
+    host: str, port: int, authorities: list[str]
+) -> AsyncIterator[list[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]:
+    """Send a CONNECT for each authority, each on its own connection, without waiting."""
+    opened: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+    try:
+        for authority in authorities:
+            reader, writer = await asyncio.open_connection(host, port)
+            opened.append((reader, writer))
+            writer.write(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode())
+            await writer.drain()
+        yield opened
+    finally:
+        for _, writer in opened:
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+
+
+async def head(reader: asyncio.StreamReader, timeout: float = TIMEOUT) -> bytes:
+    async with asyncio.timeout(timeout):
+        return await reader.readuntil(b"\r\n\r\n")
+
+
+async def test_one_clients_slow_lookups_do_not_delay_another_clients(lookups: Lookups) -> None:
+    slow = [f"slow{n}.example.com" for n in range(40)]
+    async with running(real_resolve=True) as live, second_listener(live) as port:
+        live.policy.allow(CLIENT, RUN, slow)
+        live.policy.allow(SECOND, OTHER_RUN, [ALLOWED])
+        async with connecting(CLIENT, live.port, [f"{name}:443" for name in slow]):
+            await lookups.wait_blocked(4)
+            await asyncio.sleep(0.2)  # every lookup the first client could start has started
+            started = time.monotonic()
+            async with connecting(SECOND, port, [f"{ALLOWED}:443"]) as [(reader, _)]:
+                reply = await head(reader, timeout=2.0)
+            assert reply.startswith(b"HTTP/1.1 200")
+            assert time.monotonic() - started < 1.0
+            lookups.released.set()
+
+
+async def test_a_client_at_its_lookup_bound_is_refused(lookups: Lookups) -> None:
+    slow = ["slow0.example.com", "slow1.example.com", "slow2.example.com"]
+    async with running(real_resolve=True, max_lookups_per_client=2) as live:
+        live.policy.allow(CLIENT, RUN, slow)
+        async with connecting(CLIENT, live.port, [f"{slow[0]}:443", f"{slow[1]}:443"]) as held:
+            await lookups.wait_blocked(2)
+            async with connecting(CLIENT, live.port, [f"{slow[2]}:443"]) as [(reader, _)]:
+                reply = await head(reader)
+            assert reply.startswith(b"HTTP/1.1 503")
+            assert b"name lookups" in reply + await read_to_end(reader)
+            # A request for a name already being looked up joins that lookup instead.
+            async with connecting(CLIENT, live.port, [f"{slow[0]}:443"]) as [(joined, _)]:
+                await asyncio.sleep(0.1)
+                assert lookups.calls[slow[0]] == 1
+                lookups.released.set()
+                assert (await head(joined)).startswith(b"HTTP/1.1 200")
+            for reader, _ in held:
+                assert (await head(reader)).startswith(b"HTTP/1.1 200")
+        assert lookups.calls[slow[2]] == 0
+
+
+async def test_a_runs_lookups_are_bounded_across_its_clients(lookups: Lookups) -> None:
+    slow = [f"slow{n}.example.com" for n in range(4)]
+    settings: dict[str, Any] = {"max_lookups_per_client": 2, "max_lookups_per_run": 3}
+    async with running(real_resolve=True, **settings) as live, second_listener(live) as port:
+        live.policy.allow(CLIENT, RUN, slow)
+        live.policy.allow(SECOND, RUN, slow)
+        async with (
+            connecting(CLIENT, live.port, [f"{slow[0]}:443", f"{slow[1]}:443"]),
+            connecting(SECOND, port, [f"{slow[2]}:443"]),
+        ):
+            await lookups.wait_blocked(3)
+            async with connecting(SECOND, port, [f"{slow[3]}:443"]) as [(reader, _)]:
+                reply = await head(reader) + await read_to_end(reader)
+            assert reply.startswith(b"HTTP/1.1 503")
+            assert b"this run" in reply
+            lookups.released.set()
+
+
+async def test_an_abandoned_lookup_counts_until_its_thread_returns(lookups: Lookups) -> None:
+    settings: dict[str, Any] = {"max_lookups_per_client": 1, "idle_timeout": 0.3}
+    async with running(real_resolve=True, **settings) as live:
+        live.policy.allow(CLIENT, RUN, ["slow0.example.com", ALLOWED])
+        async with connecting(CLIENT, live.port, ["slow0.example.com:443"]) as [(reader, _)]:
+            reply = await head(reader)
+        assert reply.startswith(b"HTTP/1.1 504")  # the wait gave up; the thread did not
+        assert lookups.blocked == 1
+        async with connecting(CLIENT, live.port, [f"{ALLOWED}:443"]) as [(reader, _)]:
+            assert (await head(reader)).startswith(b"HTTP/1.1 503")
+        lookups.released.set()
+        async with asyncio.timeout(TIMEOUT):
+            while True:
+                async with connecting(CLIENT, live.port, [f"{ALLOWED}:443"]) as [(reader, _)]:
+                    if (await head(reader)).startswith(b"HTTP/1.1 200"):
+                        break
+                await asyncio.sleep(0.05)
 
 
 # ---------------------------------------------------------------- what was reached

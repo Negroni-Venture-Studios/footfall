@@ -30,6 +30,14 @@ connection idle for `idle_timeout` seconds in both directions is closed, and con
 capped in all and per client address. The proxy logs one line per decision, with the client's
 address, the run, the host, the port and the outcome. It never logs a path, a query string, a
 header value or a body.
+
+Names are looked up on a pool of threads the proxy owns, not on asyncio's, which the process
+shares. A lookup's thread cannot be stopped, and one whose name server is slow or silent holds
+it for as long as the system resolver waits, so a client's lookups in flight are bounded, and
+so are its run's. A lookup counts from before it is queued until its thread returns, even when
+the request that asked for it has given up waiting, and a request over a bound is refused with
+503. Requests from one client for a name already being looked up join that lookup, so that a
+burst of connections to one host costs one thread.
 """
 
 import asyncio
@@ -41,10 +49,11 @@ import logging
 import re
 import socket
 from collections.abc import Awaitable, Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Final
 
-from footfall.hosts import HostError, resolve_public, validate_host_name
+from footfall.hosts import HostError, pooled_resolver, resolve_public, validate_host_name
 from footfall.proxy.policy import (
     INVALID_HOST,
     Decision,
@@ -509,19 +518,36 @@ async def _open_upstream(
 # ---------------------------------------------------------------- the server
 
 
+def _add(counts: dict[str, int], key: str, change: int) -> None:
+    """Change a count, keeping only counts above zero."""
+    count = counts.get(key, 0) + change
+    if count > 0:
+        counts[key] = count
+    else:
+        counts.pop(key, None)
+
+
 class ProxyServer:
     """Serves the egress proxy for the allow lists held in `policy`.
 
     `resolve` turns a checked name into the one public address to connect to; it raises
-    HostError for a name that does not resolve to public addresses only. `open_upstream`
-    connects to an address and port. Tests replace both, so that they stay on loopback.
-    `port` is the port each run's listener opens, on the address `listen` is given.
+    HostError for a name that does not resolve to public addresses only. By default it is
+    `resolve_public` on the system resolver, run on a pool of `lookup_threads` threads that the
+    proxy owns. `open_upstream` connects to an address and port. Tests replace both, so that
+    they stay on loopback. `port` is the port each run's listener opens, on the address
+    `listen` is given.
+
+    The lookup bounds: a client may have `max_lookups_per_client` names being looked up at
+    once, and all of a run's clients `max_lookups_per_run`. An allow list names a few hosts,
+    and requests for a name already being looked up join that lookup, so 8 is well above what
+    an app or a browser loading a page needs. 16 per run leaves most of the pool of 64 to other
+    runs even when one run's every lookup is stuck; a thread blocked in a lookup costs little.
     """
 
     def __init__(
         self,
         policy: Policy,
-        resolve: Resolve = resolve_public,
+        resolve: Resolve | None = None,
         *,
         port: int = DEFAULT_PORT,
         idle_timeout: float = 60.0,
@@ -529,6 +555,9 @@ class ProxyServer:
         unknown_poll: float = 0.1,
         max_connections: int = 512,
         max_per_client: int = 128,
+        max_lookups_per_client: int = 8,
+        max_lookups_per_run: int = 16,
+        lookup_threads: int = 64,
         open_upstream: Opener = _open_upstream,
     ) -> None:
         if idle_timeout <= 0 or unknown_poll <= 0 or unknown_wait < 0:
@@ -537,13 +566,27 @@ class ProxyServer:
             )
         if max_connections < 1 or max_per_client < 1:
             raise ValueError("max_connections and max_per_client must be at least 1")
+        if max_lookups_per_client < 1 or max_lookups_per_run < 1 or lookup_threads < 1:
+            raise ValueError("the lookup bounds and lookup_threads must be at least 1")
         if not 0 <= port <= 65535:
             raise ValueError("port must be from 0 to 65535")
         self._policy = policy
         self._port = port
         self._listeners: dict[str, tuple[str, asyncio.Server]] = {}  # address -> run, server
         self._listening = asyncio.Lock()
+        self._lookup_pool: ThreadPoolExecutor | None = None
+        if resolve is None:
+            self._lookup_pool = ThreadPoolExecutor(
+                lookup_threads, thread_name_prefix="footfall-lookup"
+            )
+            resolve = functools.partial(resolve_public, resolver=pooled_resolver(self._lookup_pool))
         self._resolve = resolve
+        self._max_lookups_per_client = max_lookups_per_client
+        self._max_lookups_per_run = max_lookups_per_run
+        # Lookups in flight, by client, name and port, and how many each client and run holds.
+        self._lookups: dict[tuple[str, str, int], asyncio.Task[str]] = {}
+        self._lookups_by_client: dict[str, int] = {}
+        self._lookups_by_run: dict[str, int] = {}
         self._idle = idle_timeout
         self._unknown_wait = unknown_wait
         self._unknown_poll = unknown_poll
@@ -623,6 +666,9 @@ class ProxyServer:
             for _, server in self._listeners.values():
                 server.close()
             self._listeners.clear()
+        if self._lookup_pool is not None:
+            # Threads blocked in a lookup cannot be stopped; they end when the resolver gives up.
+            self._lookup_pool.shutdown(wait=False, cancel_futures=True)
 
     # ------------------------------------------------------------ connections
 
@@ -692,7 +738,7 @@ class ProxyServer:
             run_id = decision.run_id
             if not decision.allowed or run_id is None:
                 raise _Refusal(403, decision.reason)
-            address = await self._resolved(request.host, request.port)
+            address = await self._resolved(client, run_id, request.host, request.port)
         except _Refusal as refusal:
             _log(client, run_id, host, port, f"refused ({refusal.status}): {refusal.reason}")
             writer.write(_response(refusal.status, refusal.reason))
@@ -715,14 +761,48 @@ class ProxyServer:
             decision = self._policy.decide(client, host, port)
         return decision
 
-    async def _resolved(self, host: str, port: int) -> str:
+    async def _resolved(self, client: str, run_id: str, host: str, port: int) -> str:
+        lookup = self._lookup(client, run_id, host, port)
         try:
             async with asyncio.timeout(self._idle):
-                return await self._resolve(host, port)
+                # Shielded, so that giving up the wait leaves the lookup counted until it ends.
+                return await asyncio.shield(lookup)
         except HostError:
             raise _Refusal(403, f"{host} does not resolve to public addresses only") from None
         except TimeoutError:
             raise _Refusal(504, f"{host} did not resolve in time") from None
+
+    def _lookup(self, client: str, run_id: str, host: str, port: int) -> asyncio.Task[str]:
+        """The client's lookup of `host` in flight, or a new one if the bounds allow it.
+
+        A new lookup is counted against the client and its run before it is queued, and the
+        count is given back only when the lookup ends, which for the system resolver is when its
+        thread returns.
+        """
+        key = (client, host, port)
+        lookup = self._lookups.get(key)
+        if lookup is not None:
+            return lookup
+        if self._lookups_by_client.get(client, 0) >= self._max_lookups_per_client:
+            raise _Refusal(503, "too many name lookups in flight for this client")
+        if self._lookups_by_run.get(run_id, 0) >= self._max_lookups_per_run:
+            raise _Refusal(503, "too many name lookups in flight for this run")
+        _add(self._lookups_by_client, client, 1)
+        _add(self._lookups_by_run, run_id, 1)
+        lookup = asyncio.create_task(self._look_up(host, port))
+        self._lookups[key] = lookup
+        lookup.add_done_callback(functools.partial(self._looked_up, key, run_id))
+        return lookup
+
+    async def _look_up(self, host: str, port: int) -> str:
+        return await self._resolve(host, port)
+
+    def _looked_up(self, key: tuple[str, str, int], run_id: str, lookup: asyncio.Task[str]) -> None:
+        del self._lookups[key]
+        _add(self._lookups_by_client, key[0], -1)
+        _add(self._lookups_by_run, run_id, -1)
+        if not lookup.cancelled():
+            lookup.exception()  # retrieved here, as every waiter may have given up
 
     async def _connect(
         self, client: str, host: str, address: str, port: int

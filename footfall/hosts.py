@@ -6,15 +6,18 @@ metadata service or a private network.
 """
 
 import asyncio
+import functools
 import ipaddress
 import re
 import socket
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Executor
 
 __all__ = [
     "HostError",
     "Resolver",
     "is_public_address",
+    "pooled_resolver",
     "resolve_public",
     "system_resolver",
     "validate_host_name",
@@ -128,6 +131,19 @@ async def system_resolver(host: str, port: int) -> list[str]:
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     return [str(info[4][0]) for info in infos]
+
+
+def pooled_resolver(executor: Executor) -> Resolver:
+    """The system resolver, with each lookup's blocking call on `executor` rather than on
+    asyncio's pool, which the whole process shares."""
+
+    async def resolve(host: str, port: int) -> list[str]:
+        loop = asyncio.get_running_loop()
+        lookup = functools.partial(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
+        infos = await loop.run_in_executor(executor, lookup)
+        return [str(info[4][0]) for info in infos]
+
+    return resolve
 
 
 async def resolve_public(host: str, port: int, resolver: Resolver = system_resolver) -> str:
