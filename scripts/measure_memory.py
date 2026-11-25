@@ -46,6 +46,8 @@ _SERVICES: Final = {
     "footfall-runner": "runner",
     "footfall-orchestrator": "orchestrator",
 }
+# What the services' kernel peaks cover: they have been up since the stack started.
+_WHOLE_LIFE: Final = "the stack's whole life"
 _RUN_CONTAINER: Final = re.compile(
     r"footfall-r_[a-z2-7]{26}-(install|seed|app|browsers)-[a-z][a-z0-9-]{0,31}"
 )
@@ -132,17 +134,16 @@ class Peaks:
                 "peak_all_mib": _mib(self._all.get(role, 0)),
                 "kernel_peak_one_mib": _mib(max(kernel)) if kernel else None,
                 "kernel_peak_sum_mib": _mib(sum(kernel)) if kernel else None,
-                # The services have been up since the stack started, a run's containers
-                # only for the run.
-                "kernel_peak_covers": (
-                    "since the stack started" if role in _SERVICES.values() else "the run"
-                ),
+                "kernel_peak_covers": _covers([role]) if kernel else None,
             }
+        peaked = {found for name in self._kernel if (found := role_of(name)) is not None}
         return {
             "samples": self.samples,
             "roles": roles,
             "peak_total_mib": _mib(self._total),
             "kernel_peak_sum_mib": _mib(sum(self._kernel.values())),
+            # The sum takes in every container's peak, the services' too when they were read.
+            "kernel_peak_sum_covers": _covers(peaked) if peaked else None,
         }
 
     def markdown(self) -> str:
@@ -175,7 +176,7 @@ class Peaks:
             f"{report['kernel_peak_sum_mib']} MiB.",
             "",
         ]
-        if any(role in report["roles"] for role in _SERVICES.values()):
+        if report["kernel_peak_sum_covers"] == _WHOLE_LIFE:
             rows += [
                 "The proxy, runner and orchestrator have been up since the stack started, so "
                 "their kernel peaks cover all they did since then, not only this run: an upper "
@@ -183,6 +184,12 @@ class Peaks:
                 "",
             ]
         return "\n".join(rows)
+
+
+def _covers(roles: Iterable[str]) -> str:
+    """What the kernel peaks of these roles cover: the services have been up since the stack
+    started, and a run's own containers only for the run."""
+    return _WHOLE_LIFE if any(role in _SERVICES.values() for role in roles) else "the run"
 
 
 CGROUP_ROOTS: Final = (Path("/sys/fs/cgroup/system.slice"), Path("/sys/fs/cgroup/docker"))

@@ -88,7 +88,7 @@ def test_peaks_keep_the_largest_container_and_the_largest_total_of_each_role() -
         "peak_all_mib": 170.0,
         "kernel_peak_one_mib": None,
         "kernel_peak_sum_mib": None,
-        "kernel_peak_covers": "the run",
+        "kernel_peak_covers": None,  # no kernel peak was read, so it covers nothing
     }
     assert report["roles"]["proxy"]["peak_one_mib"] == 40.0
     assert "unrelated" not in json.dumps(report)
@@ -115,6 +115,7 @@ def test_the_kernels_own_peak_outranks_any_sample() -> None:
     assert report["roles"]["seed"]["containers"] == 1
     assert report["roles"]["seed"]["kernel_peak_one_mib"] == 45.0
     assert report["kernel_peak_sum_mib"] == 225.0
+    assert report["kernel_peak_sum_covers"] == "the run"
     assert "| seed | 1 | 0.0 | 0.0 | 45.0 | 45.0 |" in peaks.markdown()
 
 
@@ -149,6 +150,7 @@ def test_no_samples_say_so() -> None:
         "roles": {},
         "peak_total_mib": 0.0,
         "kernel_peak_sum_mib": 0.0,
+        "kernel_peak_sum_covers": None,
     }
     assert "No container was sampled" in peaks.markdown()
 
@@ -170,7 +172,21 @@ def test_the_json_says_what_each_roles_kernel_peak_covers() -> None:
     for name in ("footfall-proxy", "footfall-runner", "footfall-orchestrator"):
         peaks.note_peak(name, 90 * 1024**2)
     peaks.note_peak(f"footfall-{RUN}-app-sven", 50 * 1024**2)
-    roles = peaks.to_json()["roles"]
+    report = peaks.to_json()
+    roles = report["roles"]
     for role in ("proxy", "runner", "orchestrator"):
-        assert roles[role]["kernel_peak_covers"] == "since the stack started"
+        assert roles[role]["kernel_peak_covers"] == "the stack's whole life"
     assert roles["app"]["kernel_peak_covers"] == "the run"
+    # The sum over every container takes in the services' too, and says so.
+    assert report["kernel_peak_sum_covers"] == "the stack's whole life"
+
+
+def test_a_service_sampled_but_never_peaked_adds_no_caveat() -> None:
+    """The table's note and the JSON come from the same field, so they cannot disagree."""
+    peaks = measure.Peaks()
+    peaks.add([("footfall-proxy", 40 * 1024**2)])  # sampled; its cgroup peak never read
+    peaks.note_peak(f"footfall-{RUN}-app-sven", 50 * 1024**2)
+    report = peaks.to_json()
+    assert report["roles"]["proxy"]["kernel_peak_covers"] is None
+    assert report["kernel_peak_sum_covers"] == "the run"
+    assert "not only this run" not in peaks.markdown()
