@@ -270,8 +270,16 @@ async def test_chromium_loads_an_allowed_https_asset_through_the_proxy(
 
 
 def _gate_verdict(answer: dict[str, Any]) -> str:
-    """ "404" for the gate's own empty 404, "closed" for no answer, "other" for anything else."""
-    if answer.get("bytes") == 0 or "error" in answer:
+    """ "404" for the gate's own empty 404, closed after it; "closed" for a close by the peer
+    with no bytes; "upgraded" for any 101; "held" for a connection the peer kept open without
+    one; "error" when the probe could not ask; "other" for anything else (audit F-14)."""
+    if "error" in answer:
+        return "error"
+    if answer.get("status_line", "").split(" ")[1:2] == ["101"]:
+        return "upgraded"
+    if answer.get("held"):
+        return "held"
+    if answer.get("bytes") == 0:
         return "closed"
     empty = answer.get("body_bytes") == 0 and "Content-Length: 0" in answer.get("head", "")
     if answer.get("status_line") == "HTTP/1.1 404 Not Found" and empty:
@@ -290,6 +298,12 @@ async def test_the_gate_shows_an_app_container_nothing(browsers: Browsers) -> No
     # The gate's own empty 404, so the probe does read what comes back.
     assert (verdicts["json"], verdicts["root"]) == ("404", "404"), verdicts
     assert set(verdicts.values()) <= {"404", "closed"}, verdicts
+    # The control: the same check sees an upgrade that is accepted and held as just that.
+    upgrader, _ = await run.serve("upgrader", "upgrade", 8001)
+    accepted = await run.probe("upgrade-control", "raw", upgrader)
+    assert {_gate_verdict(answer) for answer in accepted.values()} == {"upgraded"}, {
+        name: _gate_verdict(answer) for name, answer in accepted.items()
+    }
     everything = json.dumps([answers, scan])
     named = "wsEndpoint" in everything
     leaked = browsers.endpoint.rpartition("/")[2] in everything  # the secret path

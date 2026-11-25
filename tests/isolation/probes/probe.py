@@ -489,13 +489,21 @@ def check_raw(arguments: Sequence[str]) -> dict[str, Any]:
     }
     results: dict[str, Any] = {}
     for name, request in requests.items():
+        # What was read is kept when the peer holds the connection open, as a server that
+        # accepted an upgrade does, and that it held it is said, so the two are never mixed
+        # up with a refusal.
+        answer = b""
+        held = False
         try:
             with socket.create_connection((host, int(port)), timeout=10) as stream:
                 stream.settimeout(10)
                 stream.sendall(request)
-                answer = b""
                 while len(answer) < 65536:
-                    chunk = stream.recv(4096)
+                    try:
+                        chunk = stream.recv(4096)
+                    except TimeoutError:
+                        held = True
+                        break
                     if not chunk:
                         break
                     answer += chunk
@@ -509,6 +517,7 @@ def check_raw(arguments: Sequence[str]) -> dict[str, Any]:
             "body_bytes": len(body),
             "body": body[:200].decode("latin-1"),
             "bytes": len(answer),
+            "held": held,
         }
     return results
 
@@ -680,6 +689,36 @@ def serve_hello(arguments: Sequence[str]) -> None:
         threading.Thread(target=_hello, args=(connection,), daemon=True).start()
 
 
+def _accept_upgrade(connection: socket.socket) -> None:
+    with connection:
+        connection.settimeout(30)
+        try:
+            request = b""
+            while b"\r\n\r\n" not in request and len(request) < 65536:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    return
+                request += chunk
+            connection.sendall(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n\r\n"
+            )
+            connection.recv(1)  # held open, as a server waiting for a client's first frame
+        except OSError:
+            return
+
+
+def serve_upgrade(arguments: Sequence[str]) -> None:
+    """Accept every request as a WebSocket upgrade and hold it open: the control that shows
+    `raw` can tell an accepted upgrade from a refusal."""
+    port = int(arguments[0])
+    listener = socket.create_server(("0.0.0.0", port))  # noqa: S104
+    say(READY, {"port": port, "hostname": socket.gethostname()})
+    while True:
+        connection, _ = listener.accept()
+        threading.Thread(target=_accept_upgrade, args=(connection,), daemon=True).start()
+
+
 def serve_echo(arguments: Sequence[str]) -> None:
     """Answer each datagram on the port with the same bytes, as a control for `udp`."""
     port = int(arguments[0])
@@ -712,6 +751,7 @@ SERVERS: Final[dict[str, Callable[[Sequence[str]], None]]] = {
     "pages": serve_pages,
     "hello": serve_hello,
     "echo": serve_echo,
+    "upgrade": serve_upgrade,
 }
 
 
