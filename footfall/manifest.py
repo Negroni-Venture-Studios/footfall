@@ -121,13 +121,17 @@ def _show(value: object) -> str:
     """How a value appears in a message: TOML's spelling for booleans, else its repr.
 
     An integer too long to read is named without its digits; past 4300 digits, which
-    a hexadecimal or octal number in TOML can reach, Python cannot even print it.
+    a hexadecimal or octal number in TOML can reach, Python cannot even print it, nor a
+    list or table that holds one.
     """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int) and not -_LARGE < value < _LARGE:
         return "a very large number"
-    return repr(value)
+    try:
+        return repr(value)
+    except ValueError:
+        return "a value holding a very large number"
 
 
 class _Reader:

@@ -529,3 +529,21 @@ def test_a_byte_order_mark_is_ignored(tmp_path: Path) -> None:
     brief = load_brief(repo, manifest)
     assert brief.max_actions == 7
     assert brief.text == "Body\n"
+
+
+@pytest.mark.parametrize("shape", ["[{n}]", "{{ a = {n} }}", "[[{n}]]"])
+@pytest.mark.parametrize(
+    ("before", "field", "message"),
+    [
+        ('name = "Tiny"', "name", "must be text"),
+        ("port = 8080", "app.port", "must be a whole number"),
+    ],
+)
+def test_a_very_large_number_inside_a_list_or_table_is_named_without_its_digits(
+    shape: str, before: str, field: str, message: str
+) -> None:
+    """Python cannot print an integer of over 4300 digits, even inside a list or a table."""
+    value = shape.format(n="0x" + "f" * 5000)
+    key = before.split(" = ")[0]
+    problems = problems_of(MINIMAL.replace(before, f"{key} = {value}"))
+    assert problems == [f"{field}: {message}, not a value holding a very large number"]
