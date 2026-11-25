@@ -1138,7 +1138,16 @@ class RunnerService:
         for container, value in self._engine.labelled(RUN_LABEL):
             found.setdefault(value, []).append(f"container {container[:12]}")
         for network, value in self._engine.labelled_networks(RUN_LABEL):
-            found.setdefault(value, []).append(f"network {network}")
+            # A run's network is removed by the name Footfall gives it, so one labelled with a
+            # run id under another name is not one Footfall made, and is not removed.
+            if network == _network_name(value):
+                found.setdefault(value, []).append(f"network {network}")
+            else:
+                logger.warning(
+                    "left the network %s alone: it is labelled for run %s but not named for it",
+                    _show(network),
+                    _show(value),
+                )
         listing = _open_folder(self._runs_fd, _TOP)
         try:
             with os.scandir(listing) as entries:

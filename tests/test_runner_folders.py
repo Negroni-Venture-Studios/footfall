@@ -417,6 +417,21 @@ def test_a_runner_removes_what_an_earlier_runner_left_before_it_serves(
         later.start_app(RUN, "anna", "python3 serve.py", 8000, [])
 
 
+def test_a_labelled_network_of_another_name_is_left_alone_and_named(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Part A, Minor 6: the sweep removes a run's network by the name Footfall gives it, so a
+    network labelled with a run id under any other name is not that network. It is named in
+    the log and left, rather than logged as removed and left."""
+    h.engine.create_network({"Name": "elsewhere-2286", "Labels": {"footfall.run": THIRD}})
+    with caplog.at_level("WARNING", logger="footfall.runner.service"):
+        assert restarted(h).sweep() == []
+    assert "elsewhere-2286" in h.engine.networks
+    said = [record.getMessage() for record in caplog.records]
+    assert any("elsewhere-2286" in line and "alone" in line for line in said), said
+    assert not any("removing" in line for line in said), said
+
+
 def test_a_sweep_with_nothing_left_does_nothing(h: Harness) -> None:
     assert restarted(h).sweep() == []
     listing = ("labelled", "labelled_networks")
