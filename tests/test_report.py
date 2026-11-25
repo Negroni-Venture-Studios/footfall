@@ -265,6 +265,32 @@ def test_surrogates_bidi_and_tag_characters_are_stripped(char: str) -> None:
     summary.encode("utf-8")
 
 
+@pytest.mark.parametrize(
+    "char", ["\u200b", "\u2060", "\u2061", "\u2062", "\u2063", "\u2064", "\ufeff"]
+)
+def test_invisible_characters_are_stripped(char: str) -> None:
+    """Zero-width spaces, word joiners, invisible operators and the byte order mark show
+    nothing, so they could hide a word inside another or split one without a trace."""
+    data = good()
+    data["summary"] = f"a{char}b"
+    data["findings"][0]["title"] = f"t{char}u"
+    data["findings"][0]["steps"] = [f"Open{char} /cart"]
+    summary, _, _, findings = parse(data)
+    assert (summary, findings[0].title, findings[0].steps) == ("ab", "tu", ("Open /cart",))
+
+
+def test_line_and_paragraph_separators_are_plain_line_breaks() -> None:
+    """U+2028 and U+2029 break a line in some readers and not in others, so a line could be
+    hidden in one and shown in another; in text that may have lines they become new lines,
+    and on one line spaces."""
+    data = good()
+    data["summary"] = "first\u2028second\u2029third"
+    data["findings"][0]["title"] = "one\u2028two"
+    summary, _, _, findings = parse(data)
+    assert summary == "first\nsecond\nthird"
+    assert findings[0].title == "one two"
+
+
 def test_zwj_emoji_survive() -> None:
     family = "\U0001f469\u200d\U0001f469\u200d\U0001f467"
     data = good()

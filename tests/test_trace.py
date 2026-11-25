@@ -115,3 +115,24 @@ def test_guard_events_round_trip_and_default_to_none(tmp_path: Path) -> None:
         handle.write(json.dumps(old) + "\n")
     assert Trace(path).steps() == [with_events, step(2)]
     assert step(2).events == []
+
+
+def nested(depth: int) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for _ in range(depth):
+        value = {"a": value}
+    return value
+
+
+def test_deeply_nested_input_is_a_trace_error_and_writes_nothing(tmp_path: Path) -> None:
+    trace = Trace(tmp_path / "trace.jsonl")
+    with pytest.raises(TraceError, match="step 1"):
+        trace.append(step(1, input=nested(100_000)))
+    assert trace.steps() == []
+
+
+def test_a_deeply_nested_line_is_a_trace_error(tmp_path: Path) -> None:
+    path = tmp_path / "trace.jsonl"
+    path.write_text('{"input": ' + "[" * 100_000 + "]" * 100_000 + "}\n")
+    with pytest.raises(TraceError, match="line 1"):
+        Trace(path).steps()

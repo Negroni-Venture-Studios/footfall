@@ -98,22 +98,33 @@ class PersonaReport:
 _BIDI: Final = frozenset(
     {0x061C, 0x200E, 0x200F} | set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A))
 )
+# Characters that show nothing, so they can hide a word inside another or split one unseen:
+# the zero-width space, the word joiner, the invisible operators and the byte order mark.
+_INVISIBLE: Final = frozenset({0x200B, *range(0x2060, 0x2065), 0xFEFF})
 _TAGS: Final = range(0xE0000, 0xE0080)
+# The line and paragraph separators break a line in some readers and not in others.
+_SEPARATORS: Final = str.maketrans({"\u2028": "\n", "\u2029": "\n"})
 
 
 def _drop(ch: str) -> bool:
     if ch in "\n\t":
         return False
     code = ord(ch)
-    return code in _BIDI or code in _TAGS or unicodedata.category(ch) in ("Cc", "Cs")
+    return (
+        code in _BIDI
+        or code in _INVISIBLE
+        or code in _TAGS
+        or unicodedata.category(ch) in ("Cc", "Cs")
+    )
 
 
 def clean_text(text: str, cap: int, *, single_line: bool = False) -> str:
-    """Strip control, surrogate, bidirectional and tag characters, then cut to `cap`.
+    """Strip control, surrogate, bidirectional, invisible and tag characters, then cut to `cap`.
 
-    A single-line field also has each run of whitespace made one space.
+    The line and paragraph separators become plain new lines. A single-line field also has
+    each run of whitespace made one space.
     """
-    kept = "".join(ch for ch in text if not _drop(ch))
+    kept = "".join(ch for ch in text.translate(_SEPARATORS) if not _drop(ch))
     if single_line:
         kept = " ".join(kept.split())
     if len(kept) <= cap:

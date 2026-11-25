@@ -34,13 +34,20 @@ class Trace:
         self.path = path
 
     def append(self, step: Step) -> None:
-        fields = asdict(step)
+        try:
+            fields = asdict(step)
+        except RecursionError as error:
+            raise TraceError(f"step {step.number}: a field is nested too deeply") from error
         for name, value in fields.items():
             try:
                 json.dumps(value, allow_nan=False)
             except (TypeError, ValueError) as error:
                 raise TraceError(
                     f"step {step.number}: field `{name}` is not JSON: {error}"
+                ) from error
+            except RecursionError as error:
+                raise TraceError(
+                    f"step {step.number}: field `{name}` is nested too deeply"
                 ) from error
         # ASCII only: a lone surrogate from the model is escaped, not a write error.
         line = json.dumps(fields, ensure_ascii=True, separators=(",", ":")) + "\n"
@@ -60,5 +67,9 @@ class Trace:
                 except (ValueError, TypeError) as error:
                     raise TraceError(
                         f"{self.path}: line {number} is not a step: {error}"
+                    ) from error
+                except RecursionError as error:
+                    raise TraceError(
+                        f"{self.path}: line {number} is nested too deeply to read"
                     ) from error
         return steps
