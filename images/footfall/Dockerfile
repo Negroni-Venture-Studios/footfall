@@ -37,8 +37,9 @@ LABEL org.opencontainers.image.source="https://github.com/Negroni-Venture-Studio
 # updates: footfall test copies only the files git would commit. git reads a
 # repository someone else owns only where it is told to trust it; the dev
 # stack mounts the repository under test at /repo, and nowhere else is trusted.
+# libatomic1, without which the Node that Playwright bundles cannot start.
 RUN apt-get update \
- && apt-get install --yes --no-install-recommends git \
+ && apt-get install --yes --no-install-recommends git libatomic1 \
  && rm -rf /var/lib/apt/lists/* \
  && git config --system --add safe.directory /repo
 

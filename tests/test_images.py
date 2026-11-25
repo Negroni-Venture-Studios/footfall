@@ -115,6 +115,13 @@ def test_browsers_image_has_the_gate_and_the_ech_policy() -> None:
     assert json.loads((ROOT / policy).read_text()) == {"EncryptedClientHelloEnabled": False}
 
 
+def test_footfall_image_has_what_playwrights_driver_needs() -> None:
+    # The orchestrator drives the browsers through Playwright's bundled Node, which will not
+    # start without libatomic, and the slim base image leaves it out.
+    text = (ROOT / "images" / "footfall" / "Dockerfile").read_text()
+    assert re.search(r"apt-get install --yes --no-install-recommends git libatomic1\b", text)
+
+
 def test_footfall_image_installs_git_from_its_own_release() -> None:
     # footfall test lists the files git would commit; the base image's Debian release
     # supplies git, with its security updates, and nothing it merely recommends.
