@@ -302,6 +302,54 @@ def check_resolve(arguments: Sequence[str]) -> dict[str, Any]:
     return results
 
 
+def _dns_question(name: str) -> bytes:
+    """A DNS query for the A record of `name`, as a resolver would send it."""
+    header = secrets.token_bytes(2) + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+    labels = b"".join(len(part).to_bytes(1, "big") + part.encode() for part in name.split("."))
+    return header + labels + b"\x00\x00\x01\x00\x01"
+
+
+def check_udp(arguments: Sequence[str]) -> dict[str, Any]:
+    """Send a DNS question for example.com in one datagram to each host:port, and say whether
+    anything answered; also report the resolver the container was given."""
+    question = _dns_question("example.com")
+    results: dict[str, Any] = {}
+    for target in arguments:
+        host, _, port = target.rpartition(":")
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(CONNECT_TIMEOUT)
+                sock.sendto(question, (host, int(port)))
+                answer, _ = sock.recvfrom(4096)
+                results[target] = f"answered {len(answer)} bytes"
+        except OSError as error:
+            results[target] = errno_name(error)
+    try:
+        results["resolv.conf"] = Path("/etc/resolv.conf").read_text()[:2000]
+    except OSError as error:
+        results["resolv.conf"] = errno_name(error)
+    return results
+
+
+def check_dns_tcp(arguments: Sequence[str]) -> dict[str, Any]:
+    """Send a DNS question for example.com over TCP to each host:port, and say whether
+    anything came back."""
+    question = _dns_question("example.com")
+    framed = len(question).to_bytes(2, "big") + question
+    results: dict[str, Any] = {}
+    for target in arguments:
+        host, _, port = target.rpartition(":")
+        try:
+            with socket.create_connection((host, int(port)), timeout=CONNECT_TIMEOUT) as stream:
+                stream.settimeout(CONNECT_TIMEOUT)
+                stream.sendall(framed)
+                answer = stream.recv(4096)
+                results[target] = f"answered {len(answer)} bytes" if answer else "closed"
+        except OSError as error:
+            results[target] = errno_name(error)
+    return results
+
+
 async def _scan_one(host: str, port: int, timeout: float, limit: asyncio.Semaphore) -> str:
     async with limit:
         try:
@@ -632,12 +680,25 @@ def serve_hello(arguments: Sequence[str]) -> None:
         threading.Thread(target=_hello, args=(connection,), daemon=True).start()
 
 
+def serve_echo(arguments: Sequence[str]) -> None:
+    """Answer each datagram on the port with the same bytes, as a control for `udp`."""
+    port = int(arguments[0])
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("0.0.0.0", port))  # noqa: S104
+        say(READY, {"port": port, "hostname": socket.gethostname()})
+        while True:
+            data, peer = sock.recvfrom(4096)
+            sock.sendto(data, peer)
+
+
 CHECKS: Final[dict[str, Callable[[Sequence[str]], dict[str, Any]]]] = {
     "sandbox": check_sandbox,
     "memory": check_memory,
     "processes": check_processes,
     "connect": check_connect,
     "resolve": check_resolve,
+    "udp": check_udp,
+    "dns-tcp": check_dns_tcp,
     "scan": check_scan,
     "fetch": check_fetch,
     "fetch-to-file": check_fetch_to_file,
@@ -650,6 +711,7 @@ CHECKS: Final[dict[str, Callable[[Sequence[str]], dict[str, Any]]]] = {
 SERVERS: Final[dict[str, Callable[[Sequence[str]], None]]] = {
     "pages": serve_pages,
     "hello": serve_hello,
+    "echo": serve_echo,
 }
 
 

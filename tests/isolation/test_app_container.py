@@ -226,6 +226,30 @@ async def test_the_app_cannot_reach_the_internet_the_metadata_address_or_the_hos
     assert connected == ["footfall-proxy:3128"], reached
 
 
+async def test_no_name_lookup_or_datagram_leaves_the_run(run: LiveRun) -> None:
+    """Audit V-02: Docker's own resolver, at 127.0.0.11, could forward a lookup out of the
+    run's network beside the proxy. No lookup of an outside name succeeds, no DNS question
+    by UDP or TCP to Docker's resolver or to a public one is answered, and no datagram
+    leaves; the controls are a datagram and a TCP question answered on the run's network."""
+    echo, _ = await run.serve("echo", "echo", 8053)
+    pages, _ = await run.serve("pages", "pages", 8000)
+    datagrams = await run.probe(
+        "udp", "udp", echo, "127.0.0.11:53", "8.8.8.8:53", "1.1.1.1:53", "9.9.9.9:53"
+    )
+    fact("the resolver an app container is given", datagrams.pop("resolv.conf"))
+    fact("DNS questions by datagram from an app container", datagrams)
+    assert datagrams.pop(echo).startswith("answered"), datagrams  # the control
+    assert not any(outcome.startswith("answered") for outcome in datagrams.values())
+    streams = await run.probe("dns-tcp", "dns-tcp", pages, "127.0.0.11:53", "8.8.8.8:53")
+    fact("DNS questions over TCP from an app container", streams)
+    assert streams.pop(pages).startswith("answered"), streams  # the control: HTTP's refusal
+    assert not any(outcome.startswith("answered") for outcome in streams.values())
+    names = await run.probe("names", "resolve", "footfall-proxy", "example.com", "pypi.org")
+    fact("name lookups from an app container", names)
+    assert isinstance(names.pop("footfall-proxy"), list)  # the control: its hosts file
+    assert not any(isinstance(found, list) for found in names.values()), names
+
+
 async def test_the_orchestrator_answers_on_no_port(run: LiveRun) -> None:
     pages, _ = await run.serve("pages", "pages", 8000)
     page_host = pages.rpartition(":")[0]
