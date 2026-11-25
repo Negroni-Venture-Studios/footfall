@@ -9,7 +9,17 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SKIPPED = {".venv", "node_modules", ".git", ".superpowers", ".mypy_cache", ".pytest_cache"}
+# Folders that are not the repository's documents: tools' caches, the plan workspace, and
+# .claude, where an agent's git worktree of another commit can sit.
+SKIPPED = {
+    ".venv",
+    "node_modules",
+    ".git",
+    ".superpowers",
+    ".claude",
+    ".mypy_cache",
+    ".pytest_cache",
+}
 # The plans quote the links of files they describe, as examples, not as links.
 PLANS = ROOT / "docs" / "superpowers"
 DOCUMENTS = sorted(
