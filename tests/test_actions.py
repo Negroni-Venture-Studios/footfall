@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from footfall.actions import mask
+from footfall.actions import MaskError, mask
 from tests.conftest import MaskOutput
 
 IN_ACTIONS = {"GITHUB_ACTIONS": "true"}
@@ -75,13 +75,40 @@ def test_standard_error_is_used_when_standard_output_is_a_file(
     assert output.read() == f"\n::add-mask::{VALUE}\n"
 
 
-def test_a_closed_pipe_raises_nothing() -> None:
+def broken_pipe() -> tuple[int, int]:
+    """A pipe whose reader has gone, as when whoever read a job's output has stopped."""
     reader, writer = os.pipe()
-    os.close(reader)  # whoever read the job's output has gone
+    os.close(reader)
+    return reader, writer
+
+
+def test_a_broken_standard_output_falls_back_to_standard_error(output: MaskOutput) -> None:
+    _, broken = broken_pipe()
     try:
-        mask(VALUE, environ=IN_ACTIONS, fds=(writer,))
+        mask(VALUE, environ=IN_ACTIONS, fds=(broken, output.writer))
     finally:
-        os.close(writer)
+        os.close(broken)
+    assert output.read() == f"\n::add-mask::{VALUE}\n"
+
+
+def test_when_no_stream_a_job_reads_takes_the_mask_it_fails_closed() -> None:
+    """The secret must not be used unmasked, so the caller stops before it is."""
+    first, second = broken_pipe()[1], broken_pipe()[1]
+    try:
+        with pytest.raises(MaskError) as caught:
+            mask(VALUE, environ=IN_ACTIONS, fds=(first, second))
+    finally:
+        os.close(first)
+        os.close(second)
+    assert VALUE not in str(caught.value)
+    assert VALUE[:4] not in str(caught.value)
+
+
+def test_files_on_both_streams_take_nothing_and_raise_nothing(tmp_path: Path) -> None:
+    with (tmp_path / "out.txt").open("wb") as out, (tmp_path / "err.txt").open("wb") as err:
+        mask(VALUE, environ=IN_ACTIONS, fds=(out.fileno(), err.fileno()))
+    assert (tmp_path / "out.txt").read_bytes() == b""
+    assert (tmp_path / "err.txt").read_bytes() == b""
 
 
 def test_by_default_it_writes_to_standard_output_or_error_only_if_a_pipe_or_terminal(
