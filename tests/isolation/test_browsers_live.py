@@ -14,7 +14,7 @@ import contextlib
 import json
 import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
@@ -48,9 +48,9 @@ ENGINES: Final = ("chromium", "webkit")
 class Browsers:
     run: LiveRun
     app: str  # the page server's origin
-    endpoint: str  # holds the secret path: never printed
+    endpoint: str = field(repr=False)  # holds the secret path: never printed
     address: str  # the browser container's address on the run's network
-    playwright: Playwright
+    playwright: Playwright = field(repr=False)
 
     async def connect(self, engine: str) -> Browser:
         return await connect_run_server(self.playwright, engine, self.endpoint)
@@ -108,9 +108,11 @@ async def test_each_engine_launches_under_gvisor_through_run_server(
         page = await context.new_page()
         assert await _goto(page, browsers.app + "/") == 200
         assert await page.title() == "Probe"
-        # The browser's kernel is gVisor's, not the host's that the orchestrator sees.
-        await _goto(page, "file:///proc/version")
-        text = await page.inner_text("body")
+        # The browser's kernel is gVisor's, not the host's that the orchestrator sees. A
+        # fresh page, since a browser will not go from an http page to a file.
+        local = await context.new_page()
+        await _goto(local, "file:///proc/version")
+        text = await local.inner_text("body")
         assert GVISOR_VERSION in text, text
         assert Path("/proc/version").read_text().strip() not in text
     finally:
@@ -142,6 +144,8 @@ async def test_chromium_sends_no_encrypted_client_hello(browsers: Browsers) -> N
     full = await browsers.connect("chromium")  # as the orchestrator launches it
     try:
         page = await (await full.new_context(ignore_https_errors=True)).new_page()
+        # From the app's own page, on the run's private network like the probe.
+        await _goto(page, browsers.app + "/")
         await _goto(page, target)
         await run.wait_for("hello", HELLO, timeout=30)
         await asyncio.sleep(2)
@@ -156,6 +160,7 @@ async def test_chromium_sends_no_encrypted_client_hello(browsers: Browsers) -> N
     )
     try:
         page = await (await shell.new_context(ignore_https_errors=True)).new_page()
+        await _goto(page, browsers.app + "/")
         await _goto(page, target)
         await run.wait_for("hello", HELLO, count=len(from_full) + 1, timeout=30)
     finally:

@@ -82,7 +82,7 @@ class LiveRun:
     run_id: str
     client: RunnerClient
     workspace: Path
-    account: tuple[str, str]
+    account: tuple[str, str] = field(repr=False)  # holds the throwaway password: never shown
     copies: dict[str, str] = field(default_factory=dict)  # copy -> "address:port"
 
     async def start(

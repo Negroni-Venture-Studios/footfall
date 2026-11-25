@@ -28,7 +28,9 @@ jobs:
     timeout-minutes: 45
     env:
       COMPOSE: docker compose -f compose.yaml -f compose.test.yaml
-      PYTEST: pytest -m isolation -p no:cacheprovider -v
+      # Short tracebacks: a long one prints each frame's arguments, which can hold a
+      # run's throwaway password or the browsers' secret path.
+      PYTEST: pytest -m isolation -p no:cacheprovider -v --tb=short
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
