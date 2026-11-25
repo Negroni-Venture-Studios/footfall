@@ -15,14 +15,21 @@ the end of the run are decided here. A turn that breaks the rules (no tool call,
 one, an unknown tool, a call cut off at the token limit) gets a reply that keeps the
 conversation valid and counts as a turn in which nothing was done.
 
-Each persona has a budget of actions, cost and time, checked after every turn. A model call
-that hangs is cut off when the time runs out, which ends the run as incomplete. Once any
-of the three runs out, a line after that turn's tool results tells the tester to finish, and it has
-`grace_turns` more turns to do so. In those turns a `finish` is honoured, and any other tool
-still runs but adds nothing to the count of actions in the report. The line is a text block
-of the user's turn, which every model accepts and which keeps the conversation append-only.
-Page text never sits beside it: after the first look, what a page shows reaches the model
-only inside tool results, and the first look itself is labelled as such.
+Each persona has a budget of actions, cost and time, checked after every turn. Once any of
+the three runs out, a line after that turn's tool results tells the tester to finish, and
+it has `grace_turns` more turns to do so. In those turns a `finish` is honoured, and any
+other tool still runs but adds nothing to the count of actions in the report. The line is
+a text block of the user's turn, which every model accepts and which keeps the
+conversation append-only. Page text never sits beside it: after the first look, what a
+page shows reaches the model only inside tool results, and the first look itself is
+labelled as such.
+
+A model call is given the time left, but never less than `MIN_TURN`, so one that hangs is
+cut off when the time runs out, or at most `MIN_TURN` after it when the call began less
+than `MIN_TURN` before it, and the run ends as incomplete. A call in a grace turn is given
+at least `TURN_FLOOR`, so that the turn in which the tester writes its report is not cut
+off. A persona's model calls therefore end within the time limit, plus `MIN_TURN`, plus
+`TURN_FLOOR` for each grace turn.
 
 A run never raises, except to be cancelled. Its report says why it ended, and a failure
 is given by a fixed reason or the exception's class alone, because an exception's message
@@ -119,9 +126,15 @@ PAGE_STOPPED: Final = "the page stopped answering"
 NOT_A_TOOL: Final = "not run: there is no tool of that name"
 TOO_MANY: Final = "not run: more than one tool call in one turn"
 CUT_SHORT: Final = "not run: the call was cut off at the token limit"
-# The least time any model call is given, even once the time limit has passed. A grace
-# turn is when the tester writes its report, the heaviest turn of the run, so it gets as
-# long as the client may spend on it, every retry included. Read when used, so that a
+# The least time a model call is given before the budget is spent, so that one made just
+# before the time limit is not cut to nothing. A minute is far longer than an ordinary turn
+# of one action takes, and it was the floor of every call before the grace turns needed
+# more. A call made in the last minute before the limit may run up to a minute past it.
+# Read when used, so that a test can shorten it.
+MIN_TURN = 60.0
+# The least time a model call in the grace turns is given, once the budget is spent. A
+# grace turn is when the tester writes its report, the heaviest turn of the run, so it gets
+# as long as the client may spend on it, every retry included. Read when used, so that a
 # test can shorten it.
 TURN_FLOOR = CLIENT_TIMEOUT * (CLIENT_RETRIES + 1)
 CUT_OFF_CALL: Final = "a model call it cut off is not counted, so the cost may read low"
@@ -275,11 +288,13 @@ class _Run:
             details.append(_text(ACCOUNT.format(username=username, password=password)))
         self.messages.append({"role": "user", "content": [*look, *details, _text(BEGIN)]})
         while True:
-            # The time limit holds even when a call hangs. A call made after it has passed,
-            # in the grace turns, still gets TURN_FLOOR seconds.
+            # The time limit holds even when a call hangs: a call is given the time left,
+            # but never less than MIN_TURN. A call in the grace turns, once the budget is
+            # spent, is given at least TURN_FLOOR, so that the report is not cut off.
             remaining = self.budget.max_seconds - (self.clock() - self.started)
+            least = MIN_TURN if self.spent is None else TURN_FLOOR
             try:
-                async with asyncio.timeout(max(remaining, TURN_FLOOR)) as deadline:
+                async with asyncio.timeout(max(remaining, least)) as deadline:
                     turn = await self.model.turn(self.system, TOOLS, list(self.messages))
             except TimeoutError:
                 if not deadline.expired():

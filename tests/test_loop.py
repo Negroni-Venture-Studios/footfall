@@ -10,6 +10,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -996,16 +997,87 @@ class Hung:
 async def test_a_hung_model_call_ends_at_the_time_limit(
     world: MakeWorld, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Production's order, shortened: the least a call is given, below the time limit, below
+    # the floor of a grace turn. The clock stands still, so the call is given the whole limit.
     w = await world()
-    monkeypatch.setattr(loop, "TURN_FLOOR", 0.2)
+    monkeypatch.setattr(loop, "MIN_TURN", 0.1)
+    monkeypatch.setattr(loop, "TURN_FLOOR", 20.0)
     started = time.monotonic()
-    report = await run(w, Hung(), budget=Budget(max_seconds=0.5), pricing=free)
-    assert time.monotonic() - started < 10
+    report = await run(w, Hung(), budget=Budget(max_seconds=1.0), clock=Clock(), pricing=free)
+    assert time.monotonic() - started < 10  # cut at the limit, not at the floor
     assert report.status == "incomplete"
     assert report.reason == (
-        "the time limit of 0.5 s ran out before the tester called finish; "
+        "the time limit of 1 s ran out before the tester called finish; "
         "a model call it cut off is not counted, so the cost may read low"
     )
+
+
+class Allowed:
+    """A fake model that notes how long the loop gave each of its calls, and moves the clock
+    to the next of `times` while it answers."""
+
+    def __init__(self, model: FakeModel, clock: Clock, times: list[float]) -> None:
+        self.model, self.clock, self.times = model, clock, times
+        self.opened: list[float | None] = []  # every timeout the loop opens
+        self.given: list[float | None] = []  # the one each call was made under
+
+    def timeout(self, delay: float | None) -> asyncio.Timeout:
+        self.opened.append(delay)
+        return asyncio.timeout(delay)
+
+    async def turn(
+        self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    ) -> ModelTurn:
+        self.given.append(self.opened[-1])
+        if self.times:
+            self.clock.now = self.times.pop(0)
+        return await self.model.turn(system, tools, messages)
+
+
+def allowed(
+    monkeypatch: pytest.MonkeyPatch, script: list[Any], clock: Clock, times: list[float]
+) -> Allowed:
+    model = Allowed(FakeModel(script), clock, times)
+    monkeypatch.setattr(loop, "asyncio", SimpleNamespace(timeout=model.timeout))
+    return model
+
+
+async def test_a_default_budgets_first_call_is_given_no_more_than_its_time_limit(
+    world: MakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = await world()
+    clock = Clock()
+    model = allowed(monkeypatch, [finish()], clock, [])
+    report = await run(w, model, clock=clock, pricing=free)
+    assert report.status == "finished"
+    (first,) = model.given
+    assert first is not None
+    assert first <= Budget().max_seconds
+
+
+async def test_a_call_is_given_the_time_left_but_never_less_than_a_minute(
+    world: MakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = await world()
+    clock = Clock()
+    start = clock.now
+    # The first call ends with 61 s left, the second with 59 s, the third at the limit.
+    times = [start + 539, start + 541, start + 600]
+    model = allowed(monkeypatch, [LOOK, LOOK, LOOK, finish()], clock, times)
+    report = await run(w, model, clock=clock, pricing=free)
+    assert report.status == "finished"
+    assert model.given == [600, 61, 60, 900]  # the last is a grace turn, after the limit
+
+
+async def test_a_grace_turn_is_given_the_floor_even_with_time_left(
+    world: MakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = await world()
+    clock = Clock()
+    model = allowed(monkeypatch, [LOOK, finish()], clock, [])
+    report = await run(w, model, budget=Budget(max_actions=1), clock=clock, pricing=free)
+    assert report.status == "finished"
+    assert model.given == [600, 900]  # the actions ran out, and 600 s were left
 
 
 def test_a_grace_turn_has_as_long_as_one_request() -> None:
