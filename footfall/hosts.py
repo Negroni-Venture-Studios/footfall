@@ -29,13 +29,17 @@ type Resolver = Callable[[str, int], Awaitable[list[str]]]
 
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 _MAX_NAME = 253
+# A label a resolver may read as a number: decimal, octal with a leading 0, or hexadecimal.
+_NUMBER = re.compile(r"[0-9]+|0x[0-9a-f]*")
 
 
 def _is_address_literal(name: str) -> bool:
-    """Whether a resolver would take this name for an IP address.
+    """Whether a resolver could take this name for an IP address.
 
-    `ipaddress` knows only the dotted-quad and IPv6 forms; `inet_aton` also takes the
-    short, octal and hexadecimal IPv4 forms (such as 127.1) that a resolver passes on.
+    `ipaddress` knows only the dotted-quad and IPv6 forms, while a C library's resolver
+    also takes short, octal and hexadecimal IPv4 forms such as 127.1 and 0x7f.1. Rather
+    than ask the C library, a name whose last label is a number in any of those bases is
+    taken for an address, as the WHATWG URL standard does. No top-level domain is a number.
     """
     try:
         ipaddress.ip_address(name)
@@ -43,11 +47,7 @@ def _is_address_literal(name: str) -> bool:
         pass
     else:
         return True
-    try:
-        socket.inet_aton(name)
-    except OSError:
-        return False
-    return True
+    return _NUMBER.fullmatch(name.rsplit(".", 1)[-1]) is not None
 
 
 def validate_host_name(name: str) -> str:
@@ -79,6 +79,12 @@ _TRANSLATED = tuple(
     for network in ("64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32")
 )
 _GLOBAL_UNICAST = ipaddress.ip_network("2000::/3")
+# Special-purpose ranges that `is_global` passes but where no public host lives: the
+# deprecated 6to4 relay anycast (RFC 7526), the Port Control Protocol anycast address
+# (RFC 7723) and ORCHIDv2 identifiers (RFC 7343), which are not routable.
+_NOT_PUBLIC = tuple(
+    ipaddress.ip_network(network) for network in ("192.88.99.0/24", "192.0.0.9/32", "2001:20::/28")
+)
 
 
 def is_public_address(address: str) -> bool:
@@ -88,11 +94,14 @@ def is_public_address(address: str) -> bool:
     be outside the translated ranges; that refuses the IPv4-compatible and IPv4-translated
     ranges, site-local and multicast addresses, which `is_global` does not catch. An
     IPv4-mapped address is judged by the IPv4 address inside it. An IPv4 address must be
-    global and neither multicast nor reserved.
+    global and neither multicast nor reserved. Neither may lie in a special-purpose range
+    that `is_global` passes but where no public host lives.
     """
     try:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
+        return False
+    if any(ip in network for network in _NOT_PUBLIC):
         return False
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.ipv4_mapped is not None:

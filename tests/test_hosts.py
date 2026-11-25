@@ -11,7 +11,19 @@ from footfall.hosts import (
 )
 
 
-@pytest.mark.parametrize("name", ["tile.openstreetmap.org", "Example.COM", "bücher.example"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tile.openstreetmap.org",
+        "Example.COM",
+        "bücher.example",
+        # Numbers are fine anywhere but the last label, and a label merely starting 0x is no number.
+        "123.example.com",
+        "0x7f.example.com",
+        "example.0xg1",
+        "example.x123",
+    ],
+)
 def test_valid_names(name: str) -> None:
     assert validate_host_name(name) == name.lower().encode("idna").decode()
 
@@ -37,6 +49,14 @@ def test_valid_names(name: str) -> None:
         "0x7f.0x1",
         "2130706433.",
         ("a" * 63 + ".") * 4 + "com",
+        # Forms a resolver reads as an IPv4 address: a final label that is a number.
+        "0x7f.1",
+        "017.0.0.1",
+        "10.0.0.0x1",
+        "a.0x",
+        "example.123",
+        "example.0xff",
+        "example.0XFF",
     ],
 )
 def test_invalid_names(name: str) -> None:
@@ -74,6 +94,18 @@ def test_invalid_names(name: str) -> None:
         ("ff02::1", False),
         ("ff0e::1", False),
         ("4000::1", False),
+        # Special-purpose ranges that `is_global` passes but that are no public host.
+        ("192.88.99.1", False),  # the deprecated 6to4 relay anycast
+        ("192.88.99.255", False),
+        ("::ffff:192.88.99.1", False),
+        ("192.0.0.9", False),  # Port Control Protocol anycast
+        ("192.0.0.8", False),
+        ("2001:20::1", False),  # ORCHIDv2
+        ("2001:2f:ffff:ffff::1", False),
+        # Their neighbours stay public.
+        ("192.88.98.255", True),
+        ("192.88.100.1", True),
+        ("2001:30::1", True),
     ],
 )
 def test_public_addresses(address: str, public: bool) -> None:
@@ -125,3 +157,17 @@ async def test_system_resolver_resolves_localhost_locally() -> None:
 async def test_resolve_public_refuses_localhost() -> None:
     with pytest.raises(HostError, match="not a public address"):
         await resolve_public("localhost", 80)
+
+
+@pytest.mark.parametrize("name", ["127.1", "0x7f.0x1", "017.0.0.1", "example.123"])
+def test_address_forms_are_refused_without_asking_libc(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule is Footfall's own, so it holds whatever the C library accepts."""
+
+    def accepts_nothing(text: str) -> bytes:
+        raise OSError("illegal IP address string passed to inet_aton")
+
+    monkeypatch.setattr("socket.inet_aton", accepts_nothing)
+    with pytest.raises(HostError):
+        validate_host_name(name)
