@@ -451,14 +451,61 @@ def _known_git_folders(folder: Path) -> frozenset[_Identity]:
         return frozenset()
 
 
+def _discovered_git_folders(folder: Path) -> list[Path]:
+    """The git folders that `folder` and each folder above it name, found as git finds them,
+    without git: a `.git` folder, or the folder a `.git` file's `gitdir:` line names, with its
+    `commondir`. None at all means `folder` is in no repository; a superproject's, for a
+    submodule, is among them. Raises LocalRunError for a `.git` that cannot be read or is
+    neither, since Footfall then cannot tell where a git folder is.
+    """
+    found: list[Path] = []
+    for here in (folder.resolve(), *folder.resolve().parents):
+        entry = here / ".git"
+        try:
+            info = entry.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise LocalRunError(f"cannot read {_shown(entry)} ({error.strerror})") from None
+        if stat.S_ISDIR(info.st_mode):
+            found.append(entry)
+            continue
+        try:
+            text = entry.read_bytes()[:4096] if stat.S_ISREG(info.st_mode) else b""
+        except OSError as error:
+            raise LocalRunError(f"cannot read {_shown(entry)} ({error.strerror})") from None
+        line = os.fsdecode(text.split(b"\n", 1)[0].removesuffix(b"\r"))
+        if not line.startswith("gitdir: "):
+            raise LocalRunError(
+                f"cannot tell where the git folder {_shown(entry)} names is; {_GIT_ADVICE}"
+            )
+        gitdir = here / line.removeprefix("gitdir: ")
+        found.append(gitdir)
+        with contextlib.suppress(OSError):
+            common = (gitdir / "commondir").read_bytes()[:4096].split(b"\n", 1)[0]
+            found.append(gitdir / os.fsdecode(common.removesuffix(b"\r")))
+    return found
+
+
 def _known_linked(folder: Path) -> _Linked:
-    """The linked files of the git folders of the repository `folder` is in, or none when
-    git cannot say."""
+    """The linked files of the git folders of the repository `folder` is in, and of its
+    superproject's when it is in a submodule, for a copy of every file in the folder.
+
+    Footfall looks for `.git` in the folder and each folder above it, as git does. Finding
+    none is the one case that adds nothing: `folder` is in no repository. Otherwise git is
+    asked too. When git cannot read the repository at all, as when another user owns it,
+    which is what --all-files is for, or git is not installed, the folders Footfall found
+    stand in; when git reads it but cannot say whether it is a submodule, the copy is refused.
+    """
+    discovered = _discovered_git_folders(folder)
+    if not discovered:
+        return _NO_LINKS
     try:
         git = _git()
-        return _Linked([*_git_folder_paths(git, folder), *_superproject_git_folders(git, folder)])
-    except LocalRunError:
-        return _Linked()
+        own = _git_folder_paths(git, folder)
+    except LocalRunError:  # git is missing, or cannot read the repository
+        return _Linked(discovered)
+    return _Linked([*own, *_superproject_git_folders(git, folder), *discovered])
 
 
 def _refuse_a_git_folder(base: Path, git_dirs: frozenset[_Identity]) -> None:

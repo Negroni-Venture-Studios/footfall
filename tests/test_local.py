@@ -1928,3 +1928,58 @@ def test_a_link_to_the_superprojects_git_configuration_is_refused(tmp_path: Path
             untracked=listing.untracked,
             linked=listing.linked,
         )
+
+
+def test_a_failed_superproject_lookup_refuses_the_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under --all-files, git reads the repository but cannot say whether it is a submodule:
+    the copy is refused, rather than made with no hard-link check at all."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    git(folder, "config", "remote.origin.url", TOKEN_URL)
+    os.link(folder / ".git" / "config", folder / "settings.ini")
+
+    def fails(git: str, folder: Path) -> list[Path]:
+        raise LocalRunError("git cannot read the files in the folder (it failed)")
+
+    monkeypatch.setattr(local, "_superproject_git_folders", fails)
+    with pytest.raises(LocalRunError, match="it failed"):
+        local._known_linked(folder)
+
+
+def test_a_folder_outside_git_is_copied_with_all_files(tmp_path: Path) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    os.link(folder / "serve.py", folder / "serve-again.py")
+    linked = local._known_linked(folder)
+    local._copy_folder(folder, tmp_path / "copy", tmp_path / "out", frozenset(), linked)
+    assert (tmp_path / "copy" / "serve-again.py").exists()
+
+
+def test_a_repository_git_cannot_read_still_refuses_a_link_to_its_config(tmp_path: Path) -> None:
+    """--all-files is the way to test a repository git cannot read, such as one another user
+    owns; its git folder is then found as git would find it, so the check still holds."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    with (folder / ".git" / "config").open("a") as config:
+        config.write(f"[core]\n\trepositoryformatversion = 99\n[remote]\n\turl = {TOKEN_URL}\n")
+    os.link(folder / ".git" / "config", folder / "settings.ini")
+    linked = local._known_linked(folder)
+    with pytest.raises(LocalRunError, match="git configuration"):
+        local._copy_folder(folder, tmp_path / "copy", tmp_path / "out", frozenset(), linked)
+
+
+def test_a_moved_git_folder_git_cannot_read_is_found_through_its_git_file(
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    moved = moved_git_folder(folder, "meta")
+    with (moved / "config").open("a") as config:
+        config.write("[core]\n\trepositoryformatversion = 99\n")
+    os.link(moved / "config", folder / "settings.ini")
+    linked = local._known_linked(folder)
+    assert linked.holds((folder / "settings.ini").lstat())
