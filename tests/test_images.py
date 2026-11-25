@@ -97,9 +97,19 @@ def test_browsers_playwright_version_matches_lock() -> None:
     version = locked_playwright_version()
     text = (ROOT / "images" / "browsers" / "Dockerfile").read_text()
     assert f"mcr.microsoft.com/playwright:v{version}-noble@sha256:" in text
-    assert f"npm install --global playwright@{version}" in text
+    assert f"npm install --global --ignore-scripts playwright@{version}" in text
     assert re.search(r"^USER pwuser$", text, re.MULTILINE)
-    assert '"playwright", "run-server", "--port", "3000", "--host", "0.0.0.0"' in text
+
+
+def test_the_browsers_image_serves_nothing_without_the_runners_command() -> None:
+    """Ruling R68: run on its own, the image must not open run-server on every interface."""
+    text = (ROOT / "images" / "browsers" / "Dockerfile").read_text()
+    (command,) = re.findall(r"^CMD (.*)$", text, re.MULTILINE)
+    arguments = json.loads(command)
+    assert arguments[:2] == ["node", "-e"]
+    assert "run-server" not in command and "0.0.0.0" not in command  # noqa: S104
+    assert "process.exit(64)" in arguments[2]
+    assert "serves nothing" in arguments[2]
 
 
 def test_dependabot_moves_playwright_on_its_own() -> None:
@@ -306,6 +316,17 @@ def test_every_copy_source_is_in_the_build_context() -> None:
         if not admitted(file, ignore)
     ]
     assert refused == []
+
+
+@pytest.mark.parametrize(
+    "secret", ["footfall/.env", "tests/.env.local", "tests/keys/server.pem", "footfall/deploy.key"]
+)
+def test_no_secret_a_developer_keeps_beside_the_code_enters_an_image(secret: str) -> None:
+    """Audit N-12: the build context takes footfall/ and tests/ whole."""
+    ignore = (ROOT / ".dockerignore").read_text()
+    assert not admitted(secret, ignore)
+    assert admitted("footfall/local.py", ignore)  # the control
+    assert admitted("tests/test_local.py", ignore)
 
 
 def test_the_check_would_have_caught_the_missing_gate() -> None:

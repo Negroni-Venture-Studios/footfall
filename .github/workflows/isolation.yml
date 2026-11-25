@@ -40,11 +40,24 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
+          version: "0.13.9"  # the uv the footfall image copies in
           python-version: "3.12"
       - name: Install gVisor's runsc
-        # The release Snug pins, installed as Snug's image workflow does.
+        # The release Snug pins, installed as Snug's image workflow does, from packages signed
+        # by the key whose fingerprint Snug pins (deploy/office.sh there).
+        env:
+          GVISOR_FINGERPRINT: 6F1DF85E3A71C24918E727D56FC6D554E32BD943
+          GVISOR_RELEASE: "20261026"
         run: |
-          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          curl -fsSL https://gvisor.dev/archive.key -o "$RUNNER_TEMP/gvisor.key"
+          keys=$(gpg --show-keys --with-colons "$RUNNER_TEMP/gvisor.key")
+          primaries=$(printf '%s\n' "$keys" | grep -c '^pub:' || true)
+          fingerprint=$(printf '%s\n' "$keys" | awk -F: '/^fpr:/ { print $10; exit }')
+          if [ "$primaries" != 1 ] || [ "$fingerprint" != "$GVISOR_FINGERPRINT" ]; then
+            echo "::error::gVisor's key is not the one pinned: $primaries keys, the first $fingerprint"
+            exit 1
+          fi
+          sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg < "$RUNNER_TEMP/gvisor.key"
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases 20261026 main" \
             | sudo tee /etc/apt/sources.list.d/gvisor.list
           sudo apt-get update -qq
@@ -52,6 +65,8 @@ jobs:
           sudo runsc install
           sudo systemctl restart docker
           runsc --version
+          runsc --version | grep -q "release-$GVISOR_RELEASE" \
+            || { echo "::error::runsc is not gVisor's release $GVISOR_RELEASE"; exit 1; }
           docker info --format '{{json .Runtimes}}'
           docker version
       - name: Build the four images, and the footfall image's test stage
@@ -61,6 +76,16 @@ jobs:
           docker build -t footfall-python3.13:dev -f images/python/Dockerfile .
           docker build -t footfall-node22:dev -f images/node/Dockerfile .
           docker build -t footfall-browsers:dev -f images/browsers/Dockerfile .
+      - name: The browsers image serves nothing without the runner's command
+        # Ruling R68: run as it is, it says why and stops, and never opens run-server.
+        run: |
+          status=0
+          said=$(docker run --rm --network none footfall-browsers:dev 2>&1) || status=$?
+          echo "$said"
+          if [ "$status" != 64 ] || ! printf '%s' "$said" | grep -q "on its own it serves nothing"; then
+            echo "::error::The browsers image did not refuse to start without a command (exit $status)."
+            exit 1
+          fi
       - run: uv sync --locked
       - name: Make the folders the stack mounts
         run: |
@@ -186,5 +211,15 @@ jobs:
           fi
           if [ "$masked" -lt 1 ]; then
             echo "::error::The mask check ran, but its line is not in the log masked."
+            exit 1
+          fi
+          # Beyond the canary: a mask command shown as text was never read as one, and a
+          # browsers address with its path in clear is the secret itself (audit N-13). A red
+          # job here means deleting this run's logs.
+          shown=$(grep -c '::add-mask::' "$log" || true)
+          paths=$(grep -cE 'ws://[^/[:space:]]+/[A-Za-z0-9_-]{24,}' "$log" || true)
+          echo "In the isolation log: $shown mask commands shown as text, $paths browsers addresses with a path in clear."
+          if [ "$shown" -gt 0 ] || [ "$paths" -gt 0 ]; then
+            echo "::error::The isolation log shows a secret or a mask command in clear. Delete this run's logs."
             exit 1
           fi

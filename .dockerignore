@@ -12,3 +12,8 @@
 !images/browsers/chromium-policy.json
 **/__pycache__
 **/*.py[cod]
+# Secrets that a developer might keep in a folder the image takes in whole.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

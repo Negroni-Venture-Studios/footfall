@@ -5,7 +5,8 @@
 
 FROM mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
 
-RUN npm install --global playwright@1.65.1
+# No install scripts: the base image has the browsers already, and nothing fetched here runs.
+RUN npm install --global --ignore-scripts playwright@1.65.1
 
 # The gate in front of run-server, which the runner starts with each run's path.
 COPY images/browsers/gate.js /opt/footfall/gate.js
@@ -20,5 +21,7 @@ COPY images/browsers/chromium-policy.json /etc/opt/chrome_for_testing/policies/m
 
 USER pwuser
 EXPOSE 3000
-# A default only: the runner always gives the whole command, the gate with the run's path.
-CMD ["playwright", "run-server", "--port", "3000", "--host", "0.0.0.0"]
+# The runner always gives the whole command: the gate, with the run's own path, in front of
+# run-server on loopback. Started without it, the image says so and serves nothing, rather than
+# open a server for anyone who reaches it.
+CMD ["node", "-e", "console.error('footfall-browsers: the runner gives this container its command, with the path of its run; on its own it serves nothing'); process.exit(64)"]
