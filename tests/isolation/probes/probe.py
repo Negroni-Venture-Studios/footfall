@@ -746,11 +746,31 @@ def serve_upgrade(arguments: Sequence[str]) -> None:
         threading.Thread(target=_accept_upgrade, args=(connection,), daemon=True).start()
 
 
+def _echo_stream(connection: socket.socket) -> None:
+    with connection:
+        connection.settimeout(30)
+        try:
+            data = connection.recv(4096)
+            if data:
+                connection.sendall(data)
+        except OSError:
+            return
+
+
+def _echo_streams(port: int) -> None:
+    listener = socket.create_server((own_address(), port))
+    while True:
+        connection, _ = listener.accept()
+        threading.Thread(target=_echo_stream, args=(connection,), daemon=True).start()
+
+
 def serve_echo(arguments: Sequence[str]) -> None:
-    """Answer each datagram on the port with the same bytes, as a control for `udp`."""
+    """Answer each datagram on the port with the same bytes, and each TCP connection on it with
+    the first bytes it sends, as the controls for `udp` and `dns-tcp`."""
     port = int(arguments[0])
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind((own_address(), port))
+        threading.Thread(target=_echo_streams, args=(port,), daemon=True).start()
         say(READY, {"port": port, "hostname": socket.gethostname()})
         while True:
             data, peer = sock.recvfrom(4096)
