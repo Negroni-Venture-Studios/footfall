@@ -366,6 +366,31 @@ async def test_socket_mode_0600(live: Live) -> None:
     assert stat.S_IMODE(mode) == 0o600
 
 
+def test_socket_is_0600_from_the_moment_it_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The chmod after the bind would hide a socket made with a wider mode, so the mode is read
+    when the chmod is called, under a mask that leaves a plain bind group and world readable."""
+    seen: list[int] = []
+    real_chmod = Path.chmod
+
+    def recording_chmod(self: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+        seen.append(stat.S_IMODE(self.lstat().st_mode))
+        real_chmod(self, mode, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "chmod", recording_chmod)
+    previous = os.umask(0o022)
+    try:
+        with short_directory() as directory:
+            footfall.proxy.control._bind(directory / "p.sock").close()
+            plain = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            plain.bind(str(directory / "plain.sock"))
+            plain.close()
+            plain_mode = stat.S_IMODE((directory / "plain.sock").lstat().st_mode)
+    finally:
+        os.umask(previous)
+    assert seen == [0o600]
+    assert plain_mode != 0o600  # so 0600 above came from the bind, not from the mask in force
+
+
 async def test_oversized_request_refused(live: Live) -> None:
     big = json.dumps({"op": "revoke_run", "run_id": "r_" + "a" * MAX_REQUEST}).encode() + b"\n"
     reply = await exchange(live.socket, big)
