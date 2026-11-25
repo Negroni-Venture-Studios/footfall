@@ -51,7 +51,7 @@ def network(engine: DockerEngine) -> Iterator[str]:
 
 
 def _record(name: str, data: dict[str, Any]) -> None:
-    """Put what the daemon said in the job summary, for the report and for Task 18."""
+    """Put what the daemon said in the job summary, where whoever reads the run can see it."""
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with Path(summary).open("a") as out:
