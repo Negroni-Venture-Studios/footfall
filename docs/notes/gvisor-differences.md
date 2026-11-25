@@ -14,7 +14,7 @@ On Linux, a container with a limit of 256 processes is refused the next one with
 
 ## A browser cannot read /proc through file://
 
-In the browser container, opening `file:///proc/version` gave an empty page in Chromium and crashed WebKit's page, where a test meant to read gVisor's kernel version from it. This was not checked against the same browsers on Linux. The test now reads the kernel release that full Chromium reports of the system it runs on, on `chrome://version` and through `navigator.userAgentData`, and requires it to be gVisor's 4.4.0 and not the host's own. That still proves the property: both engines are children of the one run-server in the one container, behind the one gate, so the kernel Chromium reports is the kernel WebKit runs on too. The app containers' own check, which reads `/proc/version` and the kernel log from Python, is unchanged.
+In the browser container, opening `file:///proc/version` gave an empty page in Chromium and crashed WebKit's page, where a test meant to read gVisor's kernel version from it. This was not checked against the same browsers on Linux. The test now reads the kernel release that full Chromium reports of the system it runs on, the operating system on `chrome://gpu`, and requires it to be gVisor's 4.4.0 and not the host's own. On Linux, `chrome://version` names only the system, and `navigator.userAgentData` gives an empty platform version. That still proves the property: both engines are children of the one run-server in the one container, behind the one gate, so the kernel Chromium reports is the kernel WebKit runs on too. The app containers' own check, which reads `/proc/version` and the kernel log from Python, is unchanged.
 
 ## Facts found on the way
 

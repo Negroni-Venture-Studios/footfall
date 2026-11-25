@@ -111,28 +111,44 @@ async def test_each_engine_launches_through_run_server(browsers: Browsers, engin
         await browser.close()
 
 
+# Every piece of text in a page, its open shadow roots' included.
+ALL_TEXT: Final = """() => {
+  const parts = [];
+  const walk = (root) => {
+    parts.push(root.textContent || "");
+    for (const element of root.querySelectorAll("*")) {
+      if (element.shadowRoot) walk(element.shadowRoot);
+    }
+  };
+  walk(document.documentElement);
+  return parts.join("\\n");
+}"""
+
+
 async def test_the_browser_container_runs_on_gvisors_kernel(browsers: Browsers) -> None:
     # Neither browser can read /proc through file:// under gVisor (Chromium's page comes back
     # empty and WebKit's crashes), so the kernel's release comes from what full Chromium
-    # reports of the system it runs on. Both engines are run-server's children in the one
-    # container, behind the one gate, so one kernel serves both.
+    # reports of the system it runs on: chrome://gpu names the operating system with its
+    # release, which chrome://version and navigator.userAgentData leave out on Linux. Both
+    # engines are run-server's children in the one container, behind the one gate, so one
+    # kernel serves both.
     browser = await browsers.connect("chromium")
     try:
         page = await browser.new_page()
-        await _goto(page, "chrome://version")
-        text = await page.inner_text("body")
-        hints = await page.evaluate(
-            "navigator.userAgentData ? navigator.userAgentData"
-            ".getHighEntropyValues(['platformVersion']).then(v => v.platformVersion) : ''"
-        )
+        await _goto(page, "chrome://gpu")
+        text = ""
+        for _ in range(30):  # the page fills itself in after it loads
+            text = await page.evaluate(ALL_TEXT)
+            if re.search(r"Operating system\s*Linux", text):
+                break
+            await asyncio.sleep(0.5)
     finally:
         await browser.close()
-    found = set(re.findall(r"Linux\s+(\d+\.\d+\.\d+)", text))
-    if isinstance(hints, str) and re.fullmatch(r"\d+\.\d+\.\d+", hints):
-        found.add(hints)
+    found = set(re.findall(r"Operating system\s*Linux\s+(\d+\.\d+\.\d+)", text))
     host = re.match(r"\d+\.\d+\.\d+", os.uname().release)
     assert host is not None
-    assert found == {GVISOR_RELEASE}, (found, hints, text[:2000])
+    shown = re.findall(r"Operating system[^\n]{0,60}", text)
+    assert found == {GVISOR_RELEASE}, shown or text[:1500]
     assert host.group(0) != GVISOR_RELEASE  # the host's own kernel is another
 
 
@@ -365,7 +381,10 @@ async def test_a_redirect_hop_off_the_list_is_refused_by_the_proxy(
 async def test_an_unload_beacon_and_a_keepalive_fetch_are_refused_by_the_proxy(
     browsers: Browsers, proxy_log: ProxyLog, engine: str, guarded: bool
 ) -> None:
-    """Off the list, both are refused by the proxy, with the guard installed or not.
+    """Off the list, neither leaves: with no guard the proxy refuses both, in either engine.
+
+    With the guard installed, Chromium's guard never sees them and the proxy refuses them,
+    while WebKit routes them and its guard blocks them first.
 
     Controls: a beacon and a keepalive fetch to the app itself, which the context sends
     straight there, show the browser sent them at all; and a pair to a second server on the
@@ -412,6 +431,13 @@ async def test_an_unload_beacon_and_a_keepalive_fetch_are_refused_by_the_proxy(
     for host in (beacon, keepalive):
         refused = [d for d in proxy_log.decisions(browsers.address, host) if NOT_LISTED in d]
         allowed = [d for d in proxy_log.decisions(browsers.address, host) if "allowed" in d]
-        assert (bool(refused), allowed) == (True, []), (host, seen)
-    # The guard never saw them: the proxy is the wall.
-    assert [e for e in events if {beacon, keepalive} & set(_hosts(e))] == []
+        blocked = [e for e in events if host in _hosts(e)]
+        assert allowed == [], (host, seen)
+        if not guarded or engine == "chromium":
+            # With no guard, and in Chromium, whose guard never sees a request made as the
+            # page goes, the proxy is the wall.
+            assert refused, (host, seen)
+            assert blocked == [], (host, seen)
+        else:
+            # WebKit routes these requests, so its guard blocks them before they leave.
+            assert blocked, (host, seen)
