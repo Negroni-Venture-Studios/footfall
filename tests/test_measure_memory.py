@@ -150,3 +150,14 @@ def test_no_samples_say_so() -> None:
         "kernel_peak_sum_mib": 0.0,
     }
     assert "No container was sampled" in peaks.markdown()
+
+
+def test_the_table_says_the_services_kernel_peaks_cover_their_whole_lives() -> None:
+    # The proxy, runner and orchestrator are up from compose up onwards, so their cgroup
+    # peaks include everything before the end-to-end run, such as the other isolation tests.
+    peaks = measure.Peaks()
+    peaks.note_peak("footfall-proxy", 90 * 1024**2)
+    table = peaks.markdown()
+    assert "since the stack started" in table
+    assert "not only this run" in table
+    assert "since the stack started" in (measure.__doc__ or "")

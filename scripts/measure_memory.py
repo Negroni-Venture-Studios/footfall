@@ -10,6 +10,10 @@ one container used and the most the role used at one moment, sampled, and the ke
 of one and the sum of every container's peak, an upper bound for the role at once. They go to
 a JSON file and, as a table, to the job summary, from which a deployer sizes a droplet.
 
+A run's own containers start and end within the run, so their kernel peaks are the run's. The
+proxy, the runner and the orchestrator are up since the stack started, so theirs cover all
+they did since then, the tests before the run included: an upper bound for the run alone.
+
 Run: python3 scripts/measure_memory.py --out memory.json [--summary FILE] [--interval 0.5]
 """
 
@@ -166,6 +170,13 @@ class Peaks:
             f"{report['kernel_peak_sum_mib']} MiB.",
             "",
         ]
+        if any(role in report["roles"] for role in _SERVICES.values()):
+            rows += [
+                "The proxy, runner and orchestrator have been up since the stack started, so "
+                "their kernel peaks cover all they did since then, not only this run: an upper "
+                "bound for it.",
+                "",
+            ]
         return "\n".join(rows)
 
 
