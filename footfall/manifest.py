@@ -55,6 +55,9 @@ _NOT_IN_PATHS = frozenset({"Cc", "Cs", "Cf", "Co", "Cn"})
 _DOT_SEGMENTS = frozenset({".", "..", "%2e", ".%2e", "%2e.", "%2e%2e"})
 _LARGE = 10**12
 _LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t]*\r?\n)+")
+_KEY_CAP = 64  # the most characters of a key a message shows, before any is escaped
+# A key TOML can write without quotes, which shows nothing but itself.
+_PLAIN_KEY = re.compile(rf"[A-Za-z0-9_-]{{1,{_KEY_CAP}}}")
 
 
 class ManifestError(ValueError):
@@ -134,6 +137,18 @@ def _show(value: object) -> str:
         return "a value holding a very large number"
 
 
+def _show_key(key: str) -> str:
+    """How a key appears in a message: as it is when TOML could write it without quotes, and
+    otherwise cut short and shown with repr, which escapes every control, invisible and line
+    breaking character. A quoted key can hold any character, and the file is the tested
+    repository's, so a key shown raw could write to the terminal or forge a line."""
+    if _PLAIN_KEY.fullmatch(key):
+        return key
+    if len(key) > _KEY_CAP:
+        key = key[: _KEY_CAP - 1] + "…"
+    return repr(key)
+
+
 class _Reader:
     """Reads one table's fields, noting each problem against its dotted name."""
 
@@ -144,7 +159,8 @@ class _Reader:
         self.seen: set[str] = set()
 
     def field(self, key: str) -> str:
-        return f"{self.prefix}.{key}" if self.prefix else key
+        shown = _show_key(key)
+        return f"{self.prefix}.{shown}" if self.prefix else shown
 
     def problem(self, key: str, message: str) -> None:
         self.problems.append(f"{self.field(key)}: {message}")

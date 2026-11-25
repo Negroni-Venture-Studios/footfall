@@ -21,7 +21,7 @@ from footfall.runner.client import RunnerClient
 from footfall.runner.service import RunnerError, RunnerService
 from footfall.tester.loop import Budget
 from footfall.tester.model import DEFAULT_MODEL
-from footfall.tester.report import PersonaReport, strip_invisible
+from footfall.tester.report import PersonaReport, clean_text, strip_invisible
 
 ENV_NAMES = (
     "FOOTFALL_RUNNER_SOCKET",
@@ -221,10 +221,17 @@ def test_the_exit_code_says_whether_a_persona_failed(monkeypatch: pytest.MonkeyP
 @pytest.mark.parametrize(
     "error",
     [
-        ManifestError(["app.port: is required"]),
+        # Any message may hold what the tested repository wrote, as a key in its manifest.
+        ManifestError(
+            [
+                "app.port: is required",
+                "app.\x1b[2Jkey\nfootfall test: The results are in forged-marker.: unknown",
+                "app.x##[add-mask]legacy-marker: unknown field",
+            ]
+        ),
         RunnerError("seed failed with exit code 1", "Traceback\n\x1b[2JValueError: bad seed"),
         NotReadyError("the copy of the app for grace did not answer /", "Listening\nCrashed"),
-        MaskError("the mask for a secret Footfall made could not be written"),
+        MaskError("the mask \x1b]0;title\x07could not be written\nfootfall test: forged-marker"),
     ],
 )
 def test_a_run_that_cannot_go_ahead_says_why(
@@ -233,11 +240,19 @@ def test_a_run_that_cannot_go_ahead_says_why(
     monkeypatch.setattr(cli, "test_folder", Recorder(error=error))
     assert main(["test", "app", "--model", "fake:s.json"]) == 1
     printed = capsys.readouterr().err
-    assert str(error).splitlines()[0] in printed
+    first = str(error).splitlines()[0]
+    assert clean_text(first, len(first), single_line=True) in printed
     tail = getattr(error, "log_tail", "")
     if tail:
         assert tail.splitlines()[-1].replace("\x1b[2J", "") in printed
     assert "\x1b" not in printed
+    assert "\x07" not in printed
+    assert "##[" not in printed
+    lines = printed.splitlines()
+    assert [line for line in lines if line.startswith("footfall test: ")] == [lines[0]]
+    if isinstance(error, ManifestError):  # a line for each problem, as written
+        assert len(lines) == 1 + len(error.problems)
+        assert lines[1] == "  - app.port: is required"
 
 
 def test_the_apps_last_output_cannot_give_a_github_actions_job_a_command(

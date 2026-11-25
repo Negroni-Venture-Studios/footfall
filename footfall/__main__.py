@@ -80,6 +80,8 @@ _LOG_TAIL_CAP: Final = 20_000
 _QUOTED: Final = "| "
 # The older form of a workflow command, which the runner looks for anywhere in a line.
 _LEGACY_COMMAND: Final = "##["
+_LINE_CAP: Final = 1_000  # the most characters printed of an error message, or of a problem
+_PROBLEMS_CAP: Final = 20_000  # the most characters printed of a manifest's problems
 _STOPPED: Final = 130  # the exit code when a command is stopped by a signal
 
 _DEFAULTS: Final = {
@@ -240,6 +242,23 @@ def _inert_tail(text: str) -> str:
     return "\n".join(_QUOTED + _no_legacy_commands(line) for line in text.splitlines())
 
 
+def _printable(error: Exception) -> str:
+    """An error's message, made safe to print on standard error.
+
+    A message can quote what the tested repository wrote, such as a key in its manifest, or
+    a name from its folder. So it is cleaned of control and invisible characters, made one
+    line, cut short and has every `##[` broken, so that it can neither write to the terminal
+    nor forge a line of Footfall's own output or a command for a GitHub Actions job. A
+    ManifestError keeps one line for each problem, each cleaned the same way.
+    """
+    if isinstance(error, ManifestError):
+        problems = [clean_text(p, _LINE_CAP, single_line=True) for p in error.problems]
+        text = clean_text(str(ManifestError(problems)), _PROBLEMS_CAP)
+    else:
+        text = clean_text(str(error), _LINE_CAP, single_line=True)
+    return _no_legacy_commands(strip_invisible(text))
+
+
 def _test(args: argparse.Namespace, settings: Settings) -> int:
     def say(message: str) -> None:
         print(f"footfall test: {message}", file=sys.stderr)
@@ -266,7 +285,7 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
             )
         )
     except (RunnerError, LocalRunError) as error:
-        say(str(error))
+        say(_printable(error))
         if error.log_tail:
             tail = _inert_tail(strip_invisible(clean_text(error.log_tail, _LOG_TAIL_CAP)))
             print(f"The app's last output:\n{tail}", file=sys.stderr)
@@ -279,7 +298,7 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
         MaskError,
         OSError,
     ) as error:
-        say(str(error))
+        say(_printable(error))
         return 1
     print(f"The results are in {args.out}.")
     return 1 if any(report.status == "failed" for report in reports) else 0

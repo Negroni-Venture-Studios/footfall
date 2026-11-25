@@ -161,6 +161,37 @@ def test_unknown_keys_are_refused() -> None:
     ]
 
 
+FORGED_KEY = "\x1b[2J\x1b]0;title\x07key-marker\nfootfall test: forged"
+# The same key in TOML, where a quoted key spells a control character with an escape.
+FORGED_TOML = '"\\U0000001b[2J\\U0000001b]0;title\\U00000007key-marker\\nfootfall test: forged"'
+
+
+def test_an_unknown_key_with_control_characters_is_shown_escaped() -> None:
+    shown = repr(FORGED_KEY)
+    assert "\x1b" not in shown
+    assert "\n" not in shown
+    assert problems_of(f"{FORGED_TOML} = 1\n" + MINIMAL) == [f"{shown}: unknown field"]
+    in_app = MINIMAL.replace("port = 8080", f"port = 8080\n{FORGED_TOML} = 1")
+    assert problems_of(in_app) == [f"app.{shown}: unknown field"]
+    assert problems_of(MINIMAL + f"[{FORGED_TOML}]\nx = 1\n") == [f"{shown}: unknown field"]
+
+
+def test_an_unknown_key_with_control_characters_in_a_brief_is_shown_escaped(
+    tmp_path: Path,
+) -> None:
+    repo, manifest = make_repo(tmp_path, f"+++\n{FORGED_TOML} = 1\n+++\nBody\n")
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest)
+    assert caught.value.problems == [f"default.md: {FORGED_KEY!r}: unknown field"]
+
+
+def test_a_long_unknown_key_is_cut_short() -> None:
+    (problem,) = problems_of('"' + "q" * 5000 + '" = 1\n' + MINIMAL)
+    assert problem == repr("q" * 63 + "\N{HORIZONTAL ELLIPSIS}") + ": unknown field"
+    (problem,) = problems_of("w" * 5000 + " = 1\n" + MINIMAL)  # plain, but too long
+    assert problem == repr("w" * 63 + "\N{HORIZONTAL ELLIPSIS}") + ": unknown field"
+
+
 def test_missing_required_fields() -> None:
     assert problems_of("") == ["name: is required", "app: is required"]
     assert problems_of('name = "x"\n[app]\n') == [
