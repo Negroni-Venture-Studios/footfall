@@ -8,6 +8,7 @@ that the same probe can do the allowed thing, so that a broken probe cannot pass
 import asyncio
 import ipaddress
 import os
+import re
 import socket
 from pathlib import Path
 from typing import Any
@@ -33,8 +34,9 @@ pytestmark = pytest.mark.isolation
 APP_UID = 10010
 NO_CAPABILITIES = "0000000000000000"
 STEP = MARK + "-STEP"
-# What gVisor's own kernel reports, whatever the host runs.
-GVISOR_VERSION = "Linux version 4.4.0 #1 SMP Sun Jan 10 15:06:54 PST 2016"
+# The kernel release gVisor reports names it, as in 4.19.0-gvisor, whatever the host runs.
+GVISOR_RELEASE = re.compile(r"\b\d+\.\d+\.\d+-gvisor\b")
+LOOPBACK_ONLY = "00000000000000000000000000000001"  # ::1, as /proc/net/if_inet6 writes it
 HOST_PORT = int(os.environ.get("FOOTFALL_TEST_HOST_PORT") or "0")
 HOST_ADDRESSES = (os.environ.get("FOOTFALL_TEST_HOST_ADDRESSES") or "").split()
 
@@ -59,9 +61,22 @@ def sandbox() -> dict[str, Any]:
 def test_the_app_runs_on_gvisor_not_the_host_kernel(sandbox: dict[str, Any]) -> None:
     log = sandbox["kernel_log"]
     said_gvisor = "gVisor" in log.get("dmesg", "") + log.get("klogctl", "")
-    assert said_gvisor or sandbox["proc_version"] == GVISOR_VERSION, log
+    assert said_gvisor or GVISOR_RELEASE.search(sandbox["proc_version"]), log
     # The orchestrator runs on the host's own kernel, which the app must not see.
     assert sandbox["proc_version"] != Path("/proc/version").read_text().strip()
+
+
+def test_the_app_has_no_ipv6_address_but_loopback(sandbox: dict[str, Any]) -> None:
+    # With no IPv6 address on its link, the app has no IPv6 path to the host either, such as
+    # a link-local one to an SSH server listening on every address.
+    ipv6 = sandbox["ipv6"]
+    assert ipv6["loopback"] == "connected", ipv6  # the control: IPv6 sockets do work
+    assert ipv6["links"], ipv6
+    addresses = {name: source for name, source in ipv6["links"].items() if ":" in source}
+    assert addresses == {}, ipv6
+    if isinstance(ipv6["if_inet6"], list):
+        listed = [line.split()[0] for line in ipv6["if_inet6"] if line.strip()]
+        assert set(listed) <= {LOOPBACK_ONLY}, ipv6
 
 
 def test_the_app_runs_as_its_own_user_with_no_capabilities(sandbox: dict[str, Any]) -> None:
@@ -179,6 +194,8 @@ async def test_the_app_cannot_reach_the_internet_the_metadata_address_or_the_hos
     _, writer = await asyncio.open_connection(gateway, HOST_PORT)
     writer.close()
     targets = [
+        # The control: the app reaches the egress proxy, by the name in its hosts file.
+        "footfall-proxy:3128",
         "1.1.1.1:443",
         "8.8.8.8:53",
         "example.com:443",
@@ -187,7 +204,8 @@ async def test_the_app_cannot_reach_the_internet_the_metadata_address_or_the_hos
         *(f"{host}:22" for host in host_targets),
     ]
     reached = await run.probe("connect", "connect", *targets)
-    assert [target for target, outcome in reached.items() if outcome == "connected"] == []
+    connected = [target for target, outcome in reached.items() if outcome == "connected"]
+    assert connected == ["footfall-proxy:3128"], reached
 
 
 async def test_the_orchestrator_answers_on_no_port(run: LiveRun) -> None:

@@ -107,6 +107,39 @@ def _try_create(folder: str) -> str:
     return "created"
 
 
+def _ipv6() -> dict[str, Any]:
+    """What IPv6 the container has: /proc's list of addresses, whether a socket on ::1 works
+    (the control), and the source address each other interface would use for its own link."""
+    found: dict[str, Any] = {}
+    try:
+        found["if_inet6"] = Path("/proc/net/if_inet6").read_text().splitlines()
+    except OSError as error:
+        found["if_inet6"] = errno_name(error)
+    try:
+        with socket.create_server(("::1", 0), family=socket.AF_INET6) as server:
+            port = server.getsockname()[1]
+            with socket.create_connection(("::1", port), timeout=CONNECT_TIMEOUT):
+                found["loopback"] = "connected"
+    except OSError as error:
+        found["loopback"] = errno_name(error)
+    found["links"] = {}
+    try:
+        interfaces = socket.if_nameindex()
+    except OSError as error:
+        found["links_error"] = errno_name(error)
+        interfaces = []
+    for index, name in interfaces:
+        if name == "lo":
+            continue
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as link:
+            try:
+                link.connect(("ff02::1", 9, 0, index))  # a datagram socket sends nothing
+                found["links"][name] = str(link.getsockname()[0])
+            except OSError as error:
+                found["links"][name] = errno_name(error)
+    return found
+
+
 def check_sandbox(_: Sequence[str]) -> dict[str, Any]:
     root = os.statvfs("/")
     mounts = Path("/proc/self/mounts").read_text().splitlines()
@@ -147,6 +180,7 @@ def check_sandbox(_: Sequence[str]) -> dict[str, Any]:
         "proxy": os.environ.get("HTTPS_PROXY", ""),
         "hostname": socket.gethostname(),
         "nofile": resource.getrlimit(resource.RLIMIT_NOFILE),
+        "ipv6": _ipv6(),
     }
 
 
