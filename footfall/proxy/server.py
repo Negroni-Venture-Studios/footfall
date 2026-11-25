@@ -36,13 +36,14 @@ A client's refusals are logged up to `refusal_lines` lines in each `refusal_wind
 counted past that, so that no client can rotate earlier decisions out of the log by being
 refused; the client's next line after a window says how many went unlogged.
 
-Names are looked up on a pool of threads the proxy owns, not on asyncio's, which the process
-shares. A lookup's thread cannot be stopped, and one whose name server is slow or silent holds
-it for as long as the system resolver waits, so a client's lookups in flight are bounded, and
-so are its run's. A lookup counts from before it is queued until its thread returns, even when
-the request that asked for it has given up waiting, and a request over a bound is refused with
-503. Requests from one client for a name already being looked up join that lookup, so that a
-burst of connections to one host costs one thread.
+Each run's names are looked up on a small pool of threads of its own, made at the run's first
+lookup and shut down when the run is revoked, never on a pool that runs share. A lookup's thread
+cannot be stopped, and one whose name server is slow or silent holds it for as long as the
+system resolver waits, so a run that allows such a name can hold up only its own lookups. A
+client's lookups in flight are bounded, and so are its run's. A lookup counts from before it is
+queued until its thread returns, even when the request that asked for it has given up waiting,
+and a request over a bound is refused with 503. Requests from one client for a name already
+being looked up join that lookup, so that a burst of connections to one host costs one thread.
 """
 
 import asyncio
@@ -590,7 +591,20 @@ def _client_key(ip: str) -> str:
         return ip
 
 
-def _add(counts: dict[str, int], key: str, change: int) -> None:
+async def _awaited[T](awaitable: Awaitable[T]) -> T:
+    return await awaitable
+
+
+async def _look_up(pool: ThreadPoolExecutor, host: str, port: int) -> str:
+    """Resolve `host` with the system resolver on a run's pool, to public addresses only."""
+    try:
+        return await resolve_public(host, port, resolver=pooled_resolver(pool))
+    except RuntimeError:
+        # The pool was shut down, as its run was revoked, before this lookup was queued.
+        raise HostError(f"{host} was not looked up, as its run has ended") from None
+
+
+def _add[K](counts: dict[K, int], key: K, change: int) -> None:
     """Change a count, keeping only counts above zero."""
     count = counts.get(key, 0) + change
     if count > 0:
@@ -604,16 +618,17 @@ class ProxyServer:
 
     `resolve` turns a checked name into the one public address to connect to; it raises
     HostError for a name that does not resolve to public addresses only. By default it is
-    `resolve_public` on the system resolver, run on a pool of `lookup_threads` threads that the
-    proxy owns. `open_upstream` connects to an address and port. Tests replace both, so that
-    they stay on loopback. `port` is the port each run's listener opens, on the address
-    `listen` is given.
+    `resolve_public` on the system resolver, run for each run on a pool of `lookup_threads`
+    threads of the run's own. `open_upstream` connects to an address and port. Tests replace
+    both, so that they stay on loopback. `port` is the port each run's listener opens, on the
+    address `listen` is given.
 
     The lookup bounds: a client may have `max_lookups_per_client` names being looked up at
     once, and all of a run's clients `max_lookups_per_run`. An allow list names a few hosts,
     and requests for a name already being looked up join that lookup, so 8 is well above what
-    an app or a browser loading a page needs. 16 per run leaves most of the pool of 64 to other
-    runs even when one run's every lookup is stuck; a thread blocked in a lookup costs little.
+    an app or a browser loading a page needs. A run's pool has as many threads as the run may
+    have lookups, 16, so its lookups never wait for one another; a thread blocked in a lookup
+    costs little, and the pool makes its threads only as its lookups need them.
     """
 
     def __init__(
@@ -631,7 +646,7 @@ class ProxyServer:
         max_lookups_per_run: int = 16,
         refusal_lines: int = 20,
         refusal_window: float = 60.0,
-        lookup_threads: int = 64,
+        lookup_threads: int = 16,
         open_upstream: Opener = _open_upstream,
     ) -> None:
         if idle_timeout <= 0 or unknown_poll <= 0 or unknown_wait < 0:
@@ -650,19 +665,17 @@ class ProxyServer:
         self._port = port
         self._listeners: dict[str, tuple[str, asyncio.Server]] = {}  # address -> run, server
         self._listening = asyncio.Lock()
-        self._lookup_pool: ThreadPoolExecutor | None = None
-        if resolve is None:
-            self._lookup_pool = ThreadPoolExecutor(
-                lookup_threads, thread_name_prefix="footfall-lookup"
-            )
-            resolve = functools.partial(resolve_public, resolver=pooled_resolver(self._lookup_pool))
-        self._resolve = resolve
+        self._resolve = resolve  # None: the system resolver, on each run's own pool
+        self._lookup_threads = lookup_threads
+        self._lookup_pools: dict[str, ThreadPoolExecutor] = {}  # by run
         self._max_lookups_per_client = max_lookups_per_client
         self._max_lookups_per_run = max_lookups_per_run
         self._refusal_lines = _RefusalLines(refusal_lines, refusal_window)
-        # Lookups in flight, by client, name and port, and how many each client and run holds.
-        self._lookups: dict[tuple[str, str, int], asyncio.Task[str]] = {}
-        self._lookups_by_client: dict[str, int] = {}
+        # Lookups in flight, by run, client, name and port, and how many each of a run's clients
+        # and each run holds. A client is counted with its run, so that a run given an address
+        # another run held starts with nothing counted against it.
+        self._lookups: dict[tuple[str, str, str, int], asyncio.Task[str]] = {}
+        self._lookups_by_client: dict[tuple[str, str], int] = {}
         self._lookups_by_run: dict[str, int] = {}
         self._idle = idle_timeout
         self._unknown_wait = unknown_wait
@@ -731,7 +744,12 @@ class ProxyServer:
             self._listeners[address] = (run_id, server)
 
     async def close_run(self, run_id: str) -> int:
-        """Stop listening wherever a run listens, and return how many listeners closed."""
+        """Stop listening wherever a run listens, and shut its lookup pool down. Returns how
+        many listeners closed."""
+        pool = self._lookup_pools.pop(run_id, None)
+        if pool is not None:
+            # Threads blocked in a lookup cannot be stopped; they end when the resolver gives up.
+            pool.shutdown(wait=False, cancel_futures=True)
         async with self._listening:
             addresses = [key for key, (owner, _) in self._listeners.items() if owner == run_id]
             for address in addresses:
@@ -745,9 +763,9 @@ class ProxyServer:
             for _, server in self._listeners.values():
                 server.close()
             self._listeners.clear()
-        if self._lookup_pool is not None:
-            # Threads blocked in a lookup cannot be stopped; they end when the resolver gives up.
-            self._lookup_pool.shutdown(wait=False, cancel_futures=True)
+        for pool in self._lookup_pools.values():
+            pool.shutdown(wait=False, cancel_futures=True)
+        self._lookup_pools.clear()
 
     # ------------------------------------------------------------ connections
 
@@ -881,27 +899,37 @@ class ProxyServer:
         count is given back only when the lookup ends, which for the system resolver is when its
         thread returns.
         """
-        key = (client, host, port)
+        key = (run_id, client, host, port)
         lookup = self._lookups.get(key)
         if lookup is not None:
             return lookup
-        if self._lookups_by_client.get(client, 0) >= self._max_lookups_per_client:
+        if self._lookups_by_client.get((run_id, client), 0) >= self._max_lookups_per_client:
             raise _Refusal(503, "too many name lookups in flight for this client")
         if self._lookups_by_run.get(run_id, 0) >= self._max_lookups_per_run:
             raise _Refusal(503, "too many name lookups in flight for this run")
-        _add(self._lookups_by_client, client, 1)
+        _add(self._lookups_by_client, (run_id, client), 1)
         _add(self._lookups_by_run, run_id, 1)
-        lookup = asyncio.create_task(self._look_up(host, port))
+        if self._resolve is not None:
+            lookup = asyncio.create_task(_awaited(self._resolve(host, port)))
+        else:
+            lookup = asyncio.create_task(_look_up(self._lookup_pool(run_id), host, port))
         self._lookups[key] = lookup
-        lookup.add_done_callback(functools.partial(self._looked_up, key, run_id))
+        lookup.add_done_callback(functools.partial(self._looked_up, key))
         return lookup
 
-    async def _look_up(self, host: str, port: int) -> str:
-        return await self._resolve(host, port)
+    def _lookup_pool(self, run_id: str) -> ThreadPoolExecutor:
+        """The run's own lookup pool, made at its first lookup."""
+        pool = self._lookup_pools.get(run_id)
+        if pool is None:
+            pool = self._lookup_pools[run_id] = ThreadPoolExecutor(
+                self._lookup_threads, thread_name_prefix=f"footfall-lookup-{run_id}"
+            )
+        return pool
 
-    def _looked_up(self, key: tuple[str, str, int], run_id: str, lookup: asyncio.Task[str]) -> None:
+    def _looked_up(self, key: tuple[str, str, str, int], lookup: asyncio.Task[str]) -> None:
         del self._lookups[key]
-        _add(self._lookups_by_client, key[0], -1)
+        run_id, client, _, _ = key
+        _add(self._lookups_by_client, (run_id, client), -1)
         _add(self._lookups_by_run, run_id, -1)
         if not lookup.cancelled():
             lookup.exception()  # retrieved here, as every waiter may have given up

@@ -14,6 +14,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,7 +22,7 @@ import pytest
 
 from footfall.hosts import HostError, resolve_public
 from footfall.proxy.policy import Policy
-from footfall.proxy.server import MAX_HEAD, ProxyServer, _RefusalLines
+from footfall.proxy.server import MAX_HEAD, ProxyServer, _look_up, _RefusalLines
 from tests.tls_hellos import (
     CHANGE_CIPHER_SPEC,
     HELLO_RETRY,
@@ -1338,6 +1339,64 @@ async def test_an_abandoned_lookup_counts_until_its_thread_returns(lookups: Look
                     if (await head(reader)).startswith(b"HTTP/1.1 200"):
                         break
                 await asyncio.sleep(0.05)
+
+
+def lookup_threads(run_id: str) -> int:
+    """How many threads of a run's own lookup pool are alive."""
+    return sum(
+        thread.name.startswith(f"footfall-lookup-{run_id}") for thread in threading.enumerate()
+    )
+
+
+async def test_a_run_at_its_lookup_bound_does_not_delay_another_runs(lookups: Lookups) -> None:
+    slow = ["slow0.example.com", "slow1.example.com"]
+    bounds: dict[str, Any] = {
+        "lookup_threads": 2,
+        "max_lookups_per_client": 2,
+        "max_lookups_per_run": 2,
+    }
+    async with running(real_resolve=True, **bounds) as live, second_listener(live) as port:
+        live.policy.allow(CLIENT, RUN, slow)
+        live.policy.allow(SECOND, OTHER_RUN, [ALLOWED])
+        async with connecting(CLIENT, live.port, [f"{name}:443" for name in slow]):
+            await lookups.wait_blocked(2)  # the first run is at its bound, its threads all stuck
+            started = time.monotonic()
+            async with connecting(SECOND, port, [f"{ALLOWED}:443"]) as [(reader, _)]:
+                reply = await head(reader, timeout=2.0)
+            assert reply.startswith(b"HTTP/1.1 200")
+            assert time.monotonic() - started < 1.0
+            lookups.released.set()
+
+
+async def test_a_revoked_runs_lookup_pool_and_budget_are_released(lookups: Lookups) -> None:
+    slow = ["slow0.example.com", "slow1.example.com"]
+    bounds: dict[str, Any] = {"max_lookups_per_client": 2, "max_lookups_per_run": 2}
+    async with running(real_resolve=True, **bounds) as live:
+        live.policy.allow(CLIENT, RUN, slow)
+        async with connecting(CLIENT, live.port, [f"{name}:443" for name in slow]):
+            await lookups.wait_blocked(2)
+            assert lookup_threads(RUN) == 2  # the run's own pool
+            live.policy.revoke_run(RUN)
+            await live.proxy.close_run(RUN)
+            # The address goes to another run, which starts with nothing counted against it,
+            # while the first run's lookups are still stuck.
+            live.policy.allow(CLIENT, OTHER_RUN, [ALLOWED])
+            async with connecting(CLIENT, live.port, [f"{ALLOWED}:443"]) as [(reader, _)]:
+                assert (await head(reader, timeout=2.0)).startswith(b"HTTP/1.1 200")
+            assert lookups.blocked == 2
+            lookups.released.set()
+        async with asyncio.timeout(TIMEOUT):
+            while lookup_threads(RUN):
+                await asyncio.sleep(0.01)
+        assert lookup_threads(OTHER_RUN) == 1  # the other run's pool stays until it is revoked
+
+
+async def test_a_lookup_queued_after_its_run_ended_does_not_resolve() -> None:
+    # A revoke can shut a run's pool down between a lookup being made and its being queued.
+    pool = ThreadPoolExecutor(1)
+    pool.shutdown()
+    with pytest.raises(HostError, match="its run has ended"):
+        await _look_up(pool, ALLOWED, 443)
 
 
 # ---------------------------------------------------------------- what was reached
