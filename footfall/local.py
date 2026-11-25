@@ -37,7 +37,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Final, Protocol, TextIO
+from typing import Any, Final, NoReturn, Protocol, TextIO
 from urllib.parse import quote as url_quote
 
 from playwright.async_api import Browser, async_playwright
@@ -247,7 +247,8 @@ class _Linked:
     fails closed: a folder in it that cannot be read refuses the copy.
     """
 
-    def __init__(self, folders: Sequence[Path] = ()) -> None:
+    def __init__(self, folders: Sequence[Path] = (), problem: str | None = None) -> None:
+        self._problem = problem  # why the git folders could not be found, if they could not
         tops: list[Path] = []
         for folder in sorted({Path(os.path.realpath(f)) for f in folders}, key=lambda p: p.parts):
             if not any(folder.is_relative_to(top) for top in tops):
@@ -256,20 +257,31 @@ class _Linked:
         self._found: frozenset[_Identity] | None = None
 
     def holds(self, info: os.stat_result) -> bool:
-        """Whether the file `info` describes is also one of the git folders' files."""
-        if info.st_nlink <= 1 or not self._folders:
+        """Whether the file `info` describes is also one of the git folders' files.
+
+        A file with one name is never one of them. For a file with another name, when the
+        git folders could not be found, LocalRunError refuses the copy.
+        """
+        if info.st_nlink <= 1:
+            return False
+        if self._problem is not None:
+            raise LocalRunError(
+                f"a file to copy has another name, and {self._problem}, so Footfall cannot "
+                f"check that the other name is not in the repository's git folder; {_LINK_ADVICE}"
+            )
+        if not self._folders:
             return False
         if self._found is None:
             self._found = self._collect()
         return (info.st_dev, info.st_ino) in self._found
 
     def _collect(self) -> frozenset[_Identity]:
-        def unreadable(error: OSError) -> None:
+        def unreadable(error: OSError) -> NoReturn:
             why = error.strerror or type(error).__name__
             raise LocalRunError(
                 f"a file to copy has another name, and {_shown(error.filename)}, in the "
                 f"repository's git folder, could not be read to check that the other name is "
-                f"not there ({why}); {_GIT_ADVICE}"
+                f"not there ({why}); {_LINK_ADVICE}"
             )
 
         found: set[_Identity] = set()
@@ -303,6 +315,13 @@ class _Listing:
 
 
 _GIT_ADVICE: Final = "pass --all-files to copy every file in the folder, ignored ones included"
+# Where the hard-link check cannot run, --all-files does not help: it runs the same check.
+_LINK_ADVICE: Final = (
+    "remove the files' other names, the hard links, or make the repository's git folders "
+    "readable where Footfall runs, for example by mounting them as well as the folder"
+)
+_SMALL_FILE: Final = 4096  # the most read of a .git file or a commondir file
+_MOST_SUPERPROJECTS: Final = 32
 
 
 def _git_env() -> dict[str, str]:
@@ -385,10 +404,21 @@ def _git_folder_paths(git: str, folder: Path) -> list[Path]:
 
 
 def _superproject_git_folders(git: str, folder: Path) -> list[Path]:
-    """When `folder` is in a submodule, its superproject's git folders; otherwise none."""
-    where = _run_git(git, folder, ["rev-parse", "--show-superproject-working-tree"])
-    superproject = os.fsdecode(where.removesuffix(b"\n"))
-    return _git_folder_paths(git, Path(superproject)) if superproject else []
+    """When `folder` is in a submodule, the git folders of its superproject, and of that
+    one's when it is a submodule too, out to the outermost; otherwise none. Raises
+    LocalRunError past `_MOST_SUPERPROJECTS` levels."""
+    found: list[Path] = []
+    current = folder
+    for _ in range(_MOST_SUPERPROJECTS):
+        where = _run_git(git, current, ["rev-parse", "--show-superproject-working-tree"])
+        superproject = os.fsdecode(where.removesuffix(b"\n"))
+        if not superproject:
+            return found
+        current = Path(superproject)
+        found += _git_folder_paths(git, current)
+    raise LocalRunError(
+        f"{_shown(folder)} lies in submodules more than {_MOST_SUPERPROJECTS} levels deep"
+    )
 
 
 def _git_folders(
@@ -451,39 +481,104 @@ def _known_git_folders(folder: Path) -> frozenset[_Identity]:
         return frozenset()
 
 
+class _Undiscoverable(Exception):
+    """A `.git` that Footfall will not follow, or a git folder it names that is not one."""
+
+
+def _read_small(path: Path) -> bytes:
+    """At most `_SMALL_FILE` bytes of a regular file, never through a link and never from a
+    FIFO or a device, which could block or never end. Raises _Undiscoverable otherwise, and
+    for a NUL, which no path holds."""
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise _Undiscoverable(f"{_shown(path)} is not a plain file")
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        raise _Undiscoverable(f"Footfall cannot read {_shown(path)} ({error.strerror})") from None
+    try:
+        if not stat.S_ISREG(os.fstat(handle).st_mode):
+            raise _Undiscoverable(f"{_shown(path)} is not a plain file")
+        data = os.read(handle, _SMALL_FILE)
+    finally:
+        os.close(handle)
+    if b"\0" in data:
+        raise _Undiscoverable(f"{_shown(path)} holds a NUL")
+    return data
+
+
+def _first_line(data: bytes) -> str:
+    return os.fsdecode(data.split(b"\n", 1)[0].removesuffix(b"\r"))
+
+
+def _git_shaped(path: Path) -> bool:
+    return _shaped_like_a_git_folder(lambda name: _kind(str(path / name)))
+
+
+def _must_be_git_shaped(path: Path, named_by: Path) -> Path:
+    if not _git_shaped(path):
+        raise _Undiscoverable(
+            f"{_shown(named_by)} names {_shown(path)}, which is not shaped like a git folder"
+        )
+    return path
+
+
 def _discovered_git_folders(folder: Path) -> list[Path]:
     """The git folders that `folder` and each folder above it name, found as git finds them,
-    without git: a `.git` folder, or the folder a `.git` file's `gitdir:` line names, with its
-    `commondir`. None at all means `folder` is in no repository; a superproject's, for a
-    submodule, is among them. Raises LocalRunError for a `.git` that cannot be read or is
-    neither, since Footfall then cannot tell where a git folder is.
+    without git: a `.git` folder, the folder a `.git` file's `gitdir:` line names, with the
+    folder its `commondir` names, and a folder that is itself shaped like a git folder, as an
+    implicit bare repository is. None at all means `folder` is in no repository; for a
+    submodule, the superproject's are among them.
+
+    Only plain files are read, never through a link, and at most `_SMALL_FILE` bytes of
+    each, and each folder named must be shaped like a git folder. Unlike git, Footfall does
+    not follow a `.git` that is a link, and does not stop at the first repository or at a
+    file system's edge, so an odd `.git` above the repository counts against it: where it
+    differs from git it can only refuse more. Raises _Undiscoverable for what it will not
+    follow or cannot read.
     """
     found: list[Path] = []
-    for here in (folder.resolve(), *folder.resolve().parents):
-        entry = here / ".git"
-        try:
-            info = entry.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            raise LocalRunError(f"cannot read {_shown(entry)} ({error.strerror})") from None
-        if stat.S_ISDIR(info.st_mode):
-            found.append(entry)
-            continue
-        try:
-            text = entry.read_bytes()[:4096] if stat.S_ISREG(info.st_mode) else b""
-        except OSError as error:
-            raise LocalRunError(f"cannot read {_shown(entry)} ({error.strerror})") from None
-        line = os.fsdecode(text.split(b"\n", 1)[0].removesuffix(b"\r"))
-        if not line.startswith("gitdir: "):
-            raise LocalRunError(
-                f"cannot tell where the git folder {_shown(entry)} names is; {_GIT_ADVICE}"
-            )
-        gitdir = here / line.removeprefix("gitdir: ")
-        found.append(gitdir)
-        with contextlib.suppress(OSError):
-            common = (gitdir / "commondir").read_bytes()[:4096].split(b"\n", 1)[0]
-            found.append(gitdir / os.fsdecode(common.removesuffix(b"\r")))
+    try:
+        start = folder.resolve()
+        for here in (start, *start.parents):
+            entry = here / ".git"
+            try:
+                info = entry.lstat()
+            except FileNotFoundError:
+                if _git_shaped(here):
+                    found.append(here)
+                continue
+            except OSError as error:
+                raise _Undiscoverable(
+                    f"Footfall cannot read {_shown(entry)} ({error.strerror})"
+                ) from None
+            if stat.S_ISDIR(info.st_mode):
+                found.append(_must_be_git_shaped(entry, entry))
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise _Undiscoverable(
+                    f"{_shown(entry)} is a link or another kind of file, which Footfall does "
+                    "not follow"
+                )
+            line = _first_line(_read_small(entry))
+            if not line.startswith("gitdir: "):
+                raise _Undiscoverable(
+                    f"Footfall cannot tell where the git folder {_shown(entry)} names is"
+                )
+            gitdir = _must_be_git_shaped(here / line.removeprefix("gitdir: "), entry)
+            found.append(gitdir)
+            commondir = gitdir / "commondir"
+            try:
+                commondir.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise _Undiscoverable(
+                    f"Footfall cannot read {_shown(commondir)} ({error.strerror})"
+                ) from None
+            common = gitdir / _first_line(_read_small(commondir))
+            found.append(_must_be_git_shaped(common, commondir))
+    except ValueError as error:  # a path the operating system cannot take
+        raise _Undiscoverable(f"a git folder's path cannot be used ({error})") from None
     return found
 
 
@@ -496,8 +591,12 @@ def _known_linked(folder: Path) -> _Linked:
     asked too. When git cannot read the repository at all, as when another user owns it,
     which is what --all-files is for, or git is not installed, the folders Footfall found
     stand in; when git reads it but cannot say whether it is a submodule, the copy is refused.
+    When Footfall cannot find them, a file with another name is refused, and no other.
     """
-    discovered = _discovered_git_folders(folder)
+    try:
+        discovered = _discovered_git_folders(folder)
+    except _Undiscoverable as problem:
+        return _Linked(problem=str(problem))  # refuses only a file with another name
     if not discovered:
         return _NO_LINKS
     try:

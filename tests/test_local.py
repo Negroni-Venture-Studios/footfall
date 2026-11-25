@@ -17,6 +17,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
@@ -1983,3 +1984,143 @@ def test_a_moved_git_folder_git_cannot_read_is_found_through_its_git_file(
     os.link(moved / "config", folder / "settings.ini")
     linked = local._known_linked(folder)
     assert linked.holds((folder / "settings.ini").lstat())
+
+
+# ---------------------------------------------------------------- discovery, fix round 3
+
+
+def linked_file(folder: Path) -> os.stat_result:
+    """A file in the folder with a second name, so that the hard-link check must run."""
+    os.link(folder / "serve.py", folder / "serve-again.py")
+    return (folder / "serve-again.py").lstat()
+
+
+def refused_for(folder: Path, match: str) -> None:
+    """The --all-files check, once a file with another name needs it, refuses the copy."""
+    info = linked_file(folder)
+    linked = local._known_linked(folder)
+    with pytest.raises(LocalRunError, match=match) as caught:
+        linked.holds(info)
+    assert "--all-files" not in str(caught.value)  # advice that would not help
+
+
+def test_a_commondir_that_is_a_fifo_is_refused_without_waiting(tmp_path: Path) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    gitdir = folder / "g"
+    shaped_folder(gitdir)
+    (folder / ".git").write_text("gitdir: g\n")
+    os.mkfifo(gitdir / "commondir")
+    done: list[BaseException | None] = []
+
+    def look() -> None:
+        try:
+            refused_for(folder, "not a plain file")
+            done.append(None)
+        except BaseException as error:  # noqa: BLE001  # reported below
+            done.append(error)
+
+    worker = threading.Thread(target=look, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    if worker.is_alive():  # free the reader that waits on the FIFO, then fail
+        with contextlib.suppress(OSError):
+            os.close(os.open(gitdir / "commondir", os.O_WRONLY | os.O_NONBLOCK))
+        pytest.fail("discovery waited on a FIFO")
+    assert done == [None], done
+
+
+@pytest.mark.parametrize(
+    ("make", "match"),
+    [
+        ("commondir-link", "not a plain file"),
+        ("git-file-nul", "NUL"),
+        ("gitdir-root", "not shaped like a git folder"),
+        ("gitdir-elsewhere", "not shaped like a git folder"),
+        ("no-gitdir-line", "cannot tell where"),
+        ("git-link", "link"),
+        ("unreadable", "cannot read"),
+        ("huge-line", "not shaped like a git folder"),
+    ],
+)
+def test_a_git_entry_footfall_cannot_follow_refuses_a_linked_file(
+    tmp_path: Path, make: str, match: str
+) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    git_file = folder / ".git"
+    if make == "commondir-link":
+        shaped_folder(folder / "g")
+        git_file.write_text("gitdir: g\n")
+        (folder / "g" / "commondir").symlink_to("/etc/hosts")
+    elif make == "git-file-nul":
+        git_file.write_bytes(b"gitdir: g\0h\n")
+    elif make == "gitdir-root":
+        git_file.write_text("gitdir: /\n")
+    elif make == "gitdir-elsewhere":
+        (folder / "plain").mkdir()
+        git_file.write_text("gitdir: plain\n")
+    elif make == "no-gitdir-line":
+        git_file.write_text("not what git writes\n")
+    elif make == "git-link":
+        shaped_folder(folder / "real")
+        git_file.symlink_to("real")
+    elif make == "unreadable":
+        git_file.write_text("gitdir: g\n")
+        git_file.chmod(0)
+    elif make == "huge-line":
+        git_file.write_text("gitdir: " + "g" * 100_000)
+    try:
+        refused_for(folder, match)
+    finally:
+        if git_file.exists() and not git_file.is_symlink():
+            git_file.chmod(0o644)
+
+
+def test_a_file_with_one_name_is_copied_however_odd_the_git_entry(tmp_path: Path) -> None:
+    """The check runs only for a file with another name, so nothing else is held back."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    (folder / ".git").write_text("gitdir: /\n")
+    local._copy_folder(
+        folder, tmp_path / "copy", tmp_path / "out", frozenset(), local._known_linked(folder)
+    )
+    assert (tmp_path / "copy" / "serve.py").exists()
+
+
+def test_a_linked_worktrees_common_folder_is_found_without_git(tmp_path: Path) -> None:
+    """The commondir a worktree's git folder names is walked too, when git cannot help."""
+    main = tmp_path / "main"
+    app_files(main)
+    git(main, "init", "-q")
+    commit_all(main)
+    git(main, "worktree", "add", "-q", str(tmp_path / "other"))
+    found = local._discovered_git_folders(tmp_path / "other")
+    assert (main / ".git").resolve() in {path.resolve() for path in found}
+
+
+def test_an_implicit_bare_repository_is_a_git_folder(tmp_path: Path) -> None:
+    bare = tmp_path / "bare"
+    git(tmp_path, "init", "-q", "--bare", "bare")
+    folder = bare / "app"
+    app_files(folder)
+    assert bare.resolve() in {path.resolve() for path in local._discovered_git_folders(folder)}
+
+
+def test_a_nested_submodule_refuses_links_to_every_superprojects_config(tmp_path: Path) -> None:
+    """outer contains lib, which contains inner: testing inner, a hard link to outer's
+    configuration is refused, as one to lib's is."""
+    for name in ("inner", "lib", "outer"):
+        app_files(tmp_path / name)
+        git(tmp_path / name, "init", "-q")
+        commit_all(tmp_path / name)
+    allow = ("-c", "protocol.file.allow=always")
+    git(tmp_path / "lib", *allow, "submodule", "add", "-q", str(tmp_path / "inner"), "inner")
+    commit_all(tmp_path / "lib")
+    git(tmp_path / "outer", *allow, "submodule", "add", "-q", str(tmp_path / "lib"), "lib")
+    git(tmp_path / "outer", *allow, "submodule", "update", "--init", "--recursive", "-q")
+    folder = tmp_path / "outer" / "lib" / "inner"
+    os.link(tmp_path / "outer" / ".git" / "config", folder / "notes.cfg")
+    info = (folder / "notes.cfg").lstat()
+    assert local._git_files(folder).linked.holds(info)
+    assert local._known_linked(folder).holds(info)
