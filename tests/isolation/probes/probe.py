@@ -565,6 +565,27 @@ def check_sparse(arguments: Sequence[str]) -> dict[str, Any]:
     return {"sparse_mib": size}
 
 
+def check_chain(arguments: Sequence[str]) -> dict[str, Any]:
+    """Make a chain of `depth` folders, each with a name of 255 bytes, in the workspace: cheap
+    on disk, as deep as code under test likes, and what a remover must not hold open."""
+    depth = int(arguments[0])
+    name = "d" * 255
+    start = os.open(WORKSPACE, os.O_RDONLY | os.O_DIRECTORY)
+    folder = start
+    try:
+        for _ in range(depth):
+            os.mkdir(name, dir_fd=folder)
+            inner = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=folder)
+            if folder != start:
+                os.close(folder)
+            folder = inner
+    finally:
+        if folder != start:
+            os.close(folder)
+        os.close(start)
+    return {"depth": depth}
+
+
 # ---------------------------------------------------------------- servers
 
 
@@ -746,6 +767,7 @@ CHECKS: Final[dict[str, Callable[[Sequence[str]], dict[str, Any]]]] = {
     "read": check_read,
     "fill": check_fill,
     "sparse": check_sparse,
+    "chain": check_chain,
 }
 SERVERS: Final[dict[str, Callable[[Sequence[str]], None]]] = {
     "pages": serve_pages,

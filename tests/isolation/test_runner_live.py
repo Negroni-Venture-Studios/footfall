@@ -70,3 +70,13 @@ async def test_a_seed_that_writes_past_the_disk_budget_is_stopped(new_run: NewRu
 
 async def test_a_sparse_file_counts_at_its_full_size(new_run: NewRun) -> None:
     await _stopped_for_disk(new_run, f"{PROBE} sparse 1024")
+
+
+async def test_a_seed_that_makes_a_deep_tree_is_stopped_and_its_folder_removed(
+    new_run: NewRun,
+) -> None:
+    """Audit V-01: code under test chooses how deep its tree is. A chain of 2,000 folders
+    with 255-byte names is past the measure's depth, so the run is stopped, and the runner
+    removes it holding a few folders open, not one for each level: the status carries no
+    stop that could not finish, which it would if the folder had stayed."""
+    await _stopped_for_disk(new_run, f"{PROBE} chain 2000")
