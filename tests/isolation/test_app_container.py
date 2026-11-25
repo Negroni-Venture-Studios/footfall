@@ -23,6 +23,7 @@ from tests.isolation.live import (
     RUNNER_SOCKET,
     LiveRun,
     NewRun,
+    fact,
     finish,
     lines,
     local_address_towards,
@@ -105,6 +106,10 @@ def test_the_root_file_system_is_read_only(sandbox: dict[str, Any]) -> None:
 
 
 def test_tmp_runs_nothing_and_a_crash_dumps_no_core(sandbox: dict[str, Any]) -> None:
+    fact(
+        "an app container's /tmp and core limit",
+        {key: sandbox[key] for key in ("run", "tmp_options", "core")},
+    )
     # The control: the same script runs from the workspace, so the probe can run one.
     assert sandbox["run"] == {"/workspace": "ran", "/tmp": "EACCES"}, sandbox["run"]  # noqa: S108
     assert {"noexec", "nosuid", "nodev"} <= set(sandbox["tmp_options"]), sandbox["tmp_options"]
@@ -163,6 +168,7 @@ async def test_allocating_600_mib_kills_the_allocation(run: LiveRun) -> None:
 
 async def test_a_fork_bomb_stops_at_the_process_limit(run: LiveRun) -> None:
     result = await run.probe("processes", "processes", "1000")
+    fact("a fork bomb under a limit of 256 processes", result)
     # On Linux the process limit refuses the 256th with EAGAIN. Under gVisor each process
     # also costs the sandbox host memory, and the memory limit refuses one first, with
     # ENOMEM, at about 110 (docs/notes/gvisor-differences.md). Either way the bomb stops

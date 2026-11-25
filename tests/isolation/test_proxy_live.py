@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from tests.isolation.live import PROBE, LiveRun, NewRun, ProxyLog, allowed
+from tests.isolation.live import PROBE, LiveRun, NewRun, ProxyLog, allowed, fact
 
 pytestmark = pytest.mark.isolation
 
@@ -68,8 +68,11 @@ async def test_registries_are_reachable_during_install_and_refused_after(
 async def test_footfall_proxy_resolves_on_a_run_network(run: LiveRun) -> None:
     sandbox = await run.probe("sandbox", "sandbox")
     proxy = sandbox["proxy"].removeprefix("http://").rpartition(":")[0]
-    resolved = await run.probe("resolve", "resolve", "footfall-proxy")
-    assert resolved == {"footfall-proxy": [proxy]}
+    resolved = await run.probe("resolve", "resolve", "footfall-proxy", "footfall-orchestrator")
+    # The proxy is in the hosts file; the orchestrator, on the same network, only in Docker's
+    # name service, which docs/notes/gvisor-differences.md says gVisor does not reach.
+    fact("names on a run's network, from an app container", resolved)
+    assert resolved["footfall-proxy"] == [proxy]
 
 
 async def test_the_proxy_answers_on_its_port_alone(run: LiveRun) -> None:

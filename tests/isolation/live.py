@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
 
+from footfall.actions import mask
 from footfall.local import new_run_id
 from footfall.runner.client import RunnerClient
 
@@ -157,7 +158,11 @@ def make_workspace(run_id: str, *, app: Path = DEMO_APP) -> Path:
 
 
 def throwaway_account() -> tuple[str, str]:
-    return "tester-" + secrets.token_hex(4), secrets.token_urlsafe(24)
+    """An account for a run's seed step, made as `footfall test` makes one, its password
+    masked in a GitHub Actions log before anything can print it."""
+    password = secrets.token_urlsafe(24)
+    mask(password)
+    return "tester-" + secrets.token_hex(4), password
 
 
 async def prepare(
@@ -266,6 +271,13 @@ class ProxyLog:
                     f"no {outcome!r} decision for {host} from {client}; the proxy said: {seen}"
                 )
             await asyncio.sleep(POLL)
+
+
+def fact(name: str, data: object) -> None:
+    """Write what a test found about gVisor or Docker to the job's log, as it is found, so
+    that docs/notes/gvisor-differences.md can be checked against every run. It goes straight
+    to file descriptor 1, which pytest's sys-level capture leaves alone. Never a secret."""
+    os.write(1, f"FOOTFALL-FACT {name}: {json.dumps(data, sort_keys=True)}\n".encode())
 
 
 def record_result(name: str, data: object) -> None:
