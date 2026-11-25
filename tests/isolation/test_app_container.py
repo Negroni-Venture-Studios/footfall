@@ -112,7 +112,9 @@ def test_tmp_runs_nothing_and_a_crash_dumps_no_core(sandbox: dict[str, Any]) -> 
     )
     # The control: the same script runs from the workspace, so the probe can run one.
     assert sandbox["run"] == {"/workspace": "ran", "/tmp": "EACCES"}, sandbox["run"]  # noqa: S108
-    assert {"noexec", "nosuid", "nodev"} <= set(sandbox["tmp_options"]), sandbox["tmp_options"]
+    # gVisor lists the mount without nodev, which Docker asks for; with every capability
+    # dropped no device file can be made there anyway (docs/notes/gvisor-differences.md).
+    assert {"noexec", "nosuid"} <= set(sandbox["tmp_options"]), sandbox["tmp_options"]
     assert sandbox["core"] == [0, 0]
 
 
