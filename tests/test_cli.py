@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import os
+import re
 import signal
 import socket
 import stat
@@ -336,6 +337,15 @@ def test_a_run_that_cannot_go_ahead_says_why(
         assert lines[1] == "  - app.port: is required"
 
 
+# Unicode's default-ignorable code points (DerivedCoreProperties.txt), which a comparison
+# that skips what shows nothing might skip.
+IGNORABLE = re.compile(
+    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
+    "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3"
+    "\U0001d173-\U0001d17a\U000e0000-\U000e0fff]"
+)
+
+
 def test_the_apps_last_output_cannot_give_a_github_actions_job_a_command(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -354,6 +364,10 @@ def test_the_apps_last_output_cannot_give_a_github_actions_job_a_command(
         "\r::group::tail-marker-return",
         "before\u2028::debug::tail-marker-separator",
         "\x1b[2J::error::tail-marker-escape",
+        # Default-ignorable characters that cleaning keeps, which the runner might skip.
+        "#\u180b#[error]tail-marker-mongolian",
+        "#\u3164#\u17b4[error]tail-marker-hangul",
+        "#\U000e0001#\ufeff[error]tail-marker-tag",
     ]
     tail = "\n".join(lines)
     monkeypatch.setattr(cli, "test_folder", Recorder(error=RunnerError("install failed", tail)))
@@ -361,7 +375,7 @@ def test_the_apps_last_output_cannot_give_a_github_actions_job_a_command(
     printed = strip_invisible(capsys.readouterr().err)
     for line in printed.splitlines():
         assert not line.lstrip().startswith("::"), line
-    assert "##[" not in printed
+    assert "##[" not in IGNORABLE.sub("", printed)
     for line in lines:  # still all there to read
         assert "tail-marker-" + line.rsplit("tail-marker-", 1)[1] in printed
 

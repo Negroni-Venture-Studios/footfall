@@ -24,6 +24,7 @@ caller stops before the secret is used unmasked.
 """
 
 import os
+import re
 import stat
 from collections.abc import Mapping, Sequence
 
@@ -34,8 +35,17 @@ __all__ = ["MaskError", "mask", "no_legacy_commands"]
 _ESCAPES = str.maketrans({"%": "%25"})
 # Standard output, then standard error.
 _STREAMS: tuple[int, ...] = (1, 2)
-# The older form of a workflow command, which the runner looks for anywhere in a line.
-_LEGACY_COMMAND = "##["
+# Unicode's default-ignorable code points (DerivedCoreProperties.txt): characters that show
+# nothing, some of which cleaning keeps, such as the Mongolian variation selectors and the
+# Hangul fillers.
+_IGNORABLE = (
+    "\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
+    "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3"
+    "\U0001d173-\U0001d17a\U000e0000-\U000e0fff"
+)
+# The older form of a workflow command, `##[`, which the runner looks for anywhere in a line,
+# with any characters that show nothing between its own, which a comparison could skip.
+_LEGACY_COMMAND = re.compile(f"#[{_IGNORABLE}]*#[{_IGNORABLE}]*\\[")
 
 
 class MaskError(RuntimeError):
@@ -48,9 +58,11 @@ def no_legacy_commands(text: str) -> str:
 
     The runner looks for `##[` anywhere in a line of a step's output, in a comparison that
     can skip characters that show nothing, so text that can come from the code under test is
-    stripped of those first, and then passed through this, before Footfall prints it.
+    stripped of those first, and then passed through this, before Footfall prints it. A
+    `##[` with default-ignorable characters between its own, which stripping keeps, is
+    broken too, and loses them.
     """
-    return text.replace(_LEGACY_COMMAND, "## [")
+    return _LEGACY_COMMAND.sub("## [", text)
 
 
 def _a_pipe_or_terminal(fd: int) -> bool:
