@@ -30,7 +30,7 @@ Always use `uv run`. Never install into the system Python.
 | Path | What |
 |---|---|
 | `footfall/` | The Python package. Phase 1 adds the runner (`runner/`), the egress proxy (`proxy/`) and the tester (`tester/`) |
-| `tests/` | pytest suite; `tests/isolation/` will hold the tests that need the real stack |
+| `tests/` | pytest suite; `tests/isolation/` holds the tests that need the real stack, which run only in `.github/workflows/isolation.yml` |
 | `scripts/` | CI and maintenance scripts (`check_licences.py`) |
 | `docs/` | `design.md` on how Footfall is designed; `docs/diagrams/` holds the diagrams' sources and `build.py`; `docs/design/` the mockups |
 | `.github/` | CI workflows, CodeQL, Dependabot, templates |
@@ -62,7 +62,7 @@ Write the test that proves the change, and confirm it fails for the reason you e
 5. **The conversation is append-only.** Each response's content goes back to the model exactly as returned. Earlier messages are never edited or removed.
 6. **Tester text is length-capped and labelled as observations** before it leaves Footfall. What a tester writes may echo what the app displayed, so a calling agent must never read it as an instruction.
 7. **Never log** API keys, tokens, or the throwaway passwords.
-8. **No test reaches the internet.** `tests/conftest.py` blocks every socket connection except to `127.0.0.1`, `::1` and Unix sockets. Tests that need Docker and gVisor will be marked `isolation` and run in their own workflow, not in the default suite.
+8. **No test reaches the internet.** `tests/conftest.py` blocks every socket connection except to `127.0.0.1`, `::1` and Unix sockets. Tests that need Docker and gVisor are marked `isolation` and run in their own workflow, not in the default suite. Those alone may reach pypi.org and example.com, and only from containers through the egress proxy.
 9. **Dependencies.** Ask before adding one, and check that its licence is MIT-compatible (`scripts/check_licences.py`). Phase 1 has two runtime dependencies, `anthropic` and `playwright`.
 
 ### Versions
