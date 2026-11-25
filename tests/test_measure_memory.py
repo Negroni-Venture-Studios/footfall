@@ -160,4 +160,4 @@ def test_the_table_says_the_services_kernel_peaks_cover_their_whole_lives() -> N
     table = peaks.markdown()
     assert "since the stack started" in table
     assert "not only this run" in table
-    assert "since the stack started" in (measure.__doc__ or "")
+    assert "have been up since the stack started" in " ".join((measure.__doc__ or "").split())
