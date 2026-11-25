@@ -21,7 +21,7 @@ import pytest
 
 from footfall.hosts import HostError, resolve_public
 from footfall.proxy.policy import Policy
-from footfall.proxy.server import MAX_HEAD, ProxyServer
+from footfall.proxy.server import MAX_HEAD, ProxyServer, _RefusalLines
 from tests.tls_hellos import (
     CHANGE_CIPHER_SPEC,
     HELLO_RETRY,
@@ -1172,6 +1172,8 @@ async def test_connections_in_all_are_capped() -> None:
         {"max_lookups_per_client": 0},
         {"max_lookups_per_run": 0},
         {"lookup_threads": 0},
+        {"refusal_lines": 0},
+        {"refusal_window": 0},
     ],
 )
 def test_bad_settings_refused(settings: dict[str, Any]) -> None:
@@ -1374,3 +1376,52 @@ async def test_refusals_are_logged_once_without_request_text(
     assert "refused" in lines[2] and "server name" in lines[2]
     assert "private-query" not in caplog.text
     assert "header-value" not in caplog.text
+
+
+async def test_refusal_lines_are_limited_per_client(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+
+    def lines() -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
+
+    async with running(refusal_lines=3, refusal_window=0.4) as live, second_listener(live) as port:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.policy.allow(SECOND, OTHER_RUN, [ALLOWED])
+        for n in range(7):
+            assert status(await exchange(live.port, get(f"http://evil{n}.example.com/"))) == 403
+        logged = lines()
+        assert len(logged) == 3
+        assert "evil2.example.com" in logged[2]
+        assert "further refusals for this client" in logged[2]
+        # Allowed decisions are still logged, and so are another client's refusals.
+        assert await exchange(live.port, get(f"http://{ALLOWED}/")) == RESPONSE
+        reader, writer = await asyncio.open_connection(SECOND, port)
+        writer.write(get("http://evil.example.com/"))
+        await writer.drain()
+        assert status(await read_to_end(reader)) == 403
+        writer.close()
+        logged = lines()
+        assert len(logged) == 5
+        assert "allowed" in logged[3]
+        assert logged[4].startswith(f"{SECOND} ") and "refused" in logged[4]
+        # Once the window has passed, the first line says how many went unlogged.
+        await asyncio.sleep(0.5)
+        assert status(await exchange(live.port, get("http://evil9.example.com/"))) == 403
+        logged = lines()
+        assert len(logged) == 6
+        assert "evil9.example.com" in logged[5]
+        assert "4 earlier refusals for this client were not logged" in logged[5]
+
+
+def test_refusal_lines_forget_quiet_clients_but_not_their_unlogged_counts() -> None:
+    limits = _RefusalLines(1, 0.05)
+    for n in range(256):
+        assert limits.note(f"10.89.0.{n}") is not None
+    assert limits.note("10.89.0.7") is None  # counted, not logged
+    time.sleep(0.06)
+    assert limits.note("10.89.1.1") is not None  # the 257th client prunes the quiet ones
+    assert limits.note("10.89.0.8") is not None
+    assert limits.note("10.89.0.7") == (
+        "; 1 earlier refusals for this client were not logged"
+        "; further refusals for this client are counted, not logged, for up to 0.05 s"
+    )
