@@ -3,13 +3,13 @@
 import json
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import parse_qs
 
 import pytest
 
-from footfall.runner.engine import DockerEngine, EngineError
+from footfall.runner.engine import DockerEngine, EngineError, _demultiplex
 from tests.fake_docker import FakeDocker, Reply, frame, json_reply, serve
 
 
@@ -65,6 +65,62 @@ def test_wait_timeout_kills(docker: tuple[FakeDocker, DockerEngine]) -> None:
     finally:
         gate.set()
     assert fake.seen("POST", "/containers/x/kill")
+
+
+def test_a_failed_kill_still_reports_the_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeout is the news: a kill that fails, however it fails, must not replace it."""
+    engine = DockerEngine(Path("/nowhere/d.sock"))
+    seen: list[str] = []
+
+    def request(method: str, target: str, *args: object, **kwargs: object) -> tuple[int, bytes]:
+        seen.append(target)
+        if target.endswith("/wait"):
+            raise TimeoutError("timed out")
+        raise ConnectionRefusedError("the daemon went away")
+
+    monkeypatch.setattr(engine, "_request", request)
+    with pytest.raises(TimeoutError, match=r"still running after 0\.2s"):
+        engine.wait("x", timeout=0.2)
+    assert seen == ["/containers/x/wait", "/containers/x/kill"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "call", "payload"),
+    [
+        ("POST", "/containers/create", lambda e: e.create("n", {}), ["Id", "abc"]),
+        ("POST", "/containers/c1/wait", lambda e: e.wait("c1", 5), [0]),
+        ("GET", "/containers/c1/json", lambda e: e.address("c1", "net"), "text"),
+        ("GET", "/containers/c1/json", lambda e: e.address("c1", "net"), {"NetworkSettings": 1}),
+        (
+            "GET",
+            "/containers/c1/json",
+            lambda e: e.address("c1", "net"),
+            {"NetworkSettings": {"Networks": {"net": "10.0.0.7"}}},
+        ),
+        ("GET", "/containers/json", lambda e: e.containers("l"), {"Id": "a"}),
+        ("GET", "/containers/json", lambda e: e.containers("l"), [{"Names": ["a"]}]),
+        ("GET", "/containers/json", lambda e: e.containers("l"), ["a"]),
+        ("GET", "/containers/json", lambda e: e.containers("l"), [{"Id": 7}]),
+    ],
+)
+def test_a_reply_of_the_wrong_shape_is_an_engine_error(
+    docker: tuple[FakeDocker, DockerEngine],
+    method: str,
+    path: str,
+    call: Callable[[DockerEngine], object],
+    payload: object,
+) -> None:
+    fake, engine = docker
+    fake.on(method, path, json_reply(200, payload))
+    with pytest.raises(EngineError):
+        call(engine)
+
+
+def test_logs_of_a_terminal_are_read_as_they_come() -> None:
+    """With a terminal, Docker sends the output as it is, with no frame headers."""
+    assert _demultiplex(b"plain output\nfrom a terminal\n") == "plain output\nfrom a terminal\n"
+    assert _demultiplex(b"") == ""
+    assert _demultiplex(frame(1, b"framed")) == "framed"
 
 
 def test_logs_demultiplexes(docker: tuple[FakeDocker, DockerEngine]) -> None:

@@ -65,8 +65,21 @@ def _seg(value: str) -> str:
     return quote(value, safe="")
 
 
+def _is_frame_header(data: bytes, offset: int) -> bool:
+    """Whether a frame header starts at `offset`: a stream of 0, 1 or 2, then three zeros."""
+    header = data[offset : offset + _FRAME_HEADER]
+    return len(header) == _FRAME_HEADER and header[0] in (0, 1, 2) and header[1:4] == b"\0\0\0"
+
+
 def _demultiplex(data: bytes) -> str:
-    """Join the payloads of Docker's multiplexed log frames and decode them as UTF-8."""
+    """Join the payloads of Docker's multiplexed log frames and decode them as UTF-8.
+
+    A container with a terminal has its output sent as it is, with no frames. The runner
+    never gives a container one, but output that does not start with a frame header is
+    read as it comes all the same, rather than taken apart as frames it is not.
+    """
+    if data and not _is_frame_header(data, 0):
+        return data.decode("utf-8", errors="replace")
     payloads: list[bytes] = []
     offset = 0
     while offset + _FRAME_HEADER <= len(data):
@@ -75,6 +88,15 @@ def _demultiplex(data: bytes) -> str:
         payloads.append(data[start : start + size])
         offset = start + size
     return b"".join(payloads).decode("utf-8", errors="replace")
+
+
+def _field(value: Any, *keys: str) -> Any:
+    """The value at `keys` inside nested JSON objects, or None where one is missing or not one."""
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
 
 
 def _message(body: bytes) -> str:
@@ -124,12 +146,19 @@ class DockerEngine:
         except ValueError as error:
             raise EngineError("Docker sent a reply that is not JSON") from error
 
+    def _object(self, data: bytes) -> dict[str, Any]:
+        """A reply that must be a JSON object; anything else is an `EngineError`."""
+        decoded = self._json(data)
+        if not isinstance(decoded, dict):
+            raise EngineError("Docker sent a reply that is not a JSON object")
+        return decoded
+
     def create(self, name: str, config: dict[str, Any]) -> str:
         """Create a container called `name` from `config` and return its id."""
         _, data = self._request(
             "POST", f"/containers/create?{urlencode({'name': name}, quote_via=quote)}", config
         )
-        container_id = self._json(data).get("Id")
+        container_id = self._object(data).get("Id")
         if not isinstance(container_id, str):
             raise EngineError("Docker did not return a container id")
         return container_id
@@ -146,11 +175,12 @@ class DockerEngine:
         try:
             _, data = self._request("POST", f"/containers/{_seg(container)}/wait", timeout=timeout)
         except TimeoutError:
-            # The container may have exited just now; the timeout is the news either way.
-            with contextlib.suppress(EngineError):
+            # The container may have exited just now, or the daemon may not answer the kill;
+            # the timeout is the news either way.
+            with contextlib.suppress(EngineError, OSError):
                 self._request("POST", f"/containers/{_seg(container)}/kill")
             raise TimeoutError(f"container {container} still running after {timeout}s") from None
-        code = self._json(data).get("StatusCode")
+        code = self._object(data).get("StatusCode")
         if not isinstance(code, int):
             raise EngineError("Docker did not return an exit code")
         return code
@@ -164,12 +194,10 @@ class DockerEngine:
     def address(self, container: str, network: str) -> str:
         """Return the container's IP address on `network`."""
         _, data = self._request("GET", f"/containers/{_seg(container)}/json")
-        info = self._json(data)
-        networks = (info.get("NetworkSettings") or {}).get("Networks") or {}
-        address = (networks.get(network) or {}).get("IPAddress")
-        if not address:
+        address = _field(self._object(data), "NetworkSettings", "Networks", network, "IPAddress")
+        if not address or not isinstance(address, str):
             raise EngineError(f"container {container} has no address on network {network}")
-        return str(address)
+        return address
 
     def remove(self, container: str) -> None:
         """Remove a container by force; one that is already gone counts as removed."""
@@ -207,4 +235,9 @@ class DockerEngine:
         """Return the ids of all containers, running or not, carrying `label`."""
         query = urlencode({"all": 1, "filters": json.dumps({"label": [label]})}, quote_via=quote)
         _, data = self._request("GET", f"/containers/json?{query}")
-        return [str(item["Id"]) for item in self._json(data)]
+        items = self._json(data)
+        if not isinstance(items, list) or not all(
+            isinstance(item, dict) and isinstance(item.get("Id"), str) for item in items
+        ):
+            raise EngineError("Docker sent a list of containers of the wrong shape")
+        return [item["Id"] for item in items]
