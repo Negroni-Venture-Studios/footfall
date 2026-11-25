@@ -488,6 +488,12 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
     which the tested branch writes, and a negation there outranks the developer's own
     exclude files. So they are listed only when asked for.
 
+    No file to copy may be another name for a file in the git folders git names, in its
+    superprojects' when it is a submodule, or in those found as git finds them, as
+    `_discovered_git_folders` does. git names no superproject for a nested repository that
+    is not a submodule, and discovery finds the repository around it. When discovery cannot
+    follow a `.git`, a file with another name is refused, and no other.
+
     Raises LocalRunError when git is missing, hangs, or cannot read the folder.
     """
     git = _git()
@@ -499,11 +505,13 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
     tracked = listed("--cached")
     others = listed("--others", "--exclude-standard") - tracked if untracked else set()
     paths = _git_folder_paths(git, folder)
+    named = [*paths, *_superproject_git_folders(git, folder)]
+    try:
+        linked = _Linked([*named, *_discovered_git_folders(folder)])
+    except _Undiscoverable as problem:
+        linked = _Linked(problem=str(problem))
     return _Listing(
-        sorted(tracked | others),
-        _git_folders(git, folder, paths),
-        frozenset(others),
-        _Linked([*paths, *_superproject_git_folders(git, folder)]),
+        sorted(tracked | others), _git_folders(git, folder, paths), frozenset(others), linked
     )
 
 

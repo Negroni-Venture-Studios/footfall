@@ -2302,6 +2302,70 @@ def test_a_failed_superproject_lookup_refuses_the_copy(
         local._known_linked(folder)
 
 
+@pytest.mark.parametrize("untracked", [False, True])
+def test_a_link_to_the_config_of_the_repository_around_a_nested_one_is_refused(
+    tmp_path: Path, untracked: bool
+) -> None:
+    """Testing a nested repository that is not a submodule, git names no superproject, so the
+    repository around it is found as git would find it, and a hard link to its configuration
+    is refused, as --all-files refuses it. Untracked, the link is copied only on request."""
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    git(outer, "init", "-q")
+    git(outer, "config", "remote.origin.url", TOKEN_URL)
+    folder = outer / "nested"
+    app_files(folder)
+    git(folder, "init", "-q")
+    git(folder, "add", ".")
+    os.link(outer / ".git" / "config", folder / "notes.cfg")
+    # The control: git names no superproject here.
+    assert git_output(folder, "rev-parse", "--show-superproject-working-tree") == ""
+    listing = local._git_files(folder, untracked=untracked)
+    assert (PurePosixPath("notes.cfg") in listing.names) is untracked
+    with contextlib.ExitStack() as refused:
+        if untracked:
+            refused.enter_context(pytest.raises(LocalRunError, match="git configuration"))
+        local._copy_files(
+            folder,
+            tmp_path / "git-only",
+            listing.names,
+            tmp_path / "out",
+            git_dirs=listing.git_dirs,
+            untracked=listing.untracked,
+            linked=listing.linked,
+        )
+    if not untracked:
+        assert (tmp_path / "git-only" / "serve.py").exists()
+        assert not (tmp_path / "git-only" / "notes.cfg").exists()
+    with pytest.raises(LocalRunError, match="git configuration"):
+        local._copy_folder(
+            folder,
+            tmp_path / "all-files",
+            tmp_path / "out",
+            local._known_git_folders(folder),
+            local._known_linked(folder),
+        )
+
+
+def test_git_mode_refuses_a_linked_file_when_a_git_entry_above_cannot_be_followed(
+    tmp_path: Path,
+) -> None:
+    """git reads the repository, but a `.git` above it is a link discovery will not follow,
+    so the folders around it are unknown: a file with another name is refused, no other."""
+    above = tmp_path / "above"
+    above.mkdir()
+    (above / ".git").symlink_to(shaped_folder(tmp_path / "elsewhere"))
+    folder = above / "app"
+    app_files(folder)
+    git(folder, "init", "-q")
+    git(folder, "add", ".")
+    listing = local._git_files(folder)
+    assert not listing.linked.holds((folder / "serve.py").lstat())
+    info = linked_file(folder)
+    with pytest.raises(LocalRunError, match="is a link or another kind"):
+        listing.linked.holds(info)
+
+
 def a_chain_of_superprojects(depth: int) -> Callable[..., bytes]:
     """git's answers for a folder /levels/0 inside `depth` superprojects, /levels/1 and on."""
 
