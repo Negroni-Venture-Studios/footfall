@@ -25,8 +25,12 @@ known, and its allow list is revoked when it goes; a stop also revokes every lis
 before its network goes. Each run has a disk budget, measured as what a
 copy of its folder would write: before and after every copy, after each preparation step, and
 every `disk_interval` seconds while it lives. A run that goes over it, or cannot be measured, is
-stopped, and `status` says why. Stopping fails closed: if a container or its allow list cannot be
-removed, the run keeps its network and folder, and the watch tries again.
+stopped, and `status` says why. The measure sees what has a name, so a file deleted while a
+process holds it open is not counted; a hard limit on the host's disk, issue #4, is the bound
+that sees everything. Each run also has a lifetime, after which the watch stops it, and before
+it serves the runner removes whatever an earlier runner left. Stopping fails closed: if a
+container or its allow list cannot be removed, the run keeps its network and folder, and the
+watch tries again.
 
 The methods block, since Docker calls do. The server runs each request in a thread of its own,
 so each run carries a lock, and a long wait for a step to finish lets go of it so that `stop`, or
