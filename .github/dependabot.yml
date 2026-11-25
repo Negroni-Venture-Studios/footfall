@@ -3,7 +3,10 @@
 version: 2
 updates:
   # The uv ecosystem updates pyproject.toml and uv.lock together, which keeps
-  # the `uv lock --check` step in CI green.
+  # the `uv lock --check` step in CI green. Playwright is left out of the group
+  # and gets a pull request of its own: the browser image must move with it,
+  # which a person adds to that pull request, as CONTRIBUTING.md describes, and
+  # until then its failing image test would hold back every other update.
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
@@ -16,6 +19,7 @@ updates:
     groups:
       python:
         patterns: ["*"]
+        exclude-patterns: ["playwright"]
 
   # GitHub Actions, which CI pins to commit SHAs.
   - package-ecosystem: "github-actions"

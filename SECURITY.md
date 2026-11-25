@@ -44,6 +44,8 @@ Every change to `main`, an administrator's included, goes through a pull request
 - pip-audit against known vulnerabilities;
 - a licence check;
 - a CycloneDX software bill of materials;
-- CodeQL analysis of the Python code and the workflows.
+- a build of the four container images;
+- CodeQL analysis of the Python code and the workflows;
+- the isolation tests, which start the development stack with gVisor and check what an app container and the browsers can reach.
 
 Third-party GitHub Actions are pinned to commit SHAs and kept current by Dependabot. GitHub secret scanning with push protection is enabled on the repository.

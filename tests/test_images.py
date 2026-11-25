@@ -102,6 +102,23 @@ def test_browsers_playwright_version_matches_lock() -> None:
     assert '"playwright", "run-server", "--port", "3000", "--host", "0.0.0.0"' in text
 
 
+def test_dependabot_moves_playwright_on_its_own() -> None:
+    """A Playwright update needs the browser image in the same pull request.
+
+    So Dependabot proposes Playwright apart from the weekly Python group, where its failing
+    image test would hold back every other update, and never moves the image by itself.
+    CONTRIBUTING.md says how a person adds the image to Dependabot's pull request.
+    """
+    text = (ROOT / ".github" / "dependabot.yml").read_text()
+    uv = text.split('package-ecosystem: "uv"', 1)[1].split("package-ecosystem:", 1)[0]
+    assert re.search(r'patterns: \["\*"\]\n\s+exclude-patterns: \["playwright"\]', uv)
+    docker = text.split('package-ecosystem: "docker"', 1)[1]
+    assert re.search(r'- dependency-name: "mcr\.microsoft\.com/playwright"\n', docker)
+    contributing = (ROOT / "CONTRIBUTING.md").read_text()
+    assert "images/browsers/Dockerfile" in contributing
+    assert "Dependabot" in contributing
+
+
 def test_browsers_image_has_the_gate_and_the_ech_policy() -> None:
     text = (ROOT / "images" / "browsers" / "Dockerfile").read_text()
     assert "COPY images/browsers/gate.js /opt/footfall/gate.js" in text

@@ -1,6 +1,6 @@
 # Contributing to Footfall
 
-Thank you for helping with a project that runs other people's code and lets a model drive a browser against it, where the sandbox comes before features.
+Thank you for helping with Footfall. Because it runs other people's code and lets a model drive a browser against it, its sandbox comes before its features.
 
 ## Before you start
 
@@ -19,7 +19,7 @@ uv sync
 uv run pre-commit install
 ```
 
-The tests never reach the internet. Tests that start containers will need Docker with gVisor on Linux, and will run in their own workflow. For development on a Mac, where Docker Desktop has no gVisor, the runner will accept `FOOTFALL_RUNTIME=runc`, with a warning from every command and no isolation tests. Never set it on a server.
+The tests never reach the internet. The tests that start containers need Docker with gVisor on Linux, and run only in the isolation workflow, `.github/workflows/isolation.yml`. For development on a Mac, where Docker Desktop has no gVisor, the runner accepts `FOOTFALL_RUNTIME=runc`, with a warning from every command, and the isolation tests refuse to run. Never set it on a server.
 
 ## Everyday commands
 
@@ -39,14 +39,17 @@ python3 docs/diagrams/build.py     # after changing a diagram in docs/diagrams/
 `main` is protected:
 
 - Every change arrives through a pull request. Nobody pushes to `main` directly, maintainers included.
-- These CI checks must pass, on a branch that is up to date with `main`:
+- These checks must pass, on a branch that is up to date with `main`:
   - `lint`
   - `typecheck`
-  - the `test` jobs
+  - `test (3.12)` and `test (3.14)`
   - `security`
   - `dependency-audit`
   - `sbom`
-  - the CodeQL `analyze` jobs
+  - `images`, which builds the four container images
+  - `analyze (python)` and `analyze (actions)`, from CodeQL
+  - `isolation`, which runs the sandbox's own tests under gVisor
+- Every conversation on the pull request must be resolved.
 - Force pushes and deletion of `main` are blocked.
 - CI is the gate; no approving review count is required. Stale reviews are dismissed when new commits arrive.
 
@@ -67,7 +70,18 @@ Footfall keeps its dependencies few and well maintained.
 
 - **Ask before adding one.** Open an issue or say so in the pull request, with the reason and its licence.
 - Every dependency, direct or transitive, must have a licence compatible with distributing Footfall as MIT. `scripts/check_licences.py` enforces this in CI. GPL and AGPL are ruled out.
+- Every package Footfall installs to run, direct or transitive, has its own row in [THIRD_PARTY_LICENCES.md](THIRD_PARTY_LICENCES.md), and a test fails until a new one is added there.
 - Pin new tools and actions to released versions, and actions by commit SHA. Dependabot's pull requests are reviewed and merged as they arrive, once CI is green.
+
+### Updating Playwright
+
+Playwright's server in the browser image refuses a client of another release, so `uv.lock` and `images/browsers/Dockerfile` move together, and `tests/test_images.py` fails while they differ. Dependabot proposes each Playwright release in a pull request of its own, outside the weekly group, and never moves the browser image by itself. That pull request fails the image test until someone adds the image to it:
+
+1. Wait until Microsoft has published the image for the new release, `mcr.microsoft.com/playwright:v<version>-noble`. It can appear a day or two after the release on PyPI.
+2. On Dependabot's branch, change the base image in `images/browsers/Dockerfile` to the new release's tag, with the digest that `docker buildx imagetools inspect mcr.microsoft.com/playwright:v<version>-noble` prints, and change `npm install --global playwright@<version>` to match.
+3. Push to the same branch. Dependabot stops rebasing a pull request once someone else has pushed to it, so bring the branch up to date with `main` by hand if it falls behind.
+
+The pull request then moves `uv.lock` and the browser image together, and is merged once every check, the isolation workflow's included, is green.
 
 ## Code of conduct
 
