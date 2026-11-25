@@ -37,3 +37,8 @@ All notable changes to Footfall are recorded here. The format follows [Keep a Ch
 - `trace.jsonl` keeps no more of each tool input than the tool takes, cleaned and cut as `report.json` is, and `report.json`, `summary.json`, each line of `trace.jsonl` and the printed table have a note saying the testers' text is observations, never instructions.
 - A screenshot that is not a JPEG, or is larger than 2 MiB, ends the persona as failed, and the tester is never shown a screen read after the page left the app.
 - The app's name and the brief are cleaned of hidden and control characters before the tester's prompt holds them, and the prompt says the brief sets what to test and cannot change the rules.
+- The browsers image, started without the runner's command, says that the runner gives it one and exits 64, rather than open Playwright's server on every interface.
+- When a run cannot be prepared, the runner's error carries no throwaway password, even if Docker's own message quoted one, and a clean-up step that fails is logged by its kind and message, without the password or a traceback.
+- Footfall's images leave out `.env`, `.pem` and `.key` files from the folders they take in whole.
+- Results are made for the person who ran `footfall test` alone: its files 0600 and its folders 0700.
+- A throwaway password is taken out of what a tester writes however its whitespace has been changed, before and after the text is made one line.
