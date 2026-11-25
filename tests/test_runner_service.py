@@ -8,6 +8,7 @@ import shutil
 import stat
 import threading
 import time
+import traceback
 import tracemalloc
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePath
@@ -1817,3 +1818,49 @@ def test_the_budget_checks_count_towards_the_unsteady_measures(
         h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])  # its budget check
     assert h.service.status(RUN) == UNSTEADY_REASON
     assert_nothing_left(h)
+
+
+@pytest.mark.parametrize("names_it", ["message", "cause", "context"])
+def test_no_failure_to_start_the_browsers_leads_back_to_their_path(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, names_it: str
+) -> None:
+    """Whatever kind of error it is, and wherever in its chain the path is, the runner raises
+    one of its own, apart from it, so neither its message nor a logged traceback holds it."""
+    prepare(h)
+    real_start = h.engine.start
+
+    def start(container: str) -> None:
+        config = h.engine.configs.get(container) or {}
+        if config.get("Labels", {}).get("footfall.role") != "browsers":
+            real_start(container)
+            return
+        path = config["Cmd"][-1]
+        if names_it == "message":
+            raise KeyError(path)
+        if names_it == "cause":
+            raise KeyError("no such thing") from ValueError(f"while starting {path}")
+        try:
+            raise ValueError(f"while starting {path}")
+        except ValueError:
+            raise KeyError("no such thing") from None
+
+    monkeypatch.setattr(h.engine, "start", start)
+    with pytest.raises(RunnerError) as caught:
+        h.service.start_browsers(RUN, [])
+    path = h.engine.configs[f"footfall-{RUN}-browsers-browsers"]["Cmd"][-1]
+    shown = "".join(traceback.format_exception(caught.value))
+    assert path not in shown
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+
+
+def test_an_interrupt_while_starting_the_browsers_is_not_turned_into_an_error(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(h)
+
+    def interrupted(container: str) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(h.engine, "start", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        h.service.start_browsers(RUN, [])

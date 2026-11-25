@@ -194,6 +194,14 @@ def _container_name(run_id: str, role: str, copy: str) -> str:
     return f"footfall-{run_id}-{role}-{copy}"
 
 
+def _without(error: Exception, secret: str, shown: str) -> RunnerError:
+    """A RunnerError saying what `error` said, with `secret` shown as `shown` instead, in its
+    message and log tail alike, and with no chain back to `error`."""
+    message = (str(error) or type(error).__name__).replace(secret, shown)
+    tail = error.log_tail if isinstance(error, RunnerError) else ""
+    return RunnerError(message, tail.replace(secret, shown))
+
+
 def _check_run_id(run_id: str) -> None:
     if not _RUN_ID.fullmatch(run_id):
         raise RunnerError(f"invalid run id: {_show(run_id)}")
@@ -687,19 +695,19 @@ class RunnerService:
                     runtime=self._runtime,
                     proxy_name=self._proxy_container,
                 )
-                hidden: str | None = None
+                failure: RunnerError | None = None
                 try:
                     address = self._launch_locked(run, name, config, hosts)
                 except BaseException as error:
                     if not run.closed:
                         self._forget_locked(run, name)
-                    if path not in str(error):
+                    if not isinstance(error, Exception):
                         raise
-                    hidden = str(error).replace(path, "[the browsers' path]")
-                if hidden is not None:
-                    # Raised here, apart from the error it replaces, so that no traceback of
-                    # this one leads back to the path.
-                    raise RunnerError(hidden)
+                    failure = _without(error, path, "[the browsers' path]")
+                if failure is not None:
+                    # Raised here, apart from the error it replaces, whose message or chain may
+                    # name the path, so that no traceback of this one leads back to it.
+                    raise failure
                 run.browsers = True
                 return f"ws://{address}:{BROWSERS_PORT}{path}"
 
