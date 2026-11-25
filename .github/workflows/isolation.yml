@@ -42,6 +42,10 @@ jobs:
         with:
           version: "0.13.9"  # the uv the footfall image copies in
           python-version: "3.12"
+      - name: An annotation for the masks job to find
+        # The masks job's control: it must find exactly this one before it trusts a count of
+        # no annotations forged by an app.
+        run: echo "::notice title=FOOTFALL-ANNOTATION-CONTROL::The masks job counts this one."
       - name: Install gVisor's runsc
         # The release Snug pins, installed as Snug's image workflow does, from packages signed
         # by the key whose fingerprint Snug pins (deploy/office.sh there).
@@ -216,10 +220,19 @@ jobs:
           fi
           # Audit F-03: an app's output, printed by footfall test, forged no annotation,
           # and its forged commands are in the log as text.
-          forged=$(gh api "repos/$REPO/check-runs/$job/annotations" \
-            --jq '[.[] | select(((.title // "") + " " + (.message // "")) | test("FOOTFALL-FORGED"))] | length')
+          # Each annotation's title and message, one to a line, kept in a file and only counted.
+          annotations="$RUNNER_TEMP/annotations.txt"
+          gh api --paginate "repos/$REPO/check-runs/$job/annotations?per_page=100" \
+            --jq '.[] | ((.title // "") + " " + (.message // "") | gsub("\n"; " "))' \
+            > "$annotations"
+          control=$(grep -c 'FOOTFALL-ANNOTATION-CONTROL' "$annotations" || true)
+          forged=$(grep -c 'FOOTFALL-FORGED' "$annotations" || true)
           shown_forged=$(grep -c 'FOOTFALL-FORGED' "$log" || true)
-          echo "In the isolation job: $forged annotations an app forged; its lines shown as text $shown_forged times."
+          echo "In the isolation job: $control control annotations, $forged annotations an app forged; its lines shown as text $shown_forged times."
+          if [ "$control" != 1 ]; then
+            echo "::error::The isolation job's control annotation was found $control times, not once, so a count of forged ones means nothing."
+            exit 1
+          fi
           if [ "$forged" != 0 ] || [ "$shown_forged" -lt 2 ]; then
             echo "::error::An app's output was read as a workflow command, or the check of it did not run."
             exit 1
