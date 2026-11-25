@@ -6,7 +6,7 @@ Personas are named by their ids in `footfall/data/personas.toml`. The manifest r
 
 ## Bug 1: every sign-in error says "Something went wrong"
 
-A wrong password, an unknown username and two empty fields all give the same message, with no hint about which field to fix. It lives in `Handler._login` in `serve.py`, with the text in `templates/error.html`. Anyone who mistypes should catch it. The brief tells testers that only the given username and password work, so a tester can reach the error by mistyping on purpose, as `mehmet` (when run) tends to.
+A wrong password, an unknown username and two empty fields all give the same message, with no hint about which field to fix. It lives in `Handler._login` in `serve.py`, with the text in `templates/error.html`. Anyone who mistypes should catch it. The brief tells testers that only the given username and password work, so a tester can reach the error by mistyping on purpose, as `jonas` and `mehmet` (both when run) tend to.
 
 ## Bug 2: search is case-sensitive
 
@@ -18,7 +18,7 @@ Pressing "Add task" with nothing typed adds a blank row. It lives in `Handler._a
 
 ## Bug 4: the header is cut off at 200% text
 
-The header's height is fixed at 40 px and it hides anything that overflows. The title's line is 38 px high at normal size and about 77 px at 200% text, so the letters are cut top and bottom whatever the phone's width. The cause is the `.app-header` rule in `static/app.css`. `sven` and `grace` both use 200% text.
+The header's height is fixed at 40 px and it hides anything that overflows. The title's line is 38 px high at normal size and about 77 px at 200% text, so the lower part of the title is cut off whatever the phone's width. The top of the line is clipped too, but only the empty space above the letters is lost there. The cause is the `.app-header` rule in `static/app.css`. `sven` and `grace` both use 200% text.
 
 ## Bug 5: "1 tasks left"
 

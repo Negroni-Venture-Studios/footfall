@@ -422,6 +422,30 @@ def test_bugs_file_names_real_personas() -> None:
     assert len(re.findall(r"^## Bug \d+\b", text, re.MULTILINE)) == 12
 
 
+def test_bugs_file_marks_every_persona_the_demo_does_not_run() -> None:
+    """A persona outside the manifest's list is named "when run", never silently dropped."""
+    defaults = set(load_manifest(DEMO).test.personas)
+    others = set(load_personas(load_devices())) - defaults
+    sections = BUGS.read_text().split("\n## ")[1:]
+    for section in sections:
+        for sentence in re.split(r"(?<=\.) ", section):
+            named = set(re.findall(r"`([a-z]+)`", sentence)) & others
+            assert not named or "when run" in sentence, sentence
+
+
+def test_bug_1_names_the_personas_who_try_to_break_things() -> None:
+    """Mistyping on purpose is how a tester meets bug 1, so those personas are named there."""
+    breakers = {
+        p.id
+        for p in load_personas(load_devices()).values()
+        if re.search(r"\bbreak\b|odd input", p.profile)
+    }
+    bug_1 = BUGS.read_text().split("\n## ")[1]
+    assert bug_1.startswith("Bug 1:")
+    assert breakers == {"jonas", "mehmet"}
+    assert breakers <= set(re.findall(r"`([a-z]+)`", bug_1))
+
+
 def test_a_second_session_does_not_log_the_first_out(demo: Demo) -> None:
     first, second = Client(demo.port), Client(demo.port)
     first.sign_in()
@@ -441,9 +465,9 @@ def test_header_title_is_clearly_clipped_at_200_percent() -> None:
     """Bug 4, by arithmetic: the CSS is read, not rendered.
 
     A root font size of 16px is scaled by the persona's text scale. At 1.0 the title's
-    line box must fit the header. At 2.0 it must overflow by at least half the header's
-    height, on a 412px phone as well as a 320px one, so that the clip cuts into the
-    letters and not only a descender.
+    line box must fit the header. At 2.0 one line of it must overflow by at least half
+    the header's height, which no screen width can lessen. The arithmetic cannot say
+    which part of the letters is lost; a render at 200% shows the lower part cut off.
     """
     css = (DEMO / "static" / "app.css").read_text()
     header = rule(css, ".app-header")
