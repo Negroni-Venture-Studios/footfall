@@ -214,6 +214,16 @@ jobs:
             echo "::error::The mask check ran, but its line is not in the log masked."
             exit 1
           fi
+          # Audit F-03: an app's output, printed by footfall test, forged no annotation,
+          # and its forged commands are in the log as text.
+          forged=$(gh api "repos/$REPO/check-runs/$job/annotations" \
+            --jq '[.[] | select(((.title // "") + " " + (.message // "")) | test("FOOTFALL-FORGED"))] | length')
+          shown_forged=$(grep -c 'FOOTFALL-FORGED' "$log" || true)
+          echo "In the isolation job: $forged annotations an app forged; its lines shown as text $shown_forged times."
+          if [ "$forged" != 0 ] || [ "$shown_forged" -lt 2 ]; then
+            echo "::error::An app's output was read as a workflow command, or the check of it did not run."
+            exit 1
+          fi
           # Beyond the canary: a mask command shown as text was never read as one, and a
           # browsers address with its path in clear is the secret itself (audit N-13). A red
           # job here means deleting this run's logs.
