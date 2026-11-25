@@ -25,6 +25,7 @@ from footfall.proxy.control import (
     serve_control,
 )
 from footfall.proxy.policy import Policy
+from footfall.proxy.server import ProxyServer
 from footfall.runner.service import ProxyControl
 
 RUN = "r_abcdefghijklmnopqrstuvwxyz"
@@ -36,8 +37,10 @@ BROWSERS = "10.89.0.11"
 @dataclass
 class Live:
     policy: Policy
+    proxy: ProxyServer
     client: ProxyControlClient
     socket: Path
+    port: int  # the proxy port each listener opens
 
 
 @contextlib.contextmanager
@@ -56,19 +59,41 @@ async def wait_for_socket(path: Path, task: asyncio.Task[None]) -> None:
         task.result()
 
 
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port: int = probe.getsockname()[1]
+    return port
+
+
 @pytest.fixture
 async def live() -> AsyncIterator[Live]:
     policy = Policy()
+    port = free_port()
+    proxy = ProxyServer(policy, port=port)
     with short_directory() as directory:
         path = directory / "p.sock"
-        task = asyncio.create_task(serve_control(policy, path))
+        task = asyncio.create_task(serve_control(proxy, path))
         try:
             await wait_for_socket(path, task)
-            yield Live(policy, ProxyControlClient(path), path)
+            yield Live(policy, proxy, ProxyControlClient(path), path, port)
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            await proxy.close()
+
+
+async def connects(port: int) -> bool:
+    """Whether something accepts a connection on 127.0.0.1 at `port`."""
+    try:
+        _, writer = await asyncio.open_connection("127.0.0.1", port)
+    except ConnectionRefusedError:
+        return False
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return True
 
 
 async def call[T](function: Callable[..., T], *args: Any) -> T:
@@ -94,6 +119,7 @@ async def exchange(path: Path, data: bytes) -> dict[str, Any]:
 def test_the_client_is_a_proxy_control() -> None:
     control: ProxyControl = ProxyControlClient(Path("/run/footfall/proxy.sock"))
     assert callable(control.revoke_run)
+    assert callable(control.listen)
 
 
 async def test_allow_revoke_and_reached_round_trip(live: Live) -> None:
@@ -134,6 +160,71 @@ async def test_revoke_run_round_trip(live: Live) -> None:
     assert live.policy.decide(APP, "api.example.com", 443).run_id is None
     assert live.policy.decide(BROWSERS, "fonts.gstatic.com", 443).run_id is None
     assert live.policy.decide("10.90.0.10", "api.example.com", 443).allowed
+
+
+async def test_the_proxy_listens_nowhere_until_told(live: Live) -> None:
+    assert not await connects(live.port)
+    await call(live.client.listen, "127.0.0.1", RUN)
+    assert await connects(live.port)
+
+
+async def test_listen_twice_for_the_same_run_is_harmless(live: Live) -> None:
+    await call(live.client.listen, "127.0.0.1", RUN)
+    await call(live.client.listen, "127.0.0.1", RUN)
+    await call(live.client.listen, "::ffff:127.0.0.1", RUN)  # the same address, mapped
+    assert await connects(live.port)
+    await call(live.client.revoke_run, RUN)
+    assert not await connects(live.port)  # one listener, and it is gone
+
+
+async def test_listen_on_another_runs_address_is_refused(live: Live) -> None:
+    await call(live.client.listen, "127.0.0.1", RUN)
+    with pytest.raises(ProxyRefused, match="another run"):
+        await call(live.client.listen, "127.0.0.1", OTHER)
+    await call(live.client.revoke_run, OTHER)  # the other run holds nothing to close
+    assert await connects(live.port)
+
+
+async def test_revoke_run_closes_the_runs_listeners(live: Live) -> None:
+    await call(live.client.allow, APP, RUN, ["api.example.com"])
+    await call(live.client.listen, "127.0.0.1", RUN)
+    assert await connects(live.port)
+    await call(live.client.revoke_run, RUN)
+    assert live.policy.decide(APP, "api.example.com", 443).run_id is None
+    assert not await connects(live.port)
+    # The address is free again, for whichever run is given it next.
+    await call(live.client.listen, "127.0.0.1", OTHER)
+    assert await connects(live.port)
+
+
+@pytest.mark.parametrize(
+    ("ip", "message"),
+    [
+        ("not an address", "not an IP address"),
+        ("10.89.0.300", "not an IP address"),
+        ("0.0.0.0", "every interface"),  # noqa: S104  # the address being refused
+        ("::", "every interface"),
+    ],
+)
+async def test_listen_refuses_what_is_not_one_address(live: Live, ip: str, message: str) -> None:
+    with pytest.raises(ProxyRefused, match=message):
+        await call(live.client.listen, ip, RUN)
+    assert not await connects(live.port)
+
+
+async def test_listen_refuses_a_bad_run_id(live: Live) -> None:
+    with pytest.raises(ProxyRefused, match="run id"):
+        await call(live.client.listen, "127.0.0.1", "r_short")
+    assert not await connects(live.port)
+
+
+async def test_listen_that_cannot_bind_is_refused_with_the_reason(live: Live) -> None:
+    # 192.0.2.1 is kept for documentation (RFC 5737), so no machine running the tests has it.
+    with pytest.raises(ProxyRefused, match=r"could not listen on 192\.0\.2\.1") as caught:
+        await call(live.client.listen, "192.0.2.1", RUN)
+    assert "assign" in str(caught.value).lower()  # the operating system's own words
+    await call(live.client.listen, "127.0.0.1", RUN)  # nothing was held for the failure
+    assert await connects(live.port)
 
 
 @pytest.mark.parametrize(
@@ -203,6 +294,16 @@ async def test_request_of_exactly_the_limit_is_read(live: Live) -> None:
         (b'{"op": "revoke"}\n', "missing field: ip"),
         (b'{"op": "revoke", "ip": 167772170}\n', "ip must be a string"),
         (b'{"op": "revoke_run", "run_id": null}\n', "run_id must be a string"),
+        (b'{"op": "listen", "ip": "127.0.0.1"}\n', "missing field: run_id"),
+        (
+            b'{"op": "listen", "ip": 2130706433, "run_id": "r_abcdefghijklmnopqrstuvwxyz"}\n',
+            "ip must be a string",
+        ),
+        (
+            b'{"op": "listen", "ip": "127.0.0.1", "run_id": "r_abcdefghijklmnopqrstuvwxyz",'
+            b' "port": 80}\n',
+            "unexpected field: port",
+        ),
         (
             b'{"op": "allow", "ip": "10.89.0.10", "run_id": "r_abcdefghijklmnopqrstuvwxyz",'
             b' "hosts": "api.example.com"}\n',
@@ -222,22 +323,23 @@ async def test_malformed_requests_refused(live: Live, data: bytes, error: str) -
     assert reply["ok"] is False
     assert reply["error"].startswith(error)
     assert live.policy.decide(APP, "api.example.com", 443).run_id is None
+    assert not await connects(live.port)
 
 
 async def test_serve_replaces_a_stale_socket_but_not_a_file() -> None:
-    policy = Policy()
+    proxy = ProxyServer(Policy())
     with short_directory() as directory:
         path = directory / "p.sock"
         path.write_text("not a socket\n")
         with pytest.raises(FileExistsError):
-            await serve_control(policy, path)
+            await serve_control(proxy, path)
         assert path.read_text() == "not a socket\n"
 
         path.unlink()
         stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         stale.bind(str(path))
         stale.close()  # leaves the socket file behind, as a crashed proxy would
-        task = asyncio.create_task(serve_control(policy, path))
+        task = asyncio.create_task(serve_control(proxy, path))
         try:
             client = ProxyControlClient(path)
             for _ in range(500):

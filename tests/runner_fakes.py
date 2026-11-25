@@ -222,6 +222,11 @@ class FakeProxy:
     def reached(self, run_id: str) -> list[str]:
         return []
 
+    def listen(self, ip: str, run_id: str) -> None:
+        self.calls.append(("listen", ip, run_id))
+        if "listen" in self.failures:
+            raise self.failures["listen"]
+
 
 @dataclass
 class Harness:

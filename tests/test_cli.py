@@ -448,7 +448,17 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
     }
 
 
-async def test_the_proxy_serves_its_port_and_its_control_socket() -> None:
+async def refused(port: int) -> bool:
+    """Whether a connection to 127.0.0.1 at `port` is refused, so that nothing listens there."""
+    try:
+        _, writer = await asyncio.open_connection("127.0.0.1", port)
+    except ConnectionRefusedError:
+        return True
+    writer.close()
+    return False
+
+
+async def test_the_proxy_listens_only_where_the_runner_tells_it() -> None:
     folder = short_dir()
     control = folder / "proxy.sock"
     try:
@@ -456,22 +466,27 @@ async def test_the_proxy_serves_its_port_and_its_control_socket() -> None:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        task = asyncio.create_task(cli.run_proxy(settings, host="127.0.0.1", port=port))
+        task = asyncio.create_task(cli.run_proxy(settings, port=port))
         try:
             for _ in range(200):
                 if control.exists():
                     break
                 await asyncio.sleep(0.01)
             assert stat.S_IMODE(control.lstat().st_mode) == 0o600
+            # Serving the control socket, it listens on no interface, loopback included.
+            assert await refused(port)
             client = ProxyControlClient(control)
             run_id = "r_" + "b" * 26
             await asyncio.to_thread(client.allow, "10.89.0.7", run_id, ["example.org"])
             assert await asyncio.to_thread(client.reached, run_id) == []
+            await asyncio.to_thread(client.listen, "127.0.0.1", run_id)
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
             writer.write(b"CONNECT example.org:443 HTTP/1.1\r\nHost: example.org:443\r\n\r\n")
             answer = await reader.readline()
             writer.close()
             assert answer.startswith(b"HTTP/1.1 403")  # 127.0.0.1 has no allow list
+            await asyncio.to_thread(client.revoke_run, run_id)
+            assert await refused(port)
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

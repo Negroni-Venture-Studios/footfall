@@ -143,13 +143,16 @@ class ProxyControl(Protocol):
 
     `allow` replaces any list the same run already holds for the address, and refuses, with a
     ValueError, an address another run still holds. `revoke_run` revokes every list held for a
-    run. Implementations raise OSError when the proxy cannot be reached.
+    run. `listen` has the proxy listen at its own address on a run's network, for that run,
+    until `revoke_run`; it refuses, with a ValueError, an address another run listens on or one
+    it cannot listen on. Implementations raise OSError when the proxy cannot be reached.
     """
 
     def allow(self, ip: str, run_id: str, hosts: Sequence[str]) -> None: ...
     def revoke(self, ip: str) -> None: ...
     def revoke_run(self, run_id: str) -> None: ...
     def reached(self, run_id: str) -> list[str]: ...
+    def listen(self, ip: str, run_id: str) -> None: ...
 
 
 def _chown_to_app(path: Path) -> None:

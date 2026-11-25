@@ -19,7 +19,14 @@ from typing import Final
 
 from footfall.hosts import HostError, validate_host_name
 
-__all__ = ["ALLOWED_PORTS", "UNKNOWN_CLIENT", "Decision", "Policy"]
+__all__ = [
+    "ALLOWED_PORTS",
+    "UNKNOWN_CLIENT",
+    "Decision",
+    "Policy",
+    "canonical_address",
+    "check_run_id",
+]
 
 ALLOWED_PORTS: Final = frozenset({80, 443})
 UNKNOWN_CLIENT: Final = "unknown client"
@@ -38,7 +45,7 @@ class Decision:
     run_id: str | None
 
 
-def _address(ip: str) -> str:
+def canonical_address(ip: str) -> str:
     """The canonical text of an IP address, with an IPv4-mapped address as plain IPv4.
 
     Raises ValueError for anything that is not an address.
@@ -52,7 +59,8 @@ def _address(ip: str) -> str:
     return str(parsed)
 
 
-def _run_id(run_id: str) -> str:
+def check_run_id(run_id: str) -> str:
+    """Return `run_id` if it is a valid run id; raise ValueError if it is not."""
     if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
         raise ValueError("not a valid run id")
     return run_id
@@ -79,8 +87,8 @@ class Policy:
         Raises ValueError, changing nothing, for a bad address, run id or host name, or for an
         address that holds another run's list.
         """
-        key = _address(ip)
-        _run_id(run_id)
+        key = canonical_address(ip)
+        check_run_id(run_id)
         if isinstance(hosts, str | bytes):
             raise ValueError("hosts must be a list of host names, not a string")
         names = frozenset(validate_host_name(host) for host in hosts)
@@ -92,13 +100,13 @@ class Policy:
 
     def revoke(self, ip: str) -> None:
         """Take away an address's allow list. Revoking one that has none is harmless."""
-        key = _address(ip)
+        key = canonical_address(ip)
         with self._lock:
             self._lists.pop(key, None)
 
     def revoke_run(self, run_id: str) -> None:
         """Take away every allow list that belongs to a run."""
-        _run_id(run_id)
+        check_run_id(run_id)
         with self._lock:
             for key in [key for key, (owner, _) in self._lists.items() if owner == run_id]:
                 del self._lists[key]
@@ -110,7 +118,7 @@ class Policy:
         wait for the runner's allow. The reason never repeats a host that is not a valid name.
         """
         try:
-            key = _address(ip)
+            key = canonical_address(ip)
         except ValueError:
             return Decision(False, UNKNOWN_CLIENT, None)
         with self._lock:
@@ -140,6 +148,6 @@ class Policy:
 
     def reached(self, run_id: str) -> list[str]:
         """The hosts a run reached, each once, in order."""
-        _run_id(run_id)
+        check_run_id(run_id)
         with self._lock:
             return sorted(self._reached.get(run_id, ()))

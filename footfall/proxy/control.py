@@ -1,4 +1,5 @@
-"""The egress proxy's control socket, through which the runner gives and takes allow lists.
+"""The egress proxy's control socket, through which the runner gives and takes allow lists, and
+tells the proxy where to listen.
 
 Each connection carries one request and one reply, each a JSON object on one line. A request
 is at most 64 KiB and names an op and exactly that op's fields, each of the right type; anything
@@ -9,8 +10,13 @@ user, and the runner, which runs as root, is the only other process that can con
     {"op": "revoke", "ip": "10.89.0.10"}
     {"op": "revoke_run", "run_id": "r_..."}
     {"op": "reached", "run_id": "r_..."}
+    {"op": "listen", "ip": "10.89.0.2", "run_id": "r_..."}
     {"ok": true, "result": ...}
     {"ok": false, "error": "..."}
+
+`listen` names the proxy's own address on a run's network, once the runner has connected the
+proxy to it, and the proxy accepts connections there on its port until `revoke_run` closes
+every listener the run holds, after revoking its allow lists.
 
 `ProxyControlClient` is the runner's side. It is synchronous, as the runner's `ProxyControl` is.
 It raises OSError when the proxy cannot be reached or does not answer properly, and
@@ -29,7 +35,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
-from footfall.proxy.policy import Policy
+from footfall.proxy.server import ProxyServer
 
 __all__ = ["MAX_REQUEST", "ProxyControlClient", "ProxyRefused", "serve_control"]
 
@@ -67,6 +73,7 @@ _OPS: Final[Mapping[str, Mapping[str, tuple[Callable[[object], bool], str]]]] = 
     "revoke": {"ip": _TEXT},
     "revoke_run": {"run_id": _TEXT},
     "reached": {"run_id": _TEXT},
+    "listen": {"ip": _TEXT, "run_id": _TEXT},
 }
 
 
@@ -102,8 +109,9 @@ def _parse(line: bytes) -> tuple[str, dict[str, Any]]:
     return op, request
 
 
-def _call(policy: Policy, op: str, fields: dict[str, Any]) -> object:
-    """Run one op against the policy; ValueError means the policy refused it."""
+async def _call(proxy: ProxyServer, op: str, fields: dict[str, Any]) -> object:
+    """Run one op against the proxy and its policy; ValueError means it was refused."""
+    policy = proxy.policy
     match op:
         case "allow":
             policy.allow(fields["ip"], fields["run_id"], fields["hosts"])
@@ -120,7 +128,16 @@ def _call(policy: Policy, op: str, fields: dict[str, Any]) -> object:
             return None
         case "revoke_run":
             policy.revoke_run(fields["run_id"])
-            logger.info("revoked every allow list of run %s", fields["run_id"])
+            closed = await proxy.close_run(fields["run_id"])
+            logger.info(
+                "revoked every allow list of run %s and closed %d listeners",
+                fields["run_id"],
+                closed,
+            )
+            return None
+        case "listen":
+            await proxy.listen(fields["ip"], fields["run_id"])
+            logger.info("listening on %s for run %s", fields["ip"], fields["run_id"])
             return None
         case _:
             return policy.reached(fields["run_id"])
@@ -142,7 +159,7 @@ async def _discard_line(reader: asyncio.StreamReader) -> None:
                 remaining -= len(chunk)
 
 
-async def _reply(policy: Policy, reader: asyncio.StreamReader) -> dict[str, Any]:
+async def _reply(proxy: ProxyServer, reader: asyncio.StreamReader) -> dict[str, Any]:
     try:
         async with asyncio.timeout(_READ_TIMEOUT):
             line = await reader.readuntil(b"\n")
@@ -155,7 +172,7 @@ async def _reply(policy: Policy, reader: asyncio.StreamReader) -> dict[str, Any]
         return _failure("request did not arrive in time")
     try:
         op, fields = _parse(line)
-        result = _call(policy, op, fields)
+        result = await _call(proxy, op, fields)
     except _Refused as refused:
         return _failure(str(refused))
     except ValueError as error:
@@ -164,14 +181,14 @@ async def _reply(policy: Policy, reader: asyncio.StreamReader) -> dict[str, Any]
 
 
 async def _handle(
-    policy: Policy,
+    proxy: ProxyServer,
     gate: asyncio.Semaphore,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
     try:
         async with gate:
-            reply = await _reply(policy, reader)
+            reply = await _reply(proxy, reader)
             writer.write(json.dumps(reply).encode() + b"\n")
             await writer.drain()
     except ConnectionError:
@@ -205,14 +222,14 @@ def _bind(path: Path) -> socket.socket:
     return sock
 
 
-async def serve_control(policy: Policy, socket_path: Path) -> None:
-    """Answer control requests on `socket_path` until cancelled."""
+async def serve_control(proxy: ProxyServer, socket_path: Path) -> None:
+    """Answer control requests for `proxy` and its policy on `socket_path` until cancelled."""
     sock = _bind(socket_path)
     inode = socket_path.lstat().st_ino
     gate = asyncio.Semaphore(MAX_CONNECTIONS)
     try:
         server = await asyncio.start_unix_server(
-            functools.partial(_handle, policy, gate), sock=sock, limit=MAX_REQUEST
+            functools.partial(_handle, proxy, gate), sock=sock, limit=MAX_REQUEST
         )
         async with server:
             await server.serve_forever()
@@ -239,7 +256,8 @@ def _decode(reply: bytes) -> object:
 
 
 class ProxyControlClient:
-    """Asks the egress proxy, over its control socket, to allow and revoke client addresses.
+    """Asks the egress proxy, over its control socket, to allow and revoke client addresses,
+    and where to listen.
 
     It implements the runner's `ProxyControl`. Each call opens one connection, and waits at
     most `timeout` seconds for each step of it.
@@ -275,6 +293,9 @@ class ProxyControlClient:
 
     def revoke_run(self, run_id: str) -> None:
         self._call("revoke_run", run_id=run_id)
+
+    def listen(self, ip: str, run_id: str) -> None:
+        self._call("listen", ip=ip, run_id=run_id)
 
     def reached(self, run_id: str) -> list[str]:
         result = self._call("reached", run_id=run_id)

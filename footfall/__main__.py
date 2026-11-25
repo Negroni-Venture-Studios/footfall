@@ -187,18 +187,17 @@ async def run_runner(settings: Settings) -> None:
     await serve(service, settings.runner_socket, group=group)
 
 
-async def run_proxy(
-    settings: Settings,
-    *,
-    host: str = "0.0.0.0",  # noqa: S104  # every interface of the proxy's own container
-    port: int = PROXY_PORT,
-) -> None:
-    """Serve the egress proxy and its control socket until stopped."""
-    policy = Policy()
-    server = await ProxyServer(policy).start(host, port)
-    async with server, asyncio.TaskGroup() as tasks:
-        tasks.create_task(server.serve_forever())
-        tasks.create_task(serve_control(policy, settings.proxy_control))
+async def run_proxy(settings: Settings, *, port: int = PROXY_PORT) -> None:
+    """Serve the egress proxy's control socket until stopped.
+
+    The proxy listens on no interface of its own: the runner tells it, over the control
+    socket, its address on each run's network, and it listens there on `port` for that run.
+    """
+    proxy = ProxyServer(Policy(), port=port)
+    try:
+        await serve_control(proxy, settings.proxy_control)
+    finally:
+        await proxy.close()
 
 
 def _until_stopped[T](work: Coroutine[Any, Any, T]) -> T:

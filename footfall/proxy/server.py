@@ -24,7 +24,9 @@ No allowed name may become a route to another site on the same server (domain fr
   ServerHello settles the handshake, holding any further ClientHello to the same checks, and
   then relays the rest untouched. `footfall.proxy.tls` says what this cannot stop.
 
-A connection idle for `idle_timeout` seconds in both directions is closed, and connections are
+The proxy listens only where the runner tells it: on its own address on each run's network,
+for as long as that run lasts, so that no container on any other network can reach it. A
+connection idle for `idle_timeout` seconds in both directions is closed, and connections are
 capped in all and per client address. The proxy logs one line per decision, with the client's
 address, the run, the host, the port and the outcome. It never logs a path, a query string, a
 header value or a body.
@@ -34,14 +36,22 @@ import asyncio
 import contextlib
 import functools
 import http
+import ipaddress
 import logging
 import re
+import socket
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Final
 
 from footfall.hosts import HostError, resolve_public, validate_host_name
-from footfall.proxy.policy import INVALID_HOST, Decision, Policy
+from footfall.proxy.policy import (
+    INVALID_HOST,
+    Decision,
+    Policy,
+    canonical_address,
+    check_run_id,
+)
 from footfall.proxy.tls import (
     HANDSHAKE,
     RECORD_HEADER,
@@ -52,13 +62,22 @@ from footfall.proxy.tls import (
     server_name,
 )
 
-__all__ = ["ESTABLISHED", "MAX_HEAD", "MAX_HEADERS", "Opener", "ProxyServer", "Resolve"]
+__all__ = [
+    "DEFAULT_PORT",
+    "ESTABLISHED",
+    "MAX_HEAD",
+    "MAX_HEADERS",
+    "Opener",
+    "ProxyServer",
+    "Resolve",
+]
 
 logger = logging.getLogger(__name__)
 
 type Resolve = Callable[[str, int], Awaitable[str]]
 type Opener = Callable[[str, int], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
+DEFAULT_PORT: Final = 3128
 MAX_HEAD: Final = 16 * 1024
 MAX_HEADERS: Final = 100
 ESTABLISHED: Final = b"HTTP/1.1 200 Connection established\r\n\r\n"
@@ -496,6 +515,7 @@ class ProxyServer:
     `resolve` turns a checked name into the one public address to connect to; it raises
     HostError for a name that does not resolve to public addresses only. `open_upstream`
     connects to an address and port. Tests replace both, so that they stay on loopback.
+    `port` is the port each run's listener opens, on the address `listen` is given.
     """
 
     def __init__(
@@ -503,6 +523,7 @@ class ProxyServer:
         policy: Policy,
         resolve: Resolve = resolve_public,
         *,
+        port: int = DEFAULT_PORT,
         idle_timeout: float = 60.0,
         unknown_wait: float = 3.0,
         unknown_poll: float = 0.1,
@@ -516,7 +537,12 @@ class ProxyServer:
             )
         if max_connections < 1 or max_per_client < 1:
             raise ValueError("max_connections and max_per_client must be at least 1")
+        if not 0 <= port <= 65535:
+            raise ValueError("port must be from 0 to 65535")
         self._policy = policy
+        self._port = port
+        self._listeners: dict[str, tuple[str, asyncio.Server]] = {}  # address -> run, server
+        self._listening = asyncio.Lock()
         self._resolve = resolve
         self._idle = idle_timeout
         self._unknown_wait = unknown_wait
@@ -528,13 +554,75 @@ class ProxyServer:
         self._per_client: dict[str, int] = {}
 
     @property
+    def policy(self) -> Policy:
+        """The allow lists this proxy serves."""
+        return self._policy
+
+    @property
     def connections(self) -> int:
         """How many client connections are being served."""
         return self._open
 
     async def start(self, host: str, port: int) -> asyncio.Server:
-        """Listen on `host` and `port`; the caller serves and closes the server it returns."""
+        """Listen on `host` and `port`; the caller serves and closes the server it returns.
+
+        Tests use it to listen on loopback. The proxy itself listens through `listen` alone.
+        """
         return await asyncio.start_server(self._handle, host, port, limit=MAX_HEAD)
+
+    # ------------------------------------------------------------ listeners
+
+    async def listen(self, ip: str, run_id: str) -> None:
+        """Accept connections at `ip`, on the proxy's port, for the run `run_id`.
+
+        `ip` is the proxy's own address on the run's network, so that only that network's
+        containers can reach the listener. Listening again where the same run listens is
+        harmless. Raises ValueError, opening nothing, for a bad address or run id, for an
+        address that means every interface, for an address another run listens on, and for an
+        address the proxy cannot listen on, with the operating system's reason.
+        """
+        address = canonical_address(ip)
+        check_run_id(run_id)
+        parsed = ipaddress.ip_address(address)
+        if parsed.is_unspecified:
+            raise ValueError(f"{address} means every interface; name the run's own address")
+        async with self._listening:
+            held = self._listeners.get(address)
+            if held is not None:
+                if held[0] != run_id:
+                    raise ValueError(f"another run already listens on {address}")
+                return
+            # Bound here rather than by asyncio, which drops the system's reason for an address
+            # this host does not have.
+            family = socket.AF_INET6 if parsed.version == 6 else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((address, self._port))
+                server = await asyncio.start_server(self._handle, sock=sock, limit=MAX_HEAD)
+            except OSError as error:
+                sock.close()
+                reason = error.strerror or str(error)
+                raise ValueError(
+                    f"could not listen on {address} port {self._port}: {reason}"
+                ) from None
+            self._listeners[address] = (run_id, server)
+
+    async def close_run(self, run_id: str) -> int:
+        """Stop listening wherever a run listens, and return how many listeners closed."""
+        async with self._listening:
+            addresses = [key for key, (owner, _) in self._listeners.items() if owner == run_id]
+            for address in addresses:
+                _, server = self._listeners.pop(address)
+                server.close()  # frees the address at once; connections are left to their run
+        return len(addresses)
+
+    async def close(self) -> None:
+        """Stop listening everywhere, as the proxy shuts down."""
+        async with self._listening:
+            for _, server in self._listeners.values():
+                server.close()
+            self._listeners.clear()
 
     # ------------------------------------------------------------ connections
 

@@ -1101,6 +1101,8 @@ async def test_connections_in_all_are_capped() -> None:
         {"unknown_poll": 0},
         {"max_connections": 0},
         {"max_per_client": 0},
+        {"port": -1},
+        {"port": 65536},
     ],
 )
 def test_bad_settings_refused(settings: dict[str, Any]) -> None:
