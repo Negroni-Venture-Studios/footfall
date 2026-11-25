@@ -11,6 +11,7 @@ import contextlib
 import json
 import os
 import re
+import select
 import shutil
 import socket
 import subprocess
@@ -37,8 +38,9 @@ MARKER = f"footfall-gate-test-{os.getpid()}"
 
 
 def child(marker: str, script: str) -> list[str]:
-    """A node child whose command line names `marker` first, in a comment at the head of its
-    script, where no cut of a long command line can reach it."""
+    """A node child whose command line names `marker` early, in a comment at the head of its
+    script, right after the path to node and `-e`. A long path to node can still push it past
+    where ps would cut the line, which is why `running` asks ps not to cut at all."""
     return [NODE, "-e", f"/* {marker} */ {script}"]
 
 
@@ -153,6 +155,39 @@ async def start_upstream(port: int = 0) -> tuple[Upstream, asyncio.Server]:
     return record, server
 
 
+def first_line(process: subprocess.Popen[bytes], within: float) -> str:
+    """The first line `process` writes, or TimeoutError if none comes within `within` seconds,
+    so that a gate that never says it is listening fails the test instead of hanging it."""
+    assert process.stdout is not None
+    fd = process.stdout.fileno()
+    deadline = time.monotonic() + within
+    data = b""
+    while b"\n" not in data:
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            raise TimeoutError(f"no line within {within} seconds")
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        data += chunk
+    return data.decode()
+
+
+def whatever_is_written(process: subprocess.Popen[bytes], within: float) -> str:
+    """What `process` writes to its standard error within `within` seconds, without waiting
+    for an end that a child still holding the pipe could put off for ever."""
+    assert process.stderr is not None
+    fd = process.stderr.fileno()
+    deadline = time.monotonic() + within
+    data = b""
+    while (left := deadline - time.monotonic()) > 0 and select.select([fd], [], [], left)[0]:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        data += chunk
+    return data.decode(errors="replace")
+
+
 class Gate:
     def __init__(self, upstream: int, child: list[str]) -> None:
         self.port = free_port()
@@ -174,9 +209,15 @@ class Gate:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        assert self.process.stdout is not None
-        line = self.process.stdout.readline().decode()
-        assert line.startswith("gate listening"), line + self.process.stderr.read().decode()  # type: ignore[union-attr]
+        try:
+            line = first_line(self.process, within=10)
+        except TimeoutError:
+            self.stop()
+            raise
+        if not line.startswith("gate listening"):
+            said = whatever_is_written(self.process, within=1)
+            self.stop()
+            raise AssertionError(f"the gate did not start: {line!r} {said!r}")
         assert PATH not in line
 
     def stop(self) -> None:
@@ -389,7 +430,9 @@ def test_a_child_that_ignores_sigterm_is_killed_within_a_bound(tmp_path: Path) -
         gate.process.terminate()
         gate.process.wait(timeout=10)
         took = time.monotonic() - started
-        assert 2.5 <= took < 7  # the grace period, then SIGKILL
+        # The grace period of 3 s, then SIGKILL, and well before the 5 s exit bound, which
+        # would end the gate without killing anything.
+        assert 2.5 <= took < 4.5
         assert gone(marker, within=2)
     finally:
         gate.stop()
@@ -473,7 +516,8 @@ def run_server_behind_gate() -> Iterator[int]:
         yield gate.port
     finally:
         gate.stop()
-    # Neither the gate nor run-server, both of which carry the path, is left running.
+    # run-server, which carries the path, is not left running. `running` leaves out the
+    # gate's own command line, which names gate.js; `stop` waited for the gate itself.
     assert gone(PATH, within=5)
 
 
@@ -492,3 +536,22 @@ async def test_a_real_run_server_is_reached_through_the_gate_alone(
         assert await page.title() == "Plain"
     finally:
         await asyncio.wait_for(browser.close(), 30)
+
+
+def test_a_gate_that_never_says_it_is_listening_fails_rather_than_hangs() -> None:
+    silent = subprocess.Popen(
+        child(f"{MARKER}-silent", "setInterval(() => {}, 1 << 30)"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            first_line(silent, within=0.5)
+        assert time.monotonic() - started < 3
+    finally:
+        silent.kill()
+        silent.wait(timeout=5)
+        for pipe in (silent.stdout, silent.stderr):
+            if pipe is not None:
+                pipe.close()
