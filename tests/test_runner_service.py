@@ -1995,3 +1995,90 @@ def test_a_docker_error_that_echoes_the_password_reaches_neither_the_caller_nor_
     )
     assert "removal failed" in logged  # the clean-up's failure is still logged
     assert PASSWORD not in logged
+
+
+def logged_text(caplog: pytest.LogCaptureFixture) -> str:
+    """Every record's message and any traceback it carries, as a log would show them."""
+    return "\n".join(
+        record.getMessage()
+        + "".join(traceback.format_exception(*record.exc_info) if record.exc_info else [])
+        for record in caplog.records
+    )
+
+
+def test_a_stray_that_cannot_be_listed_or_reached_never_shows_the_password(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Part A, Minor 4: a stop that cannot list the run's containers, or read a stray's
+    address, says so in the caller's error, the status and the log, with the password taken
+    out of Docker's words and no traceback logged."""
+    prepare(
+        h,
+        seed="python3 seed.py",
+        env={"FOOTFALL_USERNAME": "tester", "FOOTFALL_PASSWORD": PASSWORD},
+    )
+    h.engine.fail("containers", EngineError(f"list failed near FOOTFALL_PASSWORD={PASSWORD}"))
+    with caplog.at_level("DEBUG"), pytest.raises(RunnerError) as caught:
+        h.service.stop(RUN)
+    assert "list failed" in str(caught.value)
+    assert PASSWORD not in str(caught.value)
+    assert PASSWORD not in (h.service.status(RUN) or "")
+    assert "list failed" in logged_text(caplog)
+    assert PASSWORD not in logged_text(caplog)
+    assert not any(record.exc_info for record in caplog.records)
+
+
+def test_a_strays_address_that_cannot_be_read_never_shows_the_password(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    prepare(
+        h,
+        seed="python3 seed.py",
+        env={"FOOTFALL_USERNAME": "tester", "FOOTFALL_PASSWORD": PASSWORD},
+    )
+    stray = {"Labels": {"footfall.run": RUN, "footfall.role": "app"}}
+    h.engine.create("stray-4471", {**stray, "HostConfig": {"NetworkMode": NETWORK}})
+    h.engine.fail("address", EngineError(f"inspect failed, env {PASSWORD}"), role="app")
+    with caplog.at_level("DEBUG"), pytest.raises(RunnerError) as caught:
+        h.service.stop(RUN)
+    assert "inspect failed" in str(caught.value)
+    assert PASSWORD not in str(caught.value) + (h.service.status(RUN) or "")
+    assert "inspect failed" in logged_text(caplog)
+    assert PASSWORD not in logged_text(caplog)
+    assert not any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.parametrize("when", ["after the seed", "in the watch"])
+def test_a_measure_that_fails_naming_the_password_never_logs_it(
+    h: Harness, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    """Part A, Minor 4: a seed can name a file after the password it was given, and a measure
+    that fails there says the name. The run is stopped, the failure is logged without the
+    password and without a traceback, and a stop that fails too logs no chain back to it."""
+    from footfall.runner import service as module
+
+    real = module._measure_settled
+    failing: list[bool] = []
+
+    def measure(parent: int, name: str, max_depth: int) -> tuple[int, int]:
+        if failing:
+            raise OSError(errno.EIO, "Input/output error", f"cache-{PASSWORD}")
+        return real(parent, name, max_depth)
+
+    monkeypatch.setattr(module, "_measure_settled", measure)
+    h.engine.fail("containers", EngineError("the daemon is busy"))
+    env = {"FOOTFALL_USERNAME": "tester", "FOOTFALL_PASSWORD": PASSWORD}
+    with caplog.at_level("DEBUG"):
+        if when == "after the seed":
+            h.engine.during_wait["seed"] = lambda _: failing.append(True)
+            with pytest.raises(RunnerError, match="could not be measured"):
+                prepare(h, seed="python3 seed.py", env=env)
+        else:
+            prepare(h, seed="python3 seed.py", env=env)
+            failing.append(True)
+            h.service.check_runs()
+    assert (h.service.status(RUN) or "").startswith(MEASURE_REASON)
+    assert "Input/output error" in logged_text(caplog)
+    assert "the daemon is busy" in logged_text(caplog)
+    assert PASSWORD not in logged_text(caplog)
+    assert not any(record.exc_info for record in caplog.records)

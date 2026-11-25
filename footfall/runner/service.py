@@ -1115,8 +1115,8 @@ class RunnerService:
                     reason = UNSTEADY_REASON
             except _TooDeep:
                 reason = DISK_REASON
-            except Exception:
-                logger.exception("could not measure the disk use of run %s", run.run_id)
+            except Exception as error:  # noqa: BLE001  # logged without a traceback, as said
+                self._unmeasured(run, error)
                 reason = MEASURE_REASON
             if reason is not None:
                 with run.lock:
@@ -1265,22 +1265,21 @@ class RunnerService:
         """Return the run's disk use, after stopping the run and raising if that use, plus a
         copy of `incoming`, a folder below an open root, is over budget or cannot be
         measured."""
+        # The stops come after the handlers, so that a stop that fails too logs no chain back
+        # to the measure's error, which may name a file the seed named after the password.
+        reason, said = "", ""
         try:
             usage, skipped = _measure_settled(self._runs_fd, run.run_id, _RUN_DEPTH)
             extra = 0 if incoming is None else _incoming_size(*incoming)
         except _TooDeep as deep:
-            self._stop_for_locked(run, DISK_REASON)
-            raise RunnerError(f"{DISK_REASON}: {deep}") from None
+            reason, said = DISK_REASON, f"{DISK_REASON}: {deep}"
         except (OSError, RecursionError) as error:
             # What went wrong is the runner's to know: a name in it is the run's own.
-            logger.error(
-                "could not measure the disk use of run %s: %s: %s",
-                run.run_id,
-                type(error).__name__,
-                error,
-            )
-            self._stop_for_locked(run, MEASURE_REASON)
-            raise RunnerError(f"{MEASURE_REASON}: {type(error).__name__}") from error
+            self._unmeasured(run, error)
+            reason, said = MEASURE_REASON, f"{MEASURE_REASON}: {type(error).__name__}"
+        if reason:
+            self._stop_for_locked(run, reason)
+            raise RunnerError(said)
         if usage + extra > self._disk_budget:
             self._stop_for_locked(run, DISK_REASON)
             raise RunnerError(DISK_REASON)
@@ -1288,6 +1287,17 @@ class RunnerService:
             self._stop_for_locked(run, UNSTEADY_REASON)
             raise RunnerError(UNSTEADY_REASON)
         return usage
+
+    @staticmethod
+    def _unmeasured(run: _Run, error: BaseException) -> None:
+        """Log why a run could not be measured, with its password taken out and no traceback."""
+        said = _redacted(error, dict.fromkeys(run.secrets, _REDACTED))
+        logger.error(
+            "could not measure the disk use of run %s: %s: %s",
+            run.run_id,
+            type(error).__name__,
+            said,
+        )
 
     def _unsteady(self, run: _Run, skipped: int) -> bool:
         """Count a settled measure of the run that still skipped something, and say whether
@@ -1569,17 +1579,15 @@ class RunnerService:
         """Remove containers carrying the run's label that the runner has no record of."""
         try:
             strays = self._engine.containers(f"footfall.run={run.run_id}")
-        except Exception as error:
-            logger.exception("could not list the containers of run %s", run.run_id)
-            problems.append(f"could not list the containers of run {run.run_id}: {error}")
+        except Exception as error:  # noqa: BLE001  # any kind is recorded, and none is lost
+            self._failed(problems, f"list the containers of run {run.run_id}", error, run.secrets)
             return
         for container in strays:
             try:
                 run.containers[container] = self._engine.address(container, run.network)
             except (EngineError, OSError) as error:
                 # Its allow list cannot be revoked without its address, so the network stays.
-                logger.exception("could not read the address of %s", container)
-                problems.append(f"could not read the address of {container}: {error}")
+                self._failed(problems, f"read the address of {container}", error, run.secrets)
                 run.containers[container] = None
             self._remove_container_locked(run, container, problems)
 
@@ -1596,8 +1604,17 @@ class RunnerService:
         try:
             action()
         except Exception as error:  # noqa: BLE001  # any kind is recorded, and none is lost
-            said = _redacted(error, dict.fromkeys(secrets, _REDACTED))
-            logger.error("could not %s: %s: %s", what, type(error).__name__, said)
-            problems.append(f"could not {what}: {said}")
+            RunnerService._failed(problems, what, error, secrets)
             return False
         return True
+
+    @staticmethod
+    def _failed(
+        problems: list[str], what: str, error: BaseException, secrets: Sequence[str]
+    ) -> None:
+        """Log and record that a step failed, by its kind and its words with `secrets` taken
+        out, and with no traceback, which would carry an error the step failed while
+        handling."""
+        said = _redacted(error, dict.fromkeys(secrets, _REDACTED))
+        logger.error("could not %s: %s: %s", what, type(error).__name__, said)
+        problems.append(f"could not {what}: {said}")
