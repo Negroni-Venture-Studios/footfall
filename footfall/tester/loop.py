@@ -36,6 +36,8 @@ is given by a fixed reason or the exception's class alone, because an exception'
 may hold page text, the API's reply or the password the tester typed (AGENTS.md rule 7).
 The report's free text is redacted with the executor's secrets after it is cleaned and
 stripped of characters that show nothing, so that a password split by them is caught too.
+The match is otherwise exact, as the executor's is: a password written in another case, or
+with other characters between its own, is not found.
 """
 
 import asyncio

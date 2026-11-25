@@ -12,8 +12,12 @@ When the manifest has a `[login]` section, the run makes a throwaway username an
 The password reaches a container only through the seed step's environment (AGENTS.md rule 3).
 Footfall signs each persona in before it starts when the brief starts signed in. Either way
 the tester is given the account in its first message, and every executor redacts the
-password, so it is written to no trace, report, summary or printed table, and to no log
-line. A screenshot can still show it, if the app displays what was typed in plain text.
+password from the trace and the report wherever it appears whole, once characters that show
+nothing are taken out. The match is exact: the password typed in two parts, or written in
+another case, reversed, encoded or with other characters between its own, is not found,
+and stays. No log line and no printed table holds the tester's text at all. A screenshot can
+still show the password, if the app displays what was typed in plain text. Hiding it better,
+in text as in screenshots, is left to issue #7.
 
 Each persona runs in its own browser context, and a persona that fails, whatever the reason,
 ends alone: its context is closed and the others carry on. Each one's report is written as it

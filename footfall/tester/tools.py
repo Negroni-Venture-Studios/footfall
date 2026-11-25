@@ -470,7 +470,10 @@ class Executor:
     `touch` says whether taps use the touchscreen, as the device does. Each string in
     `redact`, such as the throwaway password the tester types to sign in, is replaced by
     "[password]" in the trace, the free text of the report from `finish` and any
-    `CaptureError`. The log holds no error's message at all, only its class.
+    `CaptureError`, wherever it appears whole once characters that show nothing are taken
+    out. The match is exact, so the same text split across two calls, or in another case,
+    or with other characters between its own, is not found. The log holds no error's
+    message at all, only its class.
     """
 
     def __init__(
