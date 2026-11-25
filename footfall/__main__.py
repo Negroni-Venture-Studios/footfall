@@ -51,7 +51,7 @@ from footfall.proxy.server import ProxyServer
 from footfall.runner.client import RunnerClient
 from footfall.runner.engine import DockerEngine
 from footfall.runner.server import serve
-from footfall.runner.service import RunnerError, RunnerService
+from footfall.runner.service import RunnerError, RunnerService, RunnerSetupError
 from footfall.tester.loop import Budget
 from footfall.tester.model import DEFAULT_MODEL, ModelSpecError
 from footfall.tester.report import clean_text, strip_invisible
@@ -374,6 +374,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _until_stopped(run_runner(settings) if args.command == "runner" else run_proxy(settings))
     except (KeyboardInterrupt, asyncio.CancelledError):
         return _STOPPED
+    except RunnerSetupError as error:
+        print(f"footfall runner: {error}", file=sys.stderr)
+        return 2
     return 0
 
 

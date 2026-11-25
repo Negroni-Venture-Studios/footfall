@@ -6,6 +6,7 @@ with the real daemon. Steps are scripted by role, so a test can make the seed st
 or write files into its workspace.
 """
 
+import os
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -258,9 +259,10 @@ def make_harness(tmp_path: Path, **settings: Any) -> Harness:
     workspaces.mkdir(parents=True)
     runs = (tmp_path / "runs").resolve()
     chowned: list[Path] = []
-    chown = settings.pop("chown", chowned.append)
+    record = settings.pop("chown", chowned.append)
     clock = FakeClock()
     settings.setdefault("clock", clock)
+    settings.setdefault("runs_owner", os.getuid())
     service = RunnerService(
         engine,
         proxy,
@@ -270,7 +272,16 @@ def make_harness(tmp_path: Path, **settings: Any) -> Harness:
         browsers_image=BROWSERS_IMAGE,
         proxy_container=PROXY,
         orchestrator_container=ORCHESTRATOR,
-        chown=chown,
+        chown=recording(record),
         **settings,
     )
     return Harness(engine, proxy, service, workspaces, runs, chowned, clock)
+
+
+def recording(record: Callable[[Path], object]) -> Callable[[int, str, Path], None]:
+    """A chown for the runner that only passes the path of each entry to `record`."""
+
+    def chown(folder: int, name: str, path: Path) -> None:
+        record(path)
+
+    return chown

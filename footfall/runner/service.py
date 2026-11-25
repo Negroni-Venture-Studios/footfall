@@ -6,11 +6,19 @@ request supplies only a run id, copy names, commands, a port and host names, and
 here before anything starts. A workspace must lie inside the workspaces root and hold nothing but
 files, folders and symbolic links, at most `MAX_DEPTH` folders deep.
 
-Every copy is one pass by file descriptor: each folder is opened relative to its parent and
-never through a link, and links are copied as links. A link planted in a workspace, or swapped in
-while it is read, therefore cannot pull a host file into a container. The copy also relies on
-nothing writing to its source meanwhile. No container ever mounts the workspace, and install and
-seed are removed before `prepared` is copied for each app.
+The runs folder must be root's alone, and every folder above it root's or the runner's, so
+that no other user can rename or replace a name in it; the runner refuses to start otherwise.
+It holds the runs folder and the workspaces folder open, and reaches everything below them from
+those descriptors, one name at a time and never through a link. Every copy is one pass by file
+descriptor on both sides: each folder is read relative to its parent, each entry is made, given
+to the containers' user and given its mode relative to the open folder it goes in, and links are
+copied as links. A link planted in a workspace or a run's folder, or swapped in while it is read
+or written, therefore cannot pull a host file into a container or turn a write elsewhere. The
+copy also relies on nothing writing to its source meanwhile. No container ever mounts the
+workspace, and install and seed are removed before `prepared` is copied for each app. Docker
+takes a path for a mount, so before it is given one the runner opens that path again from / and
+checks that it reaches the folder it holds. A run's folder is removed by a walk that holds a few
+descriptors and no path, however deep the tree its code made.
 
 A container is allowed out through the egress proxy only once its address on the run's network is
 known, and its allow list is revoked when it goes; a stop also revokes every list the run holds
@@ -32,10 +40,10 @@ import logging
 import os
 import re
 import secrets
-import shutil
 import stat
 import threading
 import time
+import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
@@ -106,6 +114,7 @@ _RUN_ID: Final = re.compile(r"r_[a-z2-7]{26}")
 _COPY: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _PREPARE: Final = "prepare"  # the copy name of the install and seed containers
 _PREPARED: Final = "prepared"
+_COPIES: Final = "copies"
 _SEED_ENV: Final = frozenset({"FOOTFALL_USERNAME", "FOOTFALL_PASSWORD"})
 _SPEC_RUNTIMES: Final = frozenset({"runsc", "runc"})
 _LOG_LINES: Final = 200
@@ -128,6 +137,10 @@ class RunnerError(Exception):
     def __init__(self, message: str, log_tail: str = "") -> None:
         super().__init__(message)
         self.log_tail = log_tail
+
+
+class RunnerSetupError(ValueError):
+    """A setting, or a folder, that the runner will not start with."""
 
 
 class _TooDeep(Exception):
@@ -155,9 +168,14 @@ class ProxyControl(Protocol):
     def listen(self, ip: str, run_id: str) -> None: ...
 
 
-def _chown_to_app(path: Path) -> None:
-    """Give a path to the containers' user, changing a link itself rather than its target."""
-    os.lchown(path, APP_UID, APP_UID)
+# Gives an entry to the containers' user: the entry is `name` in the open folder, and the path
+# names it for tests and messages only.
+Chown = Callable[[int, str, Path], None]
+
+
+def _chown_to_app(folder: int, name: str, path: Path) -> None:
+    """Give an entry to the containers' user, changing a link itself rather than its target."""
+    os.chown(name, APP_UID, APP_UID, dir_fd=folder, follow_symlinks=False)
 
 
 @dataclass(eq=False)
@@ -275,16 +293,77 @@ def _kind(mode: int) -> str:
     return "a special file"
 
 
-def _open_folder(root: Path, relative: PurePath) -> int:
-    """Open a folder below a trusted `root` one name at a time, never through a link."""
-    folder = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+def _open_folder(root: int, relative: PurePath) -> int:
+    """Open a folder below an open `root` one name at a time, never through a link.
+
+    A link, or anything but a folder, where a folder should be is refused with RunnerError.
+    The descriptor returned is new, even for the root itself.
+    """
+    folder = os.open(".", _FOLDER_FLAGS, dir_fd=root)
     try:
         for name in relative.parts:
             if name in (".", ".."):
                 raise RunnerError(f"not a plain path: {_show(str(relative))}")
-            inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+            try:
+                inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+            except OSError as error:
+                if error.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    raise
+                raise RunnerError(
+                    f"{_show(str(relative))} has a link or something other than a folder "
+                    f"at {_show(name)}, and the runner never goes through one"
+                ) from None
             os.close(folder)
             folder = inner
+    except BaseException:
+        os.close(folder)
+        raise
+    return folder
+
+
+def _open_path(path: Path, owner: int | None = None, *, create: bool = False) -> int:
+    """Open the folder at an absolute `path` one name at a time from /, never through a link.
+
+    With `owner`, every folder on the way must belong to root or to `owner` and be writable by
+    nobody else, unless it is sticky, as /tmp is, so that nobody else can rename or replace
+    what lies below it; and `path` itself must belong to `owner` and be writable by nobody
+    else. With `create`, a missing last folder is made, mode 0700. Raises RunnerSetupError.
+    """
+    if not path.is_absolute():
+        raise RunnerSetupError(f"{path} is not an absolute path")
+    folder = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    where = Path("/")
+    try:
+        for name in path.parts[1:]:
+            info = os.fstat(folder)
+            if owner is not None and (
+                info.st_uid not in (0, owner)
+                or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)
+            ):
+                raise RunnerSetupError(
+                    f"{where} must belong to root and be writable by root alone, since it "
+                    f"holds {path}"
+                )
+            try:
+                inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+            except FileNotFoundError:
+                if not create or where / name != path:
+                    raise RunnerSetupError(f"{where / name} does not exist") from None
+                os.mkdir(name, 0o700, dir_fd=folder)
+                inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+            except OSError as error:
+                if error.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    raise RunnerSetupError(f"{where / name} cannot be opened: {error}") from None
+                raise RunnerSetupError(f"{where / name} is a link or not a folder") from None
+            os.close(folder)
+            folder = inner
+            where = where / name
+        info = os.fstat(folder)
+        if owner is not None and (info.st_uid != owner or info.st_mode & 0o022):
+            raise RunnerSetupError(
+                f"{path} must belong to root and be writable by root alone, "
+                f"not user {info.st_uid} with mode {stat.S_IMODE(info.st_mode):o}"
+            )
     except BaseException:
         os.close(folder)
         raise
@@ -394,13 +473,15 @@ def _entries(folder: int, what: str) -> Generator[tuple[PurePath, int, str, os.s
         raise RunnerError(f"{what} changed while it was read, at {where}") from None
 
 
-def _copy_file(folder: int, name: str, target: Path, allowed: int) -> int:
-    """Copy one regular file, named relative to an open folder; return the bytes written.
+def _copy_file(folder: int, name: str, target: int, allowed: int) -> int:
+    """Copy one regular file, named relative to an open folder, to the same name in the open
+    folder `target`; return the bytes written.
 
     Checking the opened descriptor rather than the name means a FIFO or a link swapped in is
     refused instead of read, and opening without blocking means a FIFO cannot hang the runner.
-    The target must not exist. Set-user-id, set-group-id and sticky bits are dropped. Raises
-    _OverBudget once more than `allowed` bytes have been read.
+    The target must not exist, and is never opened through a link. Set-user-id, set-group-id
+    and sticky bits are dropped. Raises _OverBudget once more than `allowed` bytes have been
+    read.
     """
     reader = os.open(name, _READ_FLAGS, dir_fd=folder)
     try:
@@ -409,7 +490,7 @@ def _copy_file(folder: int, name: str, target: Path, allowed: int) -> int:
             raise RunnerError(
                 f"{_show(name)} changed into {_kind(info.st_mode)} while it was copied"
             )
-        writer = os.open(target, _WRITE_FLAGS, 0o600)
+        writer = os.open(name, _WRITE_FLAGS, 0o600, dir_fd=target)
         written = 0
         try:
             while chunk := os.read(reader, _CHUNK):
@@ -429,52 +510,79 @@ def _copy_file(folder: int, name: str, target: Path, allowed: int) -> int:
 
 
 def _copy_tree(
-    root: Path,
+    root: int,
     relative: PurePath,
-    target: Path,
+    parent: int,
+    name: str,
     *,
     limit: int,
-    chown: Callable[[Path], None],
+    chown: Chown,
     what: str,
+    shown: Path,
 ) -> int:
-    """Copy the folder `relative` below `root` to a new `target` in one pass; return the bytes.
+    """Copy the folder `relative` below the open `root` to a new folder `name` in the open
+    folder `parent`, in one pass; return the bytes.
 
-    Links stay links. Every entry made is passed to `chown`. Each entry is charged as the
+    The write side goes by descriptor as the read side does: every entry is made relative to
+    the open folder it goes in, never through a link, and each folder's mode is set on its own
+    descriptor once its contents are made, so a link swapped in anywhere is never written
+    through. Links stay links. Every entry made is passed to `chown`, with `shown`, the path the
+    new folder is known by, joined with the entry's place in it. Each entry is charged as the
     measure charges it, at least one 4 KiB block and a folder at its size, and _OverBudget is
     raised once the charges come to more than `limit`.
     """
     source = _open_folder(root, relative)
+    # The folders on the path the walk is on, each with its descriptor and mode, the top first.
+    made: list[tuple[PurePath, int, int]] = []
+
+    def close_to(here: PurePath) -> None:
+        while made[-1][0] != here:  # the walk has left this folder: its contents are made
+            _, folder, mode = made.pop()
+            try:
+                os.fchmod(folder, stat.S_IMODE(mode) & 0o777)
+            finally:
+                os.close(folder)
+
     try:
         top = os.fstat(source)
-        folders = [(target, top.st_mode)]
-        target.mkdir(mode=0o700)
-        chown(target)
+        os.mkdir(name, 0o700, dir_fd=parent)
+        made.append((_TOP, os.open(name, _FOLDER_FLAGS, dir_fd=parent), top.st_mode))
+        chown(parent, name, shown)
         written = _size(top)
-        for here, dirfd, name, info in _entries(source, what):
+        for here, dirfd, entry, info in _entries(source, what):
             if written > limit:
                 raise _OverBudget
-            destination = target / here / name
+            close_to(here)
+            target = made[-1][1]
             if stat.S_ISDIR(info.st_mode):
-                destination.mkdir(mode=0o700)
-                folders.append((destination, info.st_mode))
+                os.mkdir(entry, 0o700, dir_fd=target)
+                made.append(
+                    (here / entry, os.open(entry, _FOLDER_FLAGS, dir_fd=target), info.st_mode)
+                )
                 written += _size(info)  # a folder of many names is larger than a block
             elif stat.S_ISLNK(info.st_mode):
-                link = os.readlink(name, dir_fd=dirfd)
-                destination.symlink_to(link)
+                link = os.readlink(entry, dir_fd=dirfd)
+                os.symlink(link, entry, dir_fd=target)
                 written += _charge(len(os.fsencode(link)))
             else:
-                written += _charge(_copy_file(dirfd, name, destination, limit - written))
-            chown(destination)
+                written += _charge(_copy_file(dirfd, entry, target, limit - written))
+            chown(target, entry, shown / here / entry)
         if written > limit:
             raise _OverBudget
-        for path, mode in reversed(folders):  # last, so that no folder is closed to its contents
-            path.chmod(stat.S_IMODE(mode) & 0o777)
+        close_to(_TOP)
+        _, folder, mode = made.pop()  # last, so that no folder is closed to its contents
+        try:
+            os.fchmod(folder, stat.S_IMODE(mode) & 0o777)
+        finally:
+            os.close(folder)
     finally:
+        for _, folder, _ in made:
+            os.close(folder)
         os.close(source)
     return written
 
 
-def _scan_tree(root: Path, relative: PurePath, what: str) -> None:
+def _scan_tree(root: int, relative: PurePath, what: str) -> None:
     """Refuse a folder below `root` holding anything a copy would refuse."""
     source = _open_folder(root, relative)
     try:
@@ -482,6 +590,21 @@ def _scan_tree(root: Path, relative: PurePath, what: str) -> None:
             pass
     finally:
         os.close(source)
+
+
+def _incoming_size(root: int, relative: PurePath) -> int:
+    """Bytes that copying the folder `relative` below the open `root` would write."""
+    parent = _open_folder(root, relative.parent)
+    try:
+        return _measure_in(parent, relative.name, MAX_DEPTH)[0]
+    finally:
+        os.close(parent)
+
+
+def _close(descriptors: Sequence[int]) -> None:
+    for descriptor in descriptors:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
 
 
 def _charge(size: int) -> int:
@@ -494,27 +617,37 @@ def _size(info: os.stat_result) -> int:
 
 
 def _measure(top: Path, max_depth: int) -> tuple[int, int]:
-    """Bytes that copying `top` would write, never following a link, and how many entries the
-    measure skipped because they vanished or changed while it read.
+    """`_measure_in` for the entry at the path `top`, whose folder is not a link."""
+    parent = os.open(top.parent, _FOLDER_FLAGS)
+    try:
+        return _measure_in(parent, top.name, max_depth)
+    finally:
+        os.close(parent)
+
+
+def _measure_in(parent: int, name: str, max_depth: int) -> tuple[int, int]:
+    """Bytes that copying `name` in the open folder `parent` would write, never following a
+    link, and how many entries the measure skipped because they vanished or changed while it
+    read.
 
     Every name counts at the larger of its size, rounded up to whole 4 KiB blocks, and its
     allocated blocks, and at least one block. So a sparse file counts in full, each hard link
     counts again, as a copy writes them, and the budget bounds how many entries a run holds.
-    A missing `top` measures 0. A folder more than `max_depth` below `top` raises _TooDeep,
-    so the walk never holds more descriptors than that. A folder swapped for a link while it
-    is measured is never opened through the link. An entry that vanishes, or a folder that
+    A missing `name` measures 0. A folder more than `max_depth` below it raises _TooDeep, so
+    the walk never holds more descriptors than that. A folder swapped for a link while it is
+    measured is never opened through the link. An entry that vanishes, or a folder that
     changes, is skipped and counted: what it held is not in the total, which is why a run
     whose measures keep skipping is stopped. Any other failure is raised.
     """
     try:
-        info = top.lstat()
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
     except FileNotFoundError:
         return 0, 0
     total = _size(info)
     if not stat.S_ISDIR(info.st_mode):
         return total, 0
     try:
-        folder = os.open(top, _FOLDER_FLAGS)
+        folder = os.open(name, _FOLDER_FLAGS, dir_fd=parent)
     except FileNotFoundError:
         return 0, 0
     tally = _Tally()
@@ -530,14 +663,14 @@ def _measure(top: Path, max_depth: int) -> tuple[int, int]:
     return total, tally.skipped
 
 
-def _measure_settled(top: Path, max_depth: int) -> tuple[int, int]:
+def _measure_settled(parent: int, name: str, max_depth: int) -> tuple[int, int]:
     """A measure, taken again at once if it skipped something. A file or folder replaced
     once, as a dev server replaces a cache folder while it starts, is found by the second;
     a run that keeps changing its files makes both skip, and then the larger of the two is
     the usage, since each missed what it skipped."""
-    usage, skipped = _measure(top, max_depth)
+    usage, skipped = _measure_in(parent, name, max_depth)
     if skipped:
-        again, skipped = _measure(top, max_depth)
+        again, skipped = _measure_in(parent, name, max_depth)
         usage = max(usage, again) if skipped else again
     return usage, skipped
 
@@ -547,11 +680,103 @@ def _disk_usage(top: Path, max_depth: int = MAX_DEPTH) -> int:
     return _measure(top, max_depth)[0]
 
 
-def _remove_tree(path: Path) -> None:
-    if path.is_symlink():
-        path.unlink()
-    elif path.exists():
-        shutil.rmtree(path)
+_FRESH_TRIES: Final = 8
+
+
+def _remove_in(parent: int, name: str) -> None:
+    """Remove `name` from the open folder `parent`, and everything below it, never through a
+    link. A name already gone counts as removed.
+
+    The tree may be one that code under test shaped, as deep as it likes, so the walk holds
+    no more than a few descriptors and one listing at a time, and no path, whatever the
+    depth: it empties the top folder by taking each folder in it, removing the files and links
+    there and moving the folders there up into the top under fresh names, then removing the
+    folder, until the top is empty. Every folder is moved at most once, so the work is in
+    proportion to the tree. A pass that removes nothing raises OSError, as does any failure.
+    """
+    try:
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=parent)
+        return
+    top = os.open(name, _FOLDER_FLAGS, dir_fd=parent)
+    try:
+        if not os.path.samestat(info, os.fstat(top)):
+            raise OSError(errno.EAGAIN, f"{_show(name)} changed while it was removed")
+        while _empty_pass(top):
+            pass
+    finally:
+        os.close(top)
+    os.rmdir(name, dir_fd=parent)
+
+
+def _empty_pass(top: int) -> bool:
+    """One pass of `_remove_in` over the open folder `top`; whether it found anything."""
+    found = progress = False
+    listing = os.open(".", _FOLDER_FLAGS, dir_fd=top)
+    try:
+        with os.scandir(listing) as entries:
+            for entry in entries:
+                found = True
+                progress |= _take_apart(top, entry.name)
+    finally:
+        os.close(listing)
+    if found and not progress:
+        raise OSError(errno.ENOTEMPTY, "a folder could not be emptied")
+    return found
+
+
+def _take_apart(top: int, name: str) -> bool:
+    """Remove `name` from `top` if it is not a folder; if it is, empty it into `top` and
+    remove it. Whether anything was removed or moved."""
+    try:
+        info = os.stat(name, dir_fd=top, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    if not stat.S_ISDIR(info.st_mode):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=top)
+        return True
+    moved = False
+    inner = os.open(name, _FOLDER_FLAGS, dir_fd=top)
+    try:
+        if not os.path.samestat(info, os.fstat(inner)):
+            return False
+        with os.scandir(inner) as entries:
+            for entry in entries:
+                if not stat.S_ISDIR(
+                    os.stat(entry.name, dir_fd=inner, follow_symlinks=False).st_mode
+                ):
+                    os.unlink(entry.name, dir_fd=inner)
+                else:
+                    _move_up(inner, entry.name, top)
+                moved = True
+    finally:
+        os.close(inner)
+    try:
+        os.rmdir(name, dir_fd=top)
+    except OSError as error:
+        if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+            raise
+        return moved  # something arrived meanwhile: the next pass takes it
+    return True
+
+
+def _move_up(folder: int, name: str, top: int) -> None:
+    """Move the folder `name` from `folder` into `top` under a fresh name."""
+    for _ in range(_FRESH_TRIES):
+        fresh = f".footfall-removing-{secrets.token_hex(8)}"
+        try:
+            os.rename(name, fresh, src_dir_fd=folder, dst_dir_fd=top)
+        except OSError as error:
+            if error.errno not in (errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR):
+                raise
+            continue
+        return
+    raise OSError(errno.EEXIST, "no fresh name to move a folder to")
 
 
 # ---------------------------------------------------------------- the service
@@ -576,8 +801,9 @@ class RunnerService:
         runtime: str = "runsc",
         disk_budget: int = 8 * 1024**3,
         disk_interval: float = 15.0,
-        chown: Callable[[Path], None] = _chown_to_app,
+        chown: Chown = _chown_to_app,
         clock: Callable[[], float] = time.monotonic,
+        runs_owner: int = 0,
     ) -> None:
         if runtime not in _SPEC_RUNTIMES:
             raise ValueError(f"runtime must be runsc or runc, not {runtime!r}")
@@ -591,6 +817,16 @@ class RunnerService:
         workspaces_root, runs_root = workspaces.resolve(), runs.resolve()
         if workspaces_root.is_relative_to(runs_root) or runs_root.is_relative_to(workspaces_root):
             raise ValueError("the workspaces and runs folders must not contain each other")
+        # Both roots are held open from here on, and everything below them is reached from
+        # those descriptors. The runs folder must be root's alone, all the way up, so that
+        # nobody else can rename or replace a name the runner writes through or gives Docker.
+        self._runs_fd = _open_path(runs_root, runs_owner, create=True)
+        try:
+            self._workspaces_fd = _open_path(workspaces_root)
+        except BaseException:
+            os.close(self._runs_fd)
+            raise
+        weakref.finalize(self, _close, (self._runs_fd, self._workspaces_fd))
         if runtime == "runc":
             logger.warning("containers will start with runc, without gVisor: development only")
 
@@ -616,6 +852,11 @@ class RunnerService:
         self._stopped: dict[str, None] = {}
 
     # ------------------------------------------------------------ operations
+
+    @property
+    def runs_root(self) -> Path:
+        """The folder that holds every run's folder, as Docker names it."""
+        return self._runs_root
 
     def prepare(
         self,
@@ -644,7 +885,7 @@ class RunnerService:
             relative = self._workspace(workspace).relative_to(self._workspaces)
             directory = self._runs_root / run_id
             self._refuse_stopped(run_id)
-            if directory.is_symlink() or directory.exists():
+            if self._has_folder(run_id):
                 raise RunnerError(f"run {run_id} already exists")
             secrets = tuple(v for k, v in env.items() if k == "FOOTFALL_PASSWORD" and v)
             run = _Run(run_id, image, directory, secrets)
@@ -680,7 +921,8 @@ class RunnerService:
                     name = _container_name(run_id, "app", copy)
                     if not run.closed and self._forget_locked(run, name):
                         run.copies.discard(copy)
-                        remove = functools.partial(_remove_tree, run.directory / "copies" / copy)
+                        # One that cannot be deleted goes with the run's folder when it stops.
+                        remove = functools.partial(self._remove_copy, run.run_id, copy)
                         self._attempt([], f"delete copy {copy}", remove)
                     raise
                 return f"{address}:{port}"
@@ -797,7 +1039,7 @@ class RunnerService:
                             self._teardown_locked(run)
                 continue
             try:
-                usage, skipped = _measure_settled(run.directory, _RUN_DEPTH)
+                usage, skipped = _measure_settled(self._runs_fd, run.run_id, _RUN_DEPTH)
                 if usage > self._disk_budget:
                     reason = DISK_REASON
                 elif self._unsteady(run, skipped):
@@ -832,11 +1074,12 @@ class RunnerService:
         hosts: list[str],
         seed_env: dict[str, str],
     ) -> None:
-        self._runs_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        run.directory.mkdir(mode=0o700)
+        try:
+            os.mkdir(run.run_id, 0o700, dir_fd=self._runs_fd)
+        except FileExistsError:
+            raise RunnerError(f"run {run.run_id} already exists") from None
         # No container ever mounts the workspace, so nothing changes it while it is copied.
-        prepared = run.directory / _PREPARED
-        self._copy_locked(run, self._workspaces, relative, prepared, "the workspace")
+        self._copy_locked(run, self._workspaces_fd, relative, _TOP, _PREPARED, "the workspace")
 
         self._engine.create_network(network_config(run.run_id))
         for container in (self._proxy_container, self._orchestrator_container):
@@ -852,7 +1095,7 @@ class RunnerService:
             self._step_locked(run, "install", install, install_hosts, {})
         if seed is not None:
             self._step_locked(run, "seed", seed, hosts, seed_env)
-        _scan_tree(self._runs_root, PurePath(run.run_id, _PREPARED), "the prepared app")
+        _scan_tree(self._runs_fd, PurePath(run.run_id, _PREPARED), "the prepared app")
         run.prepared = True
 
     def _step_locked(
@@ -871,7 +1114,7 @@ class RunnerService:
             copy=_PREPARE,
             image=run.image,
             command=("sh", "-c", command),
-            workspace=run.directory / _PREPARED,
+            workspace=self._bind_source(PurePath(run.run_id, _PREPARED)),
             network=run.network,
             proxy_url=run.proxy_url,
             env=env,
@@ -908,12 +1151,13 @@ class RunnerService:
 
     # ------------------------------------------------------------ the disk budget
 
-    def _check_budget_locked(self, run: _Run, incoming: Path | None = None) -> int:
+    def _check_budget_locked(self, run: _Run, incoming: tuple[int, PurePath] | None = None) -> int:
         """Return the run's disk use, after stopping the run and raising if that use, plus a
-        copy of `incoming`, is over budget or cannot be measured."""
+        copy of `incoming`, a folder below an open root, is over budget or cannot be
+        measured."""
         try:
-            usage, skipped = _measure_settled(run.directory, _RUN_DEPTH)
-            extra = 0 if incoming is None else _disk_usage(incoming)
+            usage, skipped = _measure_settled(self._runs_fd, run.run_id, _RUN_DEPTH)
+            extra = 0 if incoming is None else _incoming_size(*incoming)
         except _TooDeep as deep:
             self._stop_for_locked(run, DISK_REASON)
             raise RunnerError(f"{DISK_REASON}: {deep}") from None
@@ -936,22 +1180,28 @@ class RunnerService:
             return run.unsteady >= UNSTEADY_MEASURES
 
     def _copy_locked(
-        self, run: _Run, root: Path, relative: PurePath, target: Path, what: str
+        self, run: _Run, root: int, relative: PurePath, inside: PurePath, name: str, what: str
     ) -> None:
-        """Copy a folder into the run, checking its budget before, during and after."""
-        usage = self._check_budget_locked(run, root / relative)
+        """Copy the folder `relative` below the open `root` to `name` in the folder `inside`
+        the run's, checking the run's budget before, during and after."""
+        usage = self._check_budget_locked(run, (root, relative))
+        parent = _open_folder(self._runs_fd, PurePath(run.run_id) / inside)
         try:
             _copy_tree(
                 root,
                 relative,
-                target,
+                parent,
+                name,
                 limit=self._disk_budget - usage,
                 chown=self._chown,
                 what=what,
+                shown=run.directory / inside / name,
             )
         except _OverBudget:
             self._stop_for_locked(run, DISK_REASON)
             raise RunnerError(DISK_REASON) from None
+        finally:
+            os.close(parent)
         self._check_budget_locked(run)
 
     # ------------------------------------------------------------ apps
@@ -959,20 +1209,23 @@ class RunnerService:
     def _start_app_locked(
         self, run: _Run, copy: str, start: str, port: int, hosts: list[str]
     ) -> str:
-        copies = run.directory / "copies"
-        copies.mkdir(mode=0o700, exist_ok=True)
-        target = copies / copy
+        folder = _open_folder(self._runs_fd, PurePath(run.run_id))
+        try:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(_COPIES, 0o700, dir_fd=folder)
+        finally:
+            os.close(folder)
         # Install and seed were removed before prepare returned, and app containers mount only
         # their own copies, so no container can change `prepared` while it is copied.
         prepared = PurePath(run.run_id, _PREPARED)
-        self._copy_locked(run, self._runs_root, prepared, target, "the prepared app")
+        self._copy_locked(run, self._runs_fd, prepared, PurePath(_COPIES), copy, "the prepared app")
         config = container_config(
             role="app",
             run_id=run.run_id,
             copy=copy,
             image=run.image,
             command=("sh", "-c", start),
-            workspace=target,
+            workspace=self._bind_source(PurePath(run.run_id, _COPIES, copy)),
             network=run.network,
             proxy_url=run.proxy_url,
             env={"PORT": str(port)},
@@ -1034,6 +1287,44 @@ class RunnerService:
         for secret in run.secrets:
             text = text.replace(secret, _REDACTED)
         return text[-_TAIL_CHARS:]
+
+    # ------------------------------------------------------------ the run's folders
+
+    def _has_folder(self, run_id: str) -> bool:
+        try:
+            os.stat(run_id, dir_fd=self._runs_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _bind_source(self, relative: PurePath) -> Path:
+        """The path, as Docker names it, of a folder below the runs folder that a container is
+        to mount, once it is shown to be the folder the runner holds, with no link on the way.
+
+        Docker takes a path, not a descriptor, so the path is opened again from / one name at a
+        time and must reach the runs folder the runner opened at start; below that, the folder
+        is opened from the runner's own descriptor without going through a link. Since the runs
+        folder and every folder above it are root's alone, nothing can change what the path
+        names between this check and Docker's mount.
+        """
+        try:
+            check = _open_path(self._runs_root)
+        except RunnerSetupError as error:
+            raise RunnerError(f"the runs folder has changed: {error}") from None
+        try:
+            if not os.path.samestat(os.fstat(check), os.fstat(self._runs_fd)):
+                raise RunnerError("the runs folder is not the one the runner opened at start")
+        finally:
+            os.close(check)
+        os.close(_open_folder(self._runs_fd, relative))
+        return self._runs_root / relative
+
+    def _remove_copy(self, run_id: str, copy: str) -> None:
+        copies = _open_folder(self._runs_fd, PurePath(run_id, _COPIES))
+        try:
+            _remove_in(copies, copy)
+        finally:
+            os.close(copies)
 
     # ------------------------------------------------------------ the record of runs
 
@@ -1137,7 +1428,7 @@ class RunnerService:
                 self._attempt(problems, f"disconnect {container} from {network}", disconnect)
             remove_network = functools.partial(self._engine.remove_network, network)
             self._attempt(problems, f"remove the network {network}", remove_network)
-            remove_folder = functools.partial(_remove_tree, run.directory)
+            remove_folder = functools.partial(_remove_in, self._runs_fd, run.run_id)
             self._attempt(problems, f"delete the folder of run {run.run_id}", remove_folder)
         with self._lock:
             run.problems = problems

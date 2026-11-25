@@ -304,6 +304,22 @@ def test_a_bad_disk_budget_stops_the_runner_before_it_starts(
     assert "FOOTFALL_DISK_BUDGET_MIB must be a whole number of MiB" in capsys.readouterr().err
 
 
+def test_a_runs_folder_others_can_write_stops_the_runner_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "workspaces").mkdir()
+    runs = tmp_path / "runs-6203"
+    runs.mkdir()
+    runs.chmod(0o770)
+    monkeypatch.setenv("FOOTFALL_WORKSPACES", str(tmp_path / "workspaces"))
+    monkeypatch.setenv("FOOTFALL_RUNS", str(runs))
+    assert main(["runner"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("footfall runner: "), err
+    assert "must belong to root and be writable by root alone" in err
+    assert "runs-6203" in err
+
+
 # ---------------------------------------------------------------- the runc warning
 
 
@@ -385,9 +401,11 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
 
     def recording(*args: Any, **options: Any) -> RunnerService:
         built.append(options)
-        return real(*args, **options)
+        # The runs folder must be root's; here, the test's own user stands in for root.
+        return real(*args, **options, runs_owner=os.getuid())
 
     monkeypatch.setattr(cli, "RunnerService", recording)
+    (tmp_path / "workspaces").mkdir()
     folder = short_dir()
     # The runner gives its socket to its own group, which for a runner started as "0:10001"
     # is the orchestrator's. Here that group is one no new file gets by default, so the test

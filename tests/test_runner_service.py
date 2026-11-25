@@ -46,6 +46,7 @@ from tests.runner_fakes import (
     FakeProxy,
     Harness,
     make_harness,
+    recording,
 )
 
 RUN = "r_abcdefghijklmnopqrstuvwxyz"
@@ -480,7 +481,8 @@ def test_stop_after_a_restart_sweeps_by_label(h: Harness) -> None:
         browsers_image=BROWSERS_IMAGE,
         proxy_container=PROXY,
         orchestrator_container=ORCHESTRATOR,
-        chown=h.chowned.append,
+        chown=recording(h.chowned.append),
+        runs_owner=os.getuid(),
     )
     restarted.stop(RUN)
     assert_nothing_left(h)
@@ -524,7 +526,7 @@ def test_workspace_outside_root_refused(h: Harness, tmp_path: Path) -> None:
         with pytest.raises(RunnerError, match="workspace"):
             prepare(h, workspace=workspace)
     assert h.engine.calls == []
-    assert not h.runs.exists()
+    assert list(h.runs.iterdir()) == []
 
 
 @pytest.mark.parametrize("runtime", ["ruby3.3", "node22", "", "python3.13 "])
@@ -542,7 +544,8 @@ def test_unknown_runtime_refused(tmp_path: Path, runtime: str) -> None:
             browsers_image=BROWSERS_IMAGE,
             proxy_container=PROXY,
             orchestrator_container=ORCHESTRATOR,
-            chown=h.chowned.append,
+            chown=recording(h.chowned.append),
+            runs_owner=os.getuid(),
         ),
         h.workspaces,
         h.runs,
@@ -767,29 +770,38 @@ def test_copy_file_refuses_anything_but_a_regular_file(tmp_path: Path) -> None:
     os.mkfifo(tmp_path / "pipe")
     (tmp_path / "target").write_text("followed\n")
     (tmp_path / "link").symlink_to(tmp_path / "target")
+    (tmp_path / "out").mkdir()
     folder = open_folder(tmp_path)
+    out = open_folder(tmp_path / "out")
     try:
         with pytest.raises(RunnerError, match="FIFO"):
-            _copy_file(folder, "pipe", tmp_path / "out-pipe", 10**9)  # never blocks
+            _copy_file(folder, "pipe", out, 10**9)  # never blocks
         with pytest.raises(OSError):
-            _copy_file(folder, "link", tmp_path / "out-link", 10**9)
-        assert not (tmp_path / "out-pipe").exists()
-        assert not (tmp_path / "out-link").exists()
+            _copy_file(folder, "link", out, 10**9)
+        assert not (tmp_path / "out" / "pipe").exists()
+        assert not (tmp_path / "out" / "link").exists()
 
         source = tmp_path / "tool"
         source.write_bytes(b"\x00\x01" * 700_000)
         source.chmod(0o4755)
-        assert _copy_file(folder, "tool", tmp_path / "copied", 10**9) == 1_400_000
-        copied = tmp_path / "copied"
+        assert _copy_file(folder, "tool", out, 10**9) == 1_400_000
+        copied = tmp_path / "out" / "tool"
         assert copied.read_bytes() == source.read_bytes()
         assert copied.stat().st_mode & 0o7777 == 0o755  # no set-user-id bit
         assert copied.stat().st_mtime_ns == source.stat().st_mtime_ns
         with pytest.raises(OSError):
-            _copy_file(folder, "tool", tmp_path / "copied", 10**9)  # never overwrites
+            _copy_file(folder, "tool", out, 10**9)  # never overwrites
+        copied.unlink()
+        (tmp_path / "out" / "tool").symlink_to(tmp_path / "target")
+        with pytest.raises(OSError):
+            _copy_file(folder, "tool", out, 10**9)  # never writes through a link
+        assert (tmp_path / "target").read_text() == "followed\n"
+        (tmp_path / "out" / "tool").unlink()
 
         with pytest.raises(_OverBudget):
-            _copy_file(folder, "tool", tmp_path / "too-big", 1_399_999)
+            _copy_file(folder, "tool", out, 1_399_999)
     finally:
+        os.close(out)
         os.close(folder)
 
 
@@ -799,23 +811,34 @@ def test_copy_counts_bytes_against_its_limit(tmp_path: Path) -> None:
     (source / "a.bin").write_bytes(b"\x01" * 3000)
     (source / "b.bin").write_bytes(b"\x01" * 3000)
     # Each entry is charged at least a 4 KiB block: the folder and two small files.
-    written = _copy_tree(
-        tmp_path, PurePath("source"), tmp_path / "fits", limit=3 * PAGE, chown=noop, what="it"
-    )
+    written = copy_tree(tmp_path, "source", tmp_path / "fits", limit=3 * PAGE)
     assert written == 3 * PAGE
     with pytest.raises(_OverBudget):
-        _copy_tree(
-            tmp_path,
-            PurePath("source"),
-            tmp_path / "over",
-            limit=3 * PAGE - 1,
+        copy_tree(tmp_path, "source", tmp_path / "over", limit=3 * PAGE - 1)
+
+
+def noop(folder: int, name: str, path: Path) -> None:
+    pass
+
+
+def copy_tree(root: Path, source: str, target: Path, *, limit: int) -> int:
+    """`_copy_tree` from `root`/`source` to a new `target`, between paths."""
+    top = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    parent = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        return _copy_tree(
+            top,
+            PurePath(source),
+            parent,
+            target.name,
+            limit=limit,
             chown=noop,
             what="it",
+            shown=target,
         )
-
-
-def noop(path: Path) -> None:
-    pass
+    finally:
+        os.close(parent)
+        os.close(top)
 
 
 def test_copy_refuses_special_files_in_the_same_pass(tmp_path: Path) -> None:
@@ -824,7 +847,7 @@ def test_copy_refuses_special_files_in_the_same_pass(tmp_path: Path) -> None:
     (source / "serve.py").write_text("print('hi')\n")
     os.mkfifo(source / "pipe")
     with pytest.raises(RunnerError, match="it contains a FIFO at 'pipe'"):
-        _copy_tree(tmp_path, PurePath("source"), tmp_path / "t", limit=10**9, chown=noop, what="it")
+        copy_tree(tmp_path, "source", tmp_path / "t", limit=10**9)
 
 
 def test_workspace_swapped_for_a_link_after_the_check_is_not_followed(
@@ -1097,10 +1120,10 @@ def test_a_run_that_cannot_be_measured_is_stopped(
     prepare(h)
     h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
 
-    def too_many_files(top: Path, max_depth: int) -> tuple[int, int]:
+    def too_many_files(parent: int, name: str, max_depth: int) -> tuple[int, int]:
         raise OSError(24, "Too many open files")
 
-    monkeypatch.setattr("footfall.runner.service._measure", too_many_files)
+    monkeypatch.setattr("footfall.runner.service._measure_in", too_many_files)
     h.service.check_runs()
     assert h.service.status(RUN) == MEASURE_REASON
     assert_nothing_left(h)
@@ -1266,26 +1289,15 @@ def test_copy_charges_each_entry_a_block(tmp_path: Path) -> None:
     for index in range(100):
         (source / f"e{index}").touch()
     with pytest.raises(_OverBudget):
-        _copy_tree(
-            tmp_path, PurePath("source"), tmp_path / "over", limit=50 * PAGE, chown=noop, what="it"
-        )
-    written = _copy_tree(
-        tmp_path, PurePath("source"), tmp_path / "fits", limit=101 * PAGE, chown=noop, what="it"
-    )
+        copy_tree(tmp_path, "source", tmp_path / "over", limit=50 * PAGE)
+    written = copy_tree(tmp_path, "source", tmp_path / "fits", limit=101 * PAGE)
     assert written == 101 * PAGE
 
     folders = tmp_path / "folders"
     for index in range(100):
         (folders / f"f{index}").mkdir(parents=True)
     with pytest.raises(_OverBudget):
-        _copy_tree(
-            tmp_path,
-            PurePath("folders"),
-            tmp_path / "f-over",
-            limit=50 * PAGE,
-            chown=noop,
-            what="it",
-        )
+        copy_tree(tmp_path, "folders", tmp_path / "f-over", limit=50 * PAGE)
 
 
 def test_stop_before_prepare_refuses_the_prepare(h: Harness) -> None:
@@ -1608,9 +1620,7 @@ def test_a_copy_is_charged_what_the_measure_finds(tmp_path: Path) -> None:
     (source / "small.txt").write_bytes(b"x" * 5000)
     (source / "link").symlink_to("small.txt")
     assert _size(os.lstat(source / "wide")) > PAGE  # the case that matters
-    written = _copy_tree(
-        tmp_path, PurePath("source"), tmp_path / "copy", limit=10**9, chown=noop, what="it"
-    )
+    written = copy_tree(tmp_path, "source", tmp_path / "copy", limit=10**9)
     assert written == _disk_usage(source)
 
 
@@ -1794,10 +1804,10 @@ def unsteady(monkeypatch: pytest.MonkeyPatch, skips: list[int], then: int = 0) -
     `then` once they run out. Returns the list, which empties as measures are taken."""
     left = list(skips)
 
-    def measure(top: Path, max_depth: int) -> tuple[int, int]:
+    def measure(parent: int, name: str, max_depth: int) -> tuple[int, int]:
         return PAGE, left.pop(0) if left else then
 
-    monkeypatch.setattr("footfall.runner.service._measure", measure)
+    monkeypatch.setattr("footfall.runner.service._measure_in", measure)
     return left
 
 
@@ -1945,9 +1955,9 @@ def test_when_both_measures_skip_the_larger_is_held_to_the_budget(
     prepare(h)
     sizes = [2 * MIB, PAGE]
 
-    def measure(top: Path, max_depth: int) -> tuple[int, int]:
+    def measure(parent: int, name: str, max_depth: int) -> tuple[int, int]:
         return (sizes.pop(0) if sizes else PAGE), 1
 
-    monkeypatch.setattr("footfall.runner.service._measure", measure)
+    monkeypatch.setattr("footfall.runner.service._measure_in", measure)
     h.service.check_runs()
     assert h.service.status(RUN) == DISK_REASON
