@@ -24,11 +24,21 @@ The full licence texts ship with each package, in its `*.dist-info/licenses` fol
 |---|---|---|
 | anthropic | Apache-2.0 | The Anthropic API client, which drives the testers |
 | playwright | Apache-2.0 | Driving the browsers |
-| greenlet (Playwright's) | MIT and PSF-2.0 | Playwright's synchronous calls |
-| anyio, idna, sniffio, typing-extensions | MIT, BSD-3-Clause, Apache-2.0 or MIT, PSF-2.0 | The Anthropic client's async and typing support |
-| httpx2, httpcore2 (the Anthropic client's HTTP stack, with truststore) | BSD-3-Clause (truststore MIT) | HTTP requests to the API |
-| pydantic (with pydantic-core, annotated-types and typing-inspection) | MIT | The Anthropic client's data models |
-| docstring-parser, jiter | MIT | The Anthropic client's tool definitions and JSON parsing |
+| greenlet | MIT and PSF-2.0 | Playwright's synchronous calls |
+| anyio | MIT | The Anthropic client's async support |
+| sniffio | Apache-2.0 or MIT | Telling the Anthropic client which async library runs it |
+| typing-extensions | PSF-2.0 | Newer typing features for the Anthropic client and pydantic |
+| httpx2 | BSD-3-Clause | The Anthropic client's HTTP requests |
+| httpcore2 | BSD-3-Clause | The connections under httpx2 |
+| h11 | MIT | HTTP/1.1 for httpcore2 |
+| idna | BSD-3-Clause | Internationalised host names for httpx2 |
+| truststore | MIT | The system's certificate store, for httpx2's TLS |
+| pydantic | MIT | The Anthropic client's data models |
+| pydantic-core | MIT | pydantic's validation |
+| annotated-types | MIT | Constraints in pydantic's types |
+| typing-inspection | MIT | pydantic's reading of type annotations |
+| docstring-parser | MIT | The Anthropic client's tool definitions |
+| jiter | MIT | The Anthropic client's JSON parsing |
 | opentelemetry-api | Apache-2.0 | The Anthropic client's tracing hooks |
 
 ## Fonts
