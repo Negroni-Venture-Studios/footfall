@@ -1,1 +1,11 @@
-{"EncryptedClientHelloEnabled": false}
+{
+  "EncryptedClientHelloEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "PasswordManagerEnabled": false,
+  "TranslateEnabled": false,
+  "SpellCheckServiceEnabled": false,
+  "SearchSuggestEnabled": false,
+  "SafeBrowsingProtectionLevel": 0,
+  "MetricsReportingEnabled": false
+}

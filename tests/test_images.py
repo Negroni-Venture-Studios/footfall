@@ -112,7 +112,21 @@ def test_browsers_image_has_the_gate_and_the_ech_policy() -> None:
         "/etc/opt/chrome_for_testing/policies/managed",
     ):
         assert f"COPY {policy} {folder}/footfall.json" in text
-    assert json.loads((ROOT / policy).read_text()) == {"EncryptedClientHelloEnabled": False}
+    assert json.loads((ROOT / policy).read_text()) == {
+        # The egress proxy refuses every ClientHello that hides its server name.
+        "EncryptedClientHelloEnabled": False,
+        # The rest would have Chromium call Google, which the proxy refuses: full Chromium
+        # asked content-autofill.googleapis.com about the demo app's forms ten times in one
+        # end-to-end run.
+        "AutofillAddressEnabled": False,
+        "AutofillCreditCardEnabled": False,
+        "PasswordManagerEnabled": False,
+        "TranslateEnabled": False,
+        "SpellCheckServiceEnabled": False,
+        "SearchSuggestEnabled": False,
+        "SafeBrowsingProtectionLevel": 0,
+        "MetricsReportingEnabled": False,
+    }
 
 
 def test_footfall_image_has_what_playwrights_driver_needs() -> None:
