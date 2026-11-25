@@ -5,6 +5,8 @@ would, and the proxy's own log says what it decided. These tests reach pypi.org 
 example.com, and only through the proxy.
 """
 
+import json
+
 import pytest
 
 from tests.isolation.conftest import NewRun
@@ -57,8 +59,8 @@ async def test_registries_are_reachable_during_install_and_refused_after(
 ) -> None:
     run = await new_run(install=f"{PROBE} fetch-to-file install.json https://pypi.org/simple/")
     during = await run.probe("during", "read", "install.json")
-    assert '"proxy_status": 200' in during["install.json"], during
-    assert '"status": 200' in during["install.json"], during
+    fetched = json.loads(during["install.json"])["https://pypi.org/simple/"]
+    assert (fetched["proxy_status"], fetched["status"]) == (200, 200), fetched
     after = await run.probe("after", "fetch", "https://pypi.org/simple/")
     assert after["https://pypi.org/simple/"]["proxy_status"] == 403, after
     await proxy_log.wait_for(_host(run.copies["after"]), "pypi.org", NOT_LISTED)

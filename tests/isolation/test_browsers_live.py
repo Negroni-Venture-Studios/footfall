@@ -177,7 +177,7 @@ async def test_chromium_loads_an_allowed_https_asset_through_the_proxy(
         await browser.close()
     # The proxy refuses every ClientHello that carries ECH, so this is the end-to-end proof.
     await proxy_log.wait_for(browsers.address, "example.com", "allowed")
-    refused = [d for d in proxy_log.decisions(browsers.address) if "refused" in d]
+    refused = [d for d in proxy_log.decisions(browsers.address, "example.com") if "refused" in d]
     assert refused == []
 
 
