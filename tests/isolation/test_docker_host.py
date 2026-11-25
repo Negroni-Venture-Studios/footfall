@@ -17,7 +17,7 @@ import pytest
 
 from footfall.local import new_run_id
 from footfall.runner.engine import DEFAULT_SOCKET, DockerEngine
-from footfall.runner.spec import container_config
+from footfall.runner.spec import container_config, network_config
 
 pytestmark = pytest.mark.isolation
 
@@ -38,8 +38,12 @@ def engine() -> DockerEngine:
 @pytest.fixture
 def network(engine: DockerEngine) -> Iterator[str]:
     """A fresh internal network, named as a run's is, that no container has joined."""
-    name = f"footfall-{new_run_id()}"
-    engine.create_network(name, {"footfall.check": "engine"})
+    run_id = new_run_id()
+    config = network_config(run_id)
+    # Labelled as a check, not a run, so that the check for leftovers ignores it.
+    config["Labels"] = {"footfall.check": "engine"}
+    name = str(config["Name"])
+    engine.create_network(config)
     try:
         yield name
     finally:

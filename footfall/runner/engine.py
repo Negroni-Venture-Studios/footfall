@@ -19,8 +19,6 @@ from urllib.parse import quote, urlencode
 DEFAULT_SOCKET: Final = Path("/var/run/docker.sock")
 _TIMEOUT: Final = 30.0
 _FRAME_HEADER: Final = 8
-# Leaves the host's side of a network's bridge without an address.
-_NO_HOST_ADDRESS: Final = "com.docker.network.bridge.inhibit_ipv4"
 _NOT_CONNECTED: Final = re.compile(r"^container \S+ is not connected to (?:the )?network \S+$")
 
 
@@ -37,7 +35,7 @@ class Engine(Protocol):
     def logs(self, container: str, tail: int = 200) -> str: ...
     def address(self, container: str, network: str) -> str: ...
     def remove(self, container: str) -> None: ...
-    def create_network(self, name: str, labels: Mapping[str, str]) -> None: ...
+    def create_network(self, config: Mapping[str, Any]) -> None: ...
     def connect(self, network: str, container: str) -> None: ...
     def disconnect(self, network: str, container: str) -> None: ...
     def remove_network(self, name: str) -> None: ...
@@ -177,23 +175,10 @@ class DockerEngine:
         """Remove a container by force; one that is already gone counts as removed."""
         self._request("DELETE", f"/containers/{_seg(container)}?force=1", ok=frozenset({404}))
 
-    def create_network(self, name: str, labels: Mapping[str, str]) -> None:
-        """Create an internal network (no route out); an existing one of that name is an error.
-
-        The host's bridge for it has no address, so a container on it cannot reach the host,
-        and with it whatever the host serves on every address, as Docker otherwise allows.
-        """
-        self._request(
-            "POST",
-            "/networks/create",
-            {
-                "Name": name,
-                "Internal": True,
-                "Labels": dict(labels),
-                "CheckDuplicate": True,
-                "Options": {_NO_HOST_ADDRESS: "true"},
-            },
-        )
+    def create_network(self, config: Mapping[str, Any]) -> None:
+        """Create a network from `config`, which `spec.network_config` makes; an existing one
+        of that name is an error."""
+        self._request("POST", "/networks/create", config)
 
     def connect(self, network: str, container: str) -> None:
         """Attach a container to a network."""

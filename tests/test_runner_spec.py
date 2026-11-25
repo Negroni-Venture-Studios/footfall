@@ -5,7 +5,7 @@ from typing import Any, get_args
 
 import pytest
 
-from footfall.runner.spec import APP_UID, LIMITS, Role, container_config
+from footfall.runner.spec import APP_UID, LIMITS, Role, container_config, network_config
 
 RUN_ID = "r_" + "a" * 26
 PROXY = "http://footfall-proxy:3128"
@@ -292,3 +292,21 @@ def test_no_hosts_entry_without_a_proxy_name() -> None:
 def test_bad_proxy_hosts_entries_are_refused(proxy_url: str, proxy_name: str) -> None:
     with pytest.raises(ValueError, match="proxy"):
         make(proxy_url=proxy_url, proxy_name=proxy_name)
+
+
+def test_a_runs_network_is_internal_and_the_host_has_no_address_on_it() -> None:
+    assert network_config(RUN_ID) == {
+        "Name": f"footfall-{RUN_ID}",
+        "Internal": True,
+        "Labels": {"footfall.run": RUN_ID},
+        "CheckDuplicate": True,
+        # Without this the host takes the network's first address on its bridge, and every
+        # container on the network can reach whatever the host serves there, its SSH too.
+        "Options": {"com.docker.network.bridge.inhibit_ipv4": "true"},
+    }
+
+
+@pytest.mark.parametrize("bad", ["", "r_short", "r_" + "A" * 26, "x" + RUN_ID])
+def test_a_network_for_a_bad_run_id_is_refused(bad: str) -> None:
+    with pytest.raises(ValueError, match="run_id"):
+        network_config(bad)

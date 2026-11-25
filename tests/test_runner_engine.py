@@ -114,27 +114,22 @@ def test_remove_missing_is_success(docker: tuple[FakeDocker, DockerEngine]) -> N
     engine.remove("gone")
 
 
-def test_create_network_is_internal(docker: tuple[FakeDocker, DockerEngine]) -> None:
+def test_create_network_posts_the_body_it_is_given(
+    docker: tuple[FakeDocker, DockerEngine],
+) -> None:
     fake, engine = docker
     fake.on("POST", "/networks/create", json_reply(201, {"Id": "n1"}))
-    engine.create_network("footfall-r_x", {"footfall.run": "r_x"})
+    body = {"Name": "footfall-r_x", "Internal": True, "Options": {"o": "1"}}
+    engine.create_network(body)
     (request,) = fake.requests
-    assert request.json() == {
-        "Name": "footfall-r_x",
-        "Internal": True,
-        "Labels": {"footfall.run": "r_x"},
-        "CheckDuplicate": True,
-        # Without this the host takes the network's first address on its bridge, and every
-        # container on the network can reach whatever the host serves there, its SSH too.
-        "Options": {"com.docker.network.bridge.inhibit_ipv4": "true"},
-    }
+    assert request.json() == body
 
 
 def test_create_network_exists_raises(docker: tuple[FakeDocker, DockerEngine]) -> None:
     fake, engine = docker
     fake.on("POST", "/networks/create", json_reply(409, {"message": "network exists"}))
     with pytest.raises(EngineError, match="network exists"):
-        engine.create_network("n", {})
+        engine.create_network({"Name": "n"})
 
 
 def test_connect(docker: tuple[FakeDocker, DockerEngine]) -> None:

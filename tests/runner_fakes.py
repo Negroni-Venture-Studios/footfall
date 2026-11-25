@@ -126,13 +126,14 @@ class FakeEngine:
             self._maybe_fail("remove", self._role(name))
             self.live.pop(name, None)
 
-    def create_network(self, name: str, labels: Mapping[str, str]) -> None:
+    def create_network(self, config: Mapping[str, Any]) -> None:
+        name = str(config["Name"])
         with self._lock:
-            self.calls.append(("create_network", name, dict(labels)))
+            self.calls.append(("create_network", name, dict(config)))
             self._maybe_fail("create_network")
             if name in self.networks:
                 raise EngineError(f"network with name {name} already exists")
-            self.networks[name] = dict(labels)
+            self.networks[name] = dict(config["Labels"])
 
     def connect(self, network: str, container: str) -> None:
         with self._lock:

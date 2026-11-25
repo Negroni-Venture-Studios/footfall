@@ -43,7 +43,7 @@ from typing import Any, Final, Literal, Protocol
 from footfall.hosts import HostError, validate_host_name
 from footfall.manifest import RUNTIMES
 from footfall.runner.engine import Engine, EngineError
-from footfall.runner.spec import APP_UID, container_config
+from footfall.runner.spec import APP_UID, container_config, network_config
 
 logger = logging.getLogger(__name__)
 
@@ -722,7 +722,7 @@ class RunnerService:
         prepared = run.directory / _PREPARED
         self._copy_locked(run, self._workspaces, relative, prepared, "the workspace")
 
-        self._engine.create_network(run.network, {"footfall.run": run.run_id})
+        self._engine.create_network(network_config(run.run_id))
         for container in (self._proxy_container, self._orchestrator_container):
             self._engine.connect(run.network, container)
         proxy_address = self._engine.address(self._proxy_container, run.network)

@@ -28,7 +28,7 @@ from footfall.runner.service import (
     _OverBudget,
     _TooDeep,
 )
-from footfall.runner.spec import container_config
+from footfall.runner.spec import container_config, network_config
 from tests.runner_fakes import (
     BROWSERS_IMAGE,
     IMAGES,
@@ -101,7 +101,7 @@ def test_prepare_runs_install_then_seed_with_their_allow_lists(h: Harness) -> No
     )
 
     assert h.engine.names("create") == [INSTALL, SEED]
-    assert ("create_network", NETWORK, {"footfall.run": RUN}) in h.engine.calls
+    assert ("create_network", NETWORK, network_config(RUN)) in h.engine.calls
     assert h.engine.attached == {(NETWORK, PROXY), (NETWORK, ORCHESTRATOR)}
 
     prepared = h.runs / RUN / "prepared"

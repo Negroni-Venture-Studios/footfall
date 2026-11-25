@@ -66,6 +66,8 @@ _RUN_ID: Final = re.compile(r"r_[a-z2-7]{26}")
 _COPY: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _NETWORK_PREFIX: Final = "footfall-r_"
 _HOST_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
+# Leaves the host's side of a run's network without an address.
+_NO_HOST_ADDRESS: Final = "com.docker.network.bridge.inhibit_ipv4"
 _PROXY_VARS: Final = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 
 
@@ -197,3 +199,21 @@ def container_config(
         body["User"] = f"{APP_UID}:{APP_UID}"
         body["WorkingDir"] = _WORKSPACE
     return body
+
+
+def network_config(run_id: str) -> dict[str, Any]:
+    """Return the body of Docker's `POST /networks/create` for a run's network.
+
+    It is internal, so it has no route out, and the host's side of its bridge has no
+    address, so a container on it cannot reach the host, and with it whatever the host
+    serves on every address, as Docker otherwise allows. Raises ValueError for a bad run id.
+    """
+    if not _RUN_ID.fullmatch(run_id):
+        raise ValueError(f"invalid run_id: {run_id!r}")
+    return {
+        "Name": f"footfall-{run_id}",
+        "Internal": True,
+        "Labels": {"footfall.run": run_id},
+        "CheckDuplicate": True,
+        "Options": {_NO_HOST_ADDRESS: "true"},
+    }
