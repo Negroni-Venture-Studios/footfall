@@ -10,14 +10,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+from footfall.tester.folder import FILE_MODE, Folder
 from footfall.tester.report import OBSERVATIONS
 
 # Appended to, and made if it is not there, but never through a link, even one to nothing.
 _APPEND: Final = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
-# Results hold a run's tester text and screenshots, and belong to the person who ran it, so
-# every results file and folder Footfall makes is theirs alone.
-FILE_MODE: Final = 0o600
-FOLDER_MODE: Final = 0o700
 
 
 class TraceError(ValueError):
@@ -43,8 +40,15 @@ class Step:
 
 
 class Trace:
-    def __init__(self, path: Path) -> None:
+    """The steps of one persona's run, in the file at `path`.
+
+    Given `folder`, the folder `path` is in, held open, the file is written only by its name
+    in that folder, so that no link put in place of a folder above it can move the trace.
+    """
+
+    def __init__(self, path: Path, folder: Folder | None = None) -> None:
         self.path = path
+        self._folder = folder
 
     def append(self, step: Step) -> None:
         try:
@@ -65,6 +69,9 @@ class Trace:
         # ASCII only: a lone surrogate from the model is escaped, not a write error.
         labelled = {"note": OBSERVATIONS, **fields}
         line = json.dumps(labelled, ensure_ascii=True, separators=(",", ":")) + "\n"
+        if self._folder is not None:
+            self._folder.append(self.path.name, line.encode("ascii"))
+            return
         with os.fdopen(os.open(self.path, _APPEND, FILE_MODE), "a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()

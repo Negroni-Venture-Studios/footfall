@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from footfall.tester.folder import Folder
 from footfall.tester.report import OBSERVATIONS
 from footfall.tester.trace import Step, Trace, TraceError
 
@@ -73,6 +74,25 @@ def test_a_trace_is_never_written_through_a_link(tmp_path: Path) -> None:
         Trace(tmp_path / "trace.jsonl").append(step(1))
     assert refused.value.errno == errno.ELOOP
     assert not target.exists()
+
+
+def test_a_trace_in_a_folder_held_open_stays_there_when_a_link_replaces_it(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "elsewhere" / "planted-by-the-branch"
+    target.mkdir(parents=True)
+    (tmp_path / "grace").mkdir()
+    folder = Folder.at(tmp_path / "grace")
+    try:
+        trace = Trace(tmp_path / "grace" / "trace.jsonl", folder)
+        trace.append(step(1))
+        (tmp_path / "grace").rename(tmp_path / "moved")
+        (tmp_path / "grace").symlink_to(target)
+        trace.append(step(2))
+    finally:
+        folder.close()
+    assert list(target.iterdir()) == []
+    assert [s.number for s in Trace(tmp_path / "moved" / "trace.jsonl").steps()] == [1, 2]
 
 
 @pytest.mark.usefixtures("no_umask")

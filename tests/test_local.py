@@ -45,6 +45,7 @@ from footfall.personas import load_devices, load_personas, select
 from footfall.runner.service import RunnerError
 from footfall.tester import loop as tester_loop
 from footfall.tester import tools
+from footfall.tester.folder import Folder
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import ModelTurn
 from footfall.tester.pricing import Usage
@@ -205,6 +206,7 @@ async def run_folder(
     all_files: bool = True,
     untracked: bool = False,
     budget: Budget | None = None,
+    out: Path | None = None,
 ) -> list[Any]:
     return await test_folder(
         folder,
@@ -212,7 +214,7 @@ async def run_folder(
         brief_name=brief,
         focus=None,
         model_spec=model,
-        out=tmp_path / "out",
+        out=out or tmp_path / "out",
         runner=runner,
         budget=budget or Budget(max_actions=8, max_seconds=120),
         connect_browser=connect_browser,
@@ -660,20 +662,84 @@ async def test_a_results_folder_that_is_a_link_is_refused_before_the_run(
 @pytest.mark.usefixtures("no_umask")
 def test_results_are_made_for_their_owner_alone(tmp_path: Path) -> None:
     (grace,) = select(load_personas(load_devices()), ["grace"])
+    out = tmp_path / "new" / "out"
+    results = local._prepare_results(out, [grace], two_pages(tmp_path))
+    try:
+        local._write_json(results.out, "summary.json", {"run": "r"}, None)
+    finally:
+        results.close()
+    made = (tmp_path / "new", out, out / "grace", out / "summary.json")
+    modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in made}
+    assert modes == {"new": 0o700, "out": 0o700, "grace": 0o700, "summary.json": 0o600}
+
+
+async def test_a_link_above_the_results_inside_the_tested_folder_is_refused(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    # The tested branch tracks a link where a folder above the results would be.
+    folder = two_pages(tmp_path)
+    target = tmp_path / "elsewhere" / "planted-by-the-branch"
+    target.mkdir(parents=True)
+    (folder / "results").symlink_to(target)
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(OutputError, match="is a link"):
+        await run_folder(folder, runner, connect[0], tmp_path, out=folder / "results" / "run")
+    assert runner.calls == []
+    assert list(target.iterdir()) == []
+
+
+def test_a_link_above_the_results_outside_the_tested_folder_is_followed(tmp_path: Path) -> None:
+    # The operator's own links, such as /var or /tmp on a Mac, or a home folder that is a
+    # link, lie outside the folder under test.
+    real = tmp_path / "real-results-parent"
+    real.mkdir()
+    (tmp_path / "linked").symlink_to(real)
+    (grace,) = select(load_personas(load_devices()), ["grace"])
+    out = tmp_path / "linked" / "deeper" / "out"
+    local._prepare_results(out, [grace], two_pages(tmp_path)).close()
+    assert (real / "deeper" / "out" / "grace").is_dir()
+
+
+async def test_a_link_swapped_in_after_the_check_moves_no_result(
+    tmp_path: Path,
+    app_server: AppServer,
+    connect: tuple[Connect, list[tuple[str, str]]],
+) -> None:
+    serve_two_pages(app_server)
     out = tmp_path / "out"
-    (folder,) = local._prepare_results(out, [grace])
-    local._write_json(out / "summary.json", {"run": "r"}, None)
-    modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in (out, folder)}
-    modes["summary.json"] = stat.S_IMODE((out / "summary.json").stat().st_mode)
-    assert modes == {"out": 0o700, "grace": 0o700, "summary.json": 0o600}
+    targets = [tmp_path / "elsewhere" / name for name in ("planted-folder", "planted-out")]
+    for target in targets:
+        target.mkdir(parents=True)
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    real_prepare = runner.prepare
+
+    async def prepare(*arguments: Any) -> None:
+        # Once Footfall has made the results folders, links take the place of both.
+        (out / "grace").rename(tmp_path / "moved-grace")
+        (out / "grace").symlink_to(targets[0])
+        out.rename(tmp_path / "moved-out")
+        out.symlink_to(targets[1])
+        await real_prepare(*arguments)
+
+    runner.prepare = prepare  # type: ignore[method-assign,assignment]
+    (report,) = await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
+    assert report.status == "finished"
+    assert [list(target.iterdir()) for target in targets] == [[], []]
+    assert sorted(p.name for p in (tmp_path / "moved-out").iterdir()) == ["grace", "summary.json"]
+    moved = sorted(p.name for p in (tmp_path / "moved-grace").iterdir())
+    assert moved == ["report.json", "screenshots", "trace.jsonl"]
 
 
 def test_a_results_file_is_never_written_through_a_link(tmp_path: Path) -> None:
     target = tmp_path / "elsewhere" / "planted-by-the-branch.json"
     target.parent.mkdir()
     (tmp_path / "report.json").symlink_to(target)
-    with pytest.raises(FileExistsError):
-        local._write_json(tmp_path / "report.json", {"summary": "s"}, None)
+    folder = Folder.at(tmp_path)
+    try:
+        with pytest.raises(FileExistsError):
+            local._write_json(folder, "report.json", {"summary": "s"}, None)
+    finally:
+        folder.close()
     assert not target.exists()
 
 
@@ -1321,11 +1387,11 @@ async def test_a_report_that_cannot_be_written_stops_nothing(
     runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
     real_write = local._write_json
 
-    def write(path: Path, data: object, password: str | None) -> None:
-        runner.calls.append(("written", path.parent.name, path.name))
-        if path.parent.name == "kenji":
+    def write(folder: Folder, name: str, data: object, password: str | None) -> None:
+        runner.calls.append(("written", folder.path.name, name))
+        if folder.path.name == "kenji":
             raise OSError(28, "No space left on device")
-        real_write(path, data, password)
+        real_write(folder, name, data, password)
 
     monkeypatch.setattr(local, "_write_json", write)
     reports = await run_folder(

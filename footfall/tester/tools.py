@@ -30,6 +30,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from footfall.tester.folder import FILE_MODE, FOLDER_MODE, Folder
 from footfall.tester.guard import Guard, GuardEvent
 from footfall.tester.report import (
     CAPS,
@@ -51,7 +52,7 @@ from footfall.tester.screen import (
     describe,
     quote,
 )
-from footfall.tester.trace import FILE_MODE, FOLDER_MODE, Step, Trace
+from footfall.tester.trace import Step, Trace
 
 __all__ = [
     "EVENTS_HEADING",
@@ -514,7 +515,9 @@ class _Action:
 class Executor:
     """Runs the model's tool calls on one page and records each in the trace.
 
-    `touch` says whether taps use the touchscreen, as the device does. Each string in
+    `screenshots` is where the screenshots go: a folder held open, in which each is written
+    by name, or a path, made when the first is saved. `touch` says whether taps use the
+    touchscreen, as the device does. Each string in
     `redact`, such as the throwaway password the tester types to sign in, is replaced by
     "[password]" in the trace, the free text of the report from `finish` and any
     `CaptureError`, wherever it appears whole, as `Redactor` finds it: once characters that
@@ -529,7 +532,7 @@ class Executor:
         page: Page,
         guard: Guard,
         trace: Trace,
-        screenshots: Path,
+        screenshots: Path | Folder,
         *,
         touch: bool,
         redact: frozenset[str] = frozenset(),
@@ -933,6 +936,10 @@ class Executor:
 
     def _save(self, jpeg: bytes) -> str:
         shot = screenshot_id(len(self._shots) + 1)
+        if isinstance(self._dir, Folder):
+            self._dir.write(f"{shot}.jpg", jpeg)
+            self._shots.append(shot)
+            return shot
         self._dir.mkdir(FOLDER_MODE, parents=True, exist_ok=True)
         # Exclusive: never overwrite a screenshot, nor follow a link left where one should go.
         # The operator's alone, as every results file is.

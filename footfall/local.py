@@ -64,13 +64,14 @@ from footfall.manifest import (
 from footfall.personas import Device, Persona, PersonaError, load_devices, load_personas, select
 from footfall.runner.service import RunnerError
 from footfall.tester import loop as tester_loop
+from footfall.tester.folder import FOLDER_MODE, Folder
 from footfall.tester.guard import Guard
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import model_from_spec
 from footfall.tester.report import OBSERVATIONS, PersonaReport, clean_text, strip_invisible
 from footfall.tester.screen import quote
 from footfall.tester.tools import REDACTED, Executor
-from footfall.tester.trace import FILE_MODE, FOLDER_MODE, Trace
+from footfall.tester.trace import Trace
 
 __all__ = [
     "DEFAULT_PROXY_CONTAINER",
@@ -247,16 +248,15 @@ def _failed(persona: Persona, device: Device, reason: str, started: float) -> Pe
     )
 
 
-def _write_json(path: Path, data: object, password: str | None) -> None:
-    """Write `data` as JSON to a new file, with the password taken out once more in case
-    anything held it. The file is created exclusively, which never follows a link, even one
-    to nothing: a name already there, link or not, raises FileExistsError. It is the
-    operator's alone, mode 0o600."""
+def _write_json(folder: Folder, name: str, data: object, password: str | None) -> None:
+    """Write `data` as JSON to the new file `name` in `folder`, with the password taken out
+    once more in case anything held it. The file is made exclusively, which never follows a
+    link, even one to nothing: a name already there, link or not, raises FileExistsError. It
+    is the operator's alone, mode 0o600."""
     text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     if password:
         text = text.replace(password, REDACTED)
-    with os.fdopen(os.open(path, _WRITE_FLAGS, FILE_MODE), "w", encoding="utf-8") as handle:
-        handle.write(text)
+    folder.write(name, text.encode("utf-8"))
 
 
 type _Identity = tuple[int, int]  # (st_dev, st_ino)
@@ -1011,11 +1011,13 @@ class _Run:
         focus: str | None,
         model_spec: str,
         out: Path,
+        results: "_Results",
         budget: Budget,
         proxy_url: str,
         account: tuple[str, str] | None,
     ) -> None:
         self.run_id = run_id
+        self.results = results
         self.manifest = manifest
         self.brief = brief
         self.devices = devices
@@ -1050,9 +1052,10 @@ class _Run:
         """
         device = self.devices[persona.device]
         started = time.monotonic()
-        folder = self.out / persona.id
+        folder = self.results.personas[persona.id]
         app_origin = f"http://{address}"
         context = None
+        screenshots: Folder | None = None
         limit = self.limit()
         deadline = asyncio.timeout(limit)
         try:
@@ -1067,11 +1070,12 @@ class _Run:
                 login = self.manifest.login
                 if self.brief.start == "signed-in" and login is not None and self.account:
                     await sign_in(page, login, *self.account, app_origin)
+                screenshots = folder.make("screenshots")
                 executor = Executor(
                     page,
                     guard,
-                    Trace(folder / "trace.jsonl"),
-                    folder / "screenshots",
+                    Trace(folder.path / "trace.jsonl", folder),
+                    screenshots,
                     touch=bool(self.descriptors[device.playwright].get("has_touch")),
                     redact=self.redact,
                 )
@@ -1102,11 +1106,13 @@ class _Run:
         finally:
             if context is not None:
                 await _close(context, browser)
-        path = folder / "report.json"
+            if screenshots is not None:
+                screenshots.close()
         try:
-            _write_json(path, report.to_json(), self.password)
+            _write_json(folder, "report.json", report.to_json(), self.password)
         except OSError as error:
             # The report is still returned, and goes in the summary and the table.
+            path = folder.path / "report.json"
             LOG.error("could not write %s: %s", path, error.strerror or type(error).__name__)
         LOG.info("persona %s: %s", persona.id, report.status)
         return report
@@ -1189,40 +1195,126 @@ async def _ready(runner: Runner, run: _Run, copy: str, address: str) -> None:
         ) from None
 
 
-def _prepare_results(out: Path, personas: Sequence[Persona]) -> list[Path]:
-    """Make a results folder for each persona, refusing to overwrite what an earlier run left
-    there, and return them.
+_MOST_LEVELS: Final = 4096  # folders above one that are believed, before giving up
 
-    The results folder may lie inside the folder under test, whose branch decides what is
-    there, so OutputError also refuses a results folder that is a link, and a link, even one
-    to nothing, where summary.json or a persona's folder would go. Footfall writes no
-    results through a link.
+
+def _lies_in(fd: int, top: _Identity) -> bool:
+    """Whether the open folder `fd` is the folder `top` identifies or lies inside it, as the
+    file system has it, whatever names led there."""
+    current = os.dup(fd)
+    try:
+        for _ in range(_MOST_LEVELS):
+            info = os.fstat(current)
+            if (info.st_dev, info.st_ino) == top:
+                return True
+            parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=current)
+            os.close(current)
+            current = parent
+            above = os.fstat(current)
+            if (above.st_dev, above.st_ino) == (info.st_dev, info.st_ino):
+                return False  # the root, which is its own parent
+        return True  # deeper than any real folder: treated as inside, where nothing is followed
+    finally:
+        os.close(current)
+
+
+def _open_results(out: Path, tested: Path) -> Folder:
+    """Open the results folder `out`, one part at a time from the root, or from the working
+    folder when `out` is relative, making each part that is missing, mode 0o700.
+
+    The folder under test is the tested branch's, so in any folder that lies inside it a
+    part that is a link is refused with OutputError, whatever path led there. Anywhere else
+    a link is the operator's own, as /var and /tmp are on a Mac, or a home folder can be,
+    and is followed. `out` itself is never followed when it is a link, wherever it is.
     """
-    names = [*(out / p.id for p in personas), out / "summary.json"]
-    for name in (out, *names):
-        if name.is_symlink():
+    try:
+        info = tested.stat()
+    except OSError as error:
+        raise OutputError(f"cannot read {_shown(tested)} ({error.strerror})") from None
+    top = (info.st_dev, info.st_ino)
+    first = 1 if out.is_absolute() else 0
+    parts = out.parts[first:]
+    current = os.open(out.anchor or ".", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for index, part in enumerate(parts, start=1):
+            where = Path(*out.parts[: first + index])
+            if part != "..":
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, FOLDER_MODE, dir_fd=current)
+            above_out = index < len(parts)
+            follow = above_out and (part == ".." or not _lies_in(current, top))
+            flags = os.O_RDONLY | os.O_DIRECTORY | (0 if follow else os.O_NOFOLLOW)
+            try:
+                inner = os.open(part, flags, dir_fd=current)
+            except OSError as error:
+                if error.errno in _NOT_A_FOLDER:
+                    raise OutputError(
+                        f"{_shown(where)} is a link or a file, and Footfall writes no results "
+                        "through a link; choose another results folder with --out"
+                    ) from None
+                why = error.strerror or type(error).__name__
+                raise OutputError(f"cannot open {_shown(where)} ({why})") from None
+            os.close(current)
+            current = inner
+    except BaseException:
+        os.close(current)
+        raise
+    return Folder(current, out)
+
+
+@dataclass
+class _Results:
+    """The results folder and each persona's folder in it, all held open, so that nothing is
+    written by path once they are made."""
+
+    out: Folder
+    personas: dict[str, Folder]
+
+    def tidy(self) -> None:
+        """Remove the persona folders a failed run left empty, so that they block no later
+        run."""
+        for name in self.personas:
+            with contextlib.suppress(OSError):
+                self.out.remove(name)  # only an empty folder
+
+    def close(self) -> None:
+        for folder in self.personas.values():
+            folder.close()
+        self.out.close()
+
+
+def _prepare_results(out: Path, personas: Sequence[Persona], tested: Path) -> _Results:
+    """Open the results folder, making it if it is missing, make a folder in it for each
+    persona, refusing to overwrite what an earlier run left there, and return them all, open.
+
+    The results folder may lie inside `tested`, the folder under test, whose branch decides
+    what is there. `_open_results` says which links on the way there it refuses; in the
+    results folder, OutputError refuses a link, even one to nothing, where summary.json or a
+    persona's folder would go. From then on every result is written by name in a folder
+    held open, never by path, so a link put in place of one later moves nothing.
+    """
+    folder = _open_results(out, tested)
+    made: dict[str, Folder] = {}
+    try:
+        names = [*(p.id for p in personas), "summary.json"]
+        for name in names:
+            if folder.kind(name) == stat.S_IFLNK:
+                raise OutputError(
+                    f"{out / name} is a link, and Footfall writes no results through one; "
+                    "choose another results folder with --out"
+                )
+        taken = [name for name in names if folder.kind(name) is not None]
+        if taken:
             raise OutputError(
-                f"{name} is a link, and Footfall writes no results through one; choose "
-                "another results folder with --out"
+                f"{out / taken[0]} already exists; choose another results folder with --out, "
+                "or move the old results away"
             )
-    taken = [name for name in names if name.exists()]
-    if taken:
-        raise OutputError(
-            f"{taken[0]} already exists; choose another results folder with --out, "
-            "or move the old results away"
-        )
-    out.mkdir(FOLDER_MODE, parents=True, exist_ok=True)
-    folders = [out / persona.id for persona in personas]
-    for folder in folders:
-        folder.mkdir(FOLDER_MODE)
-    return folders
-
-
-def _tidy_results(folders: Sequence[Path]) -> None:
-    """Remove the persona folders a failed run left empty, so that they block no later run."""
-    for folder in folders:
-        with contextlib.suppress(OSError):
-            folder.rmdir()  # only an empty folder
+        for persona in personas:
+            made[persona.id] = folder.make(persona.id)
+    except BaseException:
+        _Results(folder, made).close()
+        raise
+    return _Results(folder, made)
 
 
 async def test_folder(
@@ -1286,7 +1378,8 @@ async def test_folder(
         missing = [d.playwright for d in devices.values() if d.playwright not in playwright.devices]
         if missing:
             raise PersonaError(f"Playwright has no device called {missing[0]!r}")
-        folders = _prepare_results(out, personas)
+        results = _prepare_results(out, personas, folder)
+        stack.callback(results.close)
         run = _Run(
             run_id=run_id,
             manifest=manifest,
@@ -1296,13 +1389,14 @@ async def test_folder(
             focus=focus,
             model_spec=model_spec,
             out=out,
+            results=results,
             budget=budget,
             proxy_url=f"http://{proxy_container}:{PROXY_PORT}",
             account=account,
         )
         try:
             reports = await _go(run, runner, connect, personas, folder, workspace, listing)
-            _write_json(out / "summary.json", run.summary(reports), run.password)
+            _write_json(results.out, "summary.json", run.summary(reports), run.password)
             print(format_table(reports), file=stream)
         except BaseException as error:
             if isinstance(error, LocalRunError | RunnerError):
@@ -1310,7 +1404,7 @@ async def test_folder(
                 # by a character that shows nothing gets past.
                 error.log_tail = _clean_tail(error.log_tail, run.password)
             await _finish(runner, run_id, workspace, quiet=True)
-            _tidy_results(folders)
+            results.tidy()
             raise
         await _finish(runner, run_id, workspace, quiet=False)
     return reports
