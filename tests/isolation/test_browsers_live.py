@@ -12,6 +12,7 @@ hold one, only whether it was there.
 import asyncio
 import contextlib
 import json
+import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -35,7 +36,7 @@ pytestmark = pytest.mark.isolation
 PROXY_URL: Final = "http://footfall-proxy:3128"  # as footfall test gives it
 ASSETS: Final = ("example.com",)
 NOT_LISTED: Final = "is not on this client's allow list"
-GVISOR_VERSION: Final = "Linux version 4.4.0 #1 SMP Sun Jan 10 15:06:54 PST 2016"
+GVISOR_RELEASE: Final = "4.4.0"  # the kernel release gVisor reports, whatever the host runs
 # Every code point of Encrypted Client Hello and of the encrypted SNI before it.
 HIDDEN_NAMES: Final = frozenset({0xFE08, 0xFE09, 0xFE0A, 0xFE0B, 0xFE0C, 0xFE0D, 0xFF02, 0xFFCE})
 ECH: Final = 0xFE0D
@@ -99,24 +100,40 @@ async def _goto(page: Page, url: str) -> int | None:
 
 
 @pytest.mark.parametrize("engine", ENGINES)
-async def test_each_engine_launches_under_gvisor_through_run_server(
-    browsers: Browsers, engine: str
-) -> None:
+async def test_each_engine_launches_through_run_server(browsers: Browsers, engine: str) -> None:
     browser = await browsers.connect(engine)
     try:
         context = await browsers.context(browser, engine)
         page = await context.new_page()
         assert await _goto(page, browsers.app + "/") == 200
         assert await page.title() == "Probe"
-        # The browser's kernel is gVisor's, not the host's that the orchestrator sees. A
-        # fresh page, since a browser will not go from an http page to a file.
-        local = await context.new_page()
-        await _goto(local, "file:///proc/version")
-        text = await local.inner_text("body")
-        assert GVISOR_VERSION in text, text
-        assert Path("/proc/version").read_text().strip() not in text
     finally:
         await browser.close()
+
+
+async def test_the_browser_container_runs_on_gvisors_kernel(browsers: Browsers) -> None:
+    # Neither browser can read /proc through file:// under gVisor (Chromium's page comes back
+    # empty and WebKit's crashes), so the kernel's release comes from what full Chromium
+    # reports of the system it runs on. Both engines are run-server's children in the one
+    # container, behind the one gate, so one kernel serves both.
+    browser = await browsers.connect("chromium")
+    try:
+        page = await browser.new_page()
+        await _goto(page, "chrome://version")
+        text = await page.inner_text("body")
+        hints = await page.evaluate(
+            "navigator.userAgentData ? navigator.userAgentData"
+            ".getHighEntropyValues(['platformVersion']).then(v => v.platformVersion) : ''"
+        )
+    finally:
+        await browser.close()
+    found = set(re.findall(r"Linux\s+(\d+\.\d+\.\d+)", text))
+    if isinstance(hints, str) and re.fullmatch(r"\d+\.\d+\.\d+", hints):
+        found.add(hints)
+    host = re.match(r"\d+\.\d+\.\d+", os.uname().release)
+    assert host is not None
+    assert found == {GVISOR_RELEASE}, (found, hints, text[:2000])
+    assert host.group(0) != GVISOR_RELEASE  # the host's own kernel is another
 
 
 async def test_chromium_is_the_full_build_and_reads_the_policy(browsers: Browsers) -> None:

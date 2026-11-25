@@ -12,6 +12,10 @@ The browsers are given the egress proxy by its name, so the runner now writes th
 
 On Linux, a container with a limit of 256 processes is refused the next one with `EAGAIN`. Under gVisor the probe's processes were refused at about 110 with `ENOMEM`, well below the limit, because each process in the sandbox also costs host memory, which the container's 512 MiB limit bounds. The test accepts either refusal, and still requires that the bomb stops below 256 and that the probe which set it off survives. Alasdair ruled on 25 November 2026 that the test passes on `ENOMEM`. Whether gVisor enforces the process limit itself is not shown, since memory runs out first.
 
+## A browser cannot read /proc through file://
+
+In the browser container, opening `file:///proc/version` gave an empty page in Chromium and crashed WebKit's page, where a test meant to read gVisor's kernel version from it. This was not checked against the same browsers on Linux. The test now reads the kernel release that full Chromium reports of the system it runs on, on `chrome://version` and through `navigator.userAgentData`, and requires it to be gVisor's 4.4.0 and not the host's own. That still proves the property: both engines are children of the one run-server in the one container, behind the one gate, so the kernel Chromium reports is the kernel WebKit runs on too. The app containers' own check, which reads `/proc/version` and the kernel log from Python, is unchanged.
+
 ## Facts found on the way
 
 These are Docker's, not gVisor's, but the same run found them.
