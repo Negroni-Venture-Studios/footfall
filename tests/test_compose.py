@@ -150,8 +150,24 @@ def test_the_test_overlay_widens_only_what_r54_allows() -> None:
             ]
         ),
     }
-    assert "volumes:" not in TEST_OVERLAY.split("\nservices:\n", 1)[0]
+    assert preamble_is_only_comments(TEST_OVERLAY)
     assert not re.search(r"^\S", TEST_OVERLAY.split("\nservices:\n", 1)[1], re.MULTILINE)
+
+
+def preamble_is_only_comments(text: str) -> bool:
+    """Whether every line before `services:` is blank or a comment, so that no top-level key,
+    such as an include of another compose file, networks, configs or secrets, comes in."""
+    head = text.split("\nservices:\n", 1)[0]
+    return all(not line.strip() or line.lstrip().startswith("#") for line in head.splitlines())
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["include:\n  - ../prod/compose.yaml", "networks:\n  outside: {}", "secrets:\n  k: {}"],
+)
+def test_the_overlay_check_sees_a_top_level_key(key: str) -> None:
+    assert not preamble_is_only_comments(f"# a comment\n{key}\n\nservices:\n  proxy:\n")
+    assert preamble_is_only_comments("# a comment\n\nservices:\n  proxy:\n")
 
 
 def test_the_overlay_check_sees_an_added_volume() -> None:
