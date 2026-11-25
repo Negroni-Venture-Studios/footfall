@@ -758,6 +758,43 @@ async def test_a_results_folder_that_is_a_link_is_refused_before_the_run(
     assert list(target.iterdir()) == []
 
 
+async def test_a_link_the_branch_commits_outside_the_tested_folder_is_refused_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Part B, Minor 4, as the reviewer reproduced it: testing a subfolder, with --out
+    x/results from the top of the checkout, followed a link x the branch commits outside the
+    subfolder. The branch decides the whole checkout, so links are refused anywhere in its
+    worktree, not only in the folder tested."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    top = tmp_path / "checkout"
+    two_pages(top)  # the app, in checkout/app
+    (top / "x").symlink_to(elsewhere)
+    git(top, "init", "-q")
+    commit_all(top)
+    monkeypatch.chdir(top)
+
+    async def no_browsers(engine: str, endpoint: str) -> Browser:
+        raise BrowserConnectError("not reached in this test")
+
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(OutputError, match="is a link"):
+        await test_folder(
+            top / "app",
+            persona_ids=["grace"],
+            brief_name="default",
+            focus=None,
+            model_spec=FINISHES,
+            out=Path("x") / "results",
+            runner=runner,
+            budget=Budget(),
+            connect_browser=no_browsers,
+            workspaces=tmp_path / "workspaces",
+        )
+    assert runner.calls == []
+    assert list(elsewhere.iterdir()) == []
+
+
 @pytest.mark.usefixtures("no_umask")
 def test_results_are_made_for_their_owner_alone(tmp_path: Path) -> None:
     (grace,) = select(load_personas(load_devices()), ["grace"])

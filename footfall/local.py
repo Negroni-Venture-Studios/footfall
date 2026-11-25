@@ -555,6 +555,20 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
     )
 
 
+def _worktree_top(folder: Path) -> Path:
+    """The top of the git worktree `folder` lies in, all of which the tested branch decides,
+    or `folder` itself when git names none, as for a folder outside git."""
+    git = shutil.which("git")
+    if git is None:
+        return folder
+    try:
+        where = _run_git(git, folder, ["rev-parse", "--show-toplevel"])
+    except LocalRunError:
+        return folder
+    top = os.fsdecode(where.removesuffix(b"\n"))
+    return Path(top) if top else folder
+
+
 def _known_git_folders(folder: Path) -> frozenset[_Identity]:
     """The git folders of the repository `folder` is in, or none when git cannot say."""
     try:
@@ -1260,8 +1274,9 @@ def _open_results(out: Path, tested: Path) -> Folder:
     """Open the results folder `out`, one part at a time from the root, or from the working
     folder when `out` is relative, making each part that is missing, mode 0o700.
 
-    The folder under test is the tested branch's, so in any folder that lies inside it a
-    part that is a link is refused with OutputError, whatever path led there. Anywhere else
+    `tested` is the checkout under test, all of which is the tested branch's, so in any
+    folder that lies inside it a part that is a link is refused with OutputError, whatever
+    path led there. Anywhere else
     a link is the operator's own, as /var and /tmp are on a Mac, or a home folder can be,
     and is followed. `out` itself is never followed when it is a link, wherever it is.
     """
@@ -1325,8 +1340,8 @@ def _prepare_results(out: Path, personas: Sequence[Persona], tested: Path) -> _R
     """Open the results folder, making it if it is missing, make a folder in it for each
     persona, refusing to overwrite what an earlier run left there, and return them all, open.
 
-    The results folder may lie inside `tested`, the folder under test, whose branch decides
-    what is there. `_open_results` says which links on the way there it refuses; in the
+    The results folder may lie inside `tested`, the checkout under test, whose branch
+    decides what is there. `_open_results` says which links on the way there it refuses; in the
     results folder, OutputError refuses a link, even one to nothing, where summary.json or a
     persona's folder would go. From then on every result is written by name in a folder
     held open, never by path, so a link put in place of one later moves nothing.
@@ -1421,7 +1436,9 @@ async def test_folder(
         missing = [d.playwright for d in devices.values() if d.playwright not in playwright.devices]
         if missing:
             raise PersonaError(f"Playwright has no device called {missing[0]!r}")
-        results = _prepare_results(out, personas, folder)
+        # The branch decides its whole checkout, not only the folder tested in it.
+        checkout = await asyncio.to_thread(_worktree_top, folder)
+        results = _prepare_results(out, personas, checkout)
         stack.callback(results.close)
         run = _Run(
             run_id=run_id,
