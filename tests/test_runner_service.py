@@ -1572,9 +1572,11 @@ def test_status_is_none_while_live_and_for_unknown_runs(h: Harness) -> None:
 # ---------------------------------------------------------------- cleanup pass
 
 
-def test_a_copy_is_charged_what_the_measure_of_the_copy_finds(tmp_path: Path) -> None:
+def test_a_copy_is_charged_what_the_measure_finds(tmp_path: Path) -> None:
     """A folder with many names is larger than a block, and the copy charges it as the
-    measure does, at its size, not at one block."""
+    measure does, at its size, not at one block. The copy is compared with the measure of
+    what it copies: a folder filled in another order, as the copy is, can take a block more
+    or less on ext4."""
     source = tmp_path / "source"
     (source / "wide").mkdir(parents=True)
     for index in range(1500):
@@ -1585,7 +1587,7 @@ def test_a_copy_is_charged_what_the_measure_of_the_copy_finds(tmp_path: Path) ->
     written = _copy_tree(
         tmp_path, PurePath("source"), tmp_path / "copy", limit=10**9, chown=noop, what="it"
     )
-    assert written == _disk_usage(tmp_path / "copy")
+    assert written == _disk_usage(source)
 
 
 def test_every_folder_is_opened_without_following_a_link(
