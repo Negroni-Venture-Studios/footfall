@@ -589,6 +589,12 @@ def check_chain(arguments: Sequence[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------- servers
 
 
+def own_address() -> str:
+    """The container's own address on its run's network, which Docker writes in its hosts
+    file against its name: each server listens there alone, not on every interface."""
+    return socket.gethostbyname(socket.gethostname())
+
+
 # Where `/redirect?to=<name>` sends the browser: a host on the browser's list, one off it,
 # and Playwright's run-server on the browser container's own loopback.
 REDIRECTS: Final = {
@@ -655,7 +661,7 @@ class _Pages(http.server.BaseHTTPRequestHandler):
 
 def serve_pages(arguments: Sequence[str]) -> None:
     port = int(arguments[0])
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), _Pages)  # noqa: S104
+    server = http.server.ThreadingHTTPServer((own_address(), port), _Pages)
     say(READY, {"port": port, "hostname": socket.gethostname()})
     server.serve_forever()
 
@@ -702,7 +708,7 @@ def _hello(connection: socket.socket) -> None:
 def serve_hello(arguments: Sequence[str]) -> None:
     """Accept TLS connections, report each ClientHello's extensions, and close them."""
     port = int(arguments[0])
-    listener = socket.create_server(("0.0.0.0", port))  # noqa: S104
+    listener = socket.create_server((own_address(), port))
     say(READY, {"port": port, "hostname": socket.gethostname()})
     while True:
         connection, peer = listener.accept()
@@ -733,7 +739,7 @@ def serve_upgrade(arguments: Sequence[str]) -> None:
     """Accept every request as a WebSocket upgrade and hold it open: the control that shows
     `raw` can tell an accepted upgrade from a refusal."""
     port = int(arguments[0])
-    listener = socket.create_server(("0.0.0.0", port))  # noqa: S104
+    listener = socket.create_server((own_address(), port))
     say(READY, {"port": port, "hostname": socket.gethostname()})
     while True:
         connection, _ = listener.accept()
@@ -744,7 +750,7 @@ def serve_echo(arguments: Sequence[str]) -> None:
     """Answer each datagram on the port with the same bytes, as a control for `udp`."""
     port = int(arguments[0])
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.bind(("0.0.0.0", port))  # noqa: S104
+        sock.bind((own_address(), port))
         say(READY, {"port": port, "hostname": socket.gethostname()})
         while True:
             data, peer = sock.recvfrom(4096)
