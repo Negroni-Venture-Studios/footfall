@@ -1698,3 +1698,58 @@ def test_a_copy_of_the_configuration_that_is_not_the_same_file_is_copied(tmp_pat
         untracked=listing.untracked,
     )
     assert (tmp_path / "workspace" / "settings.ini").exists()
+
+
+@pytest.mark.parametrize(
+    "inside", ["modules/sub/config", "modules/a/b/config", "worktrees/other/config.worktree"]
+)
+@pytest.mark.parametrize("all_files", [False, True])
+def test_a_hard_link_to_any_file_of_the_git_folder_is_refused(
+    tmp_path: Path, inside: str, all_files: bool
+) -> None:
+    """A submodule's configuration, or another worktree's, holds its remote, token and all."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    target = folder / ".git" / inside
+    target.parent.mkdir(parents=True)
+    target.write_text(f"[remote]\n\turl = {TOKEN_URL}\n")
+    os.link(target, folder / "notes.cfg")
+    with pytest.raises(LocalRunError, match="git configuration"):
+        if all_files:
+            local._copy_folder(
+                folder,
+                tmp_path / "copy",
+                tmp_path / "out",
+                local._known_git_folders(folder),
+                local._known_linked(folder),
+            )
+        else:
+            listing = local._git_files(folder)
+            local._copy_files(
+                folder,
+                tmp_path / "copy",
+                listing.names,
+                tmp_path / "out",
+                git_dirs=listing.git_dirs,
+                untracked=listing.untracked,
+                linked=listing.linked,
+            )
+
+
+def test_files_linked_to_each_other_in_the_worktree_are_copied(tmp_path: Path) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    os.link(folder / "serve.py", folder / "serve-again.py")
+    listing = local._git_files(folder)
+    local._copy_files(
+        folder,
+        tmp_path / "copy",
+        listing.names,
+        tmp_path / "out",
+        git_dirs=listing.git_dirs,
+        untracked=listing.untracked,
+        linked=listing.linked,
+    )
+    assert (tmp_path / "copy" / "serve-again.py").read_text() == "print('not run in these tests')\n"

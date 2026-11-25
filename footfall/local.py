@@ -235,15 +235,54 @@ def _write_json(path: Path, data: object, password: str | None) -> None:
 type _Identity = tuple[int, int]  # (st_dev, st_ino)
 
 
+class _Linked:
+    """The files in the repository's git folders that have more than one name.
+
+    A hostile archive, once extracted, can leave a hard link in the worktree to any file in
+    the git folder: the repository's configuration, a submodule's in `modules/`, or another
+    worktree's in `worktrees/`, each of which can hold a token. Walking the git folders is
+    costly, so they are walked only when a file to copy has another name too, and then once.
+    """
+
+    def __init__(self, folders: Sequence[Path] = ()) -> None:
+        self._folders = tuple(folders)
+        self._found: frozenset[_Identity] | None = None
+
+    def holds(self, info: os.stat_result) -> bool:
+        """Whether the file `info` describes is also one of the git folders' files."""
+        if info.st_nlink <= 1 or not self._folders:
+            return False
+        if self._found is None:
+            self._found = self._collect()
+        return (info.st_dev, info.st_ino) in self._found
+
+    def _collect(self) -> frozenset[_Identity]:
+        found: set[_Identity] = set()
+        for top in self._folders:
+            for path, _, files in os.walk(top):  # never into a link
+                for name in files:
+                    try:
+                        info = (Path(path) / name).lstat()
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                        found.add((info.st_dev, info.st_ino))
+        return frozenset(found)
+
+
+_NO_LINKS: Final = _Linked()
+
+
 @dataclass(frozen=True)
 class _Listing:
     """What git would commit from a folder, and the identities of the repository's git
     folder and its common folder, which differ for a linked worktree, and of the
-    configuration files in them."""
+    configuration files in them, with the files in those folders that have other names."""
 
     names: list[PurePosixPath]
     git_dirs: frozenset[_Identity]
     untracked: frozenset[PurePosixPath] = frozenset()  # listed by --others, not in the index
+    linked: _Linked = _NO_LINKS
 
 
 _GIT_ADVICE: Final = "pass --all-files to copy every file in the folder, ignored ones included"
@@ -315,19 +354,30 @@ def _git() -> str:
     return git
 
 
-def _git_folders(git: str, folder: Path) -> frozenset[_Identity]:
-    """The identities of the repository's git folder and of its common folder, which for a
-    linked worktree is another folder and holds the configuration, and of the configuration
-    files in each, `config` and `config.worktree`. No name may lead into such a folder, and
-    no file that is one of those files, by a hard link under any name, is copied.
+def _git_folder_paths(git: str, folder: Path) -> list[Path]:
+    """The repository's git folder and its common folder, as git names them.
 
     Each path is taken exactly as git prints it, but for the newline: git keeps a trailing
     space in a .git file's path, and a folder with that name is not the one without it.
     """
-    identities: set[_Identity] = set()
+    paths = []
     for which in ("--absolute-git-dir", "--git-common-dir"):
         where = _run_git(git, folder, ["rev-parse", "--path-format=absolute", which])
-        path = Path(os.fsdecode(where.removesuffix(b"\n")))
+        paths.append(Path(os.fsdecode(where.removesuffix(b"\n"))))
+    return paths
+
+
+def _git_folders(
+    git: str, folder: Path, paths: Sequence[Path] | None = None
+) -> frozenset[_Identity]:
+    """The identities of the repository's git folder and of its common folder, which for a
+    linked worktree is another folder and holds the configuration, and of the configuration
+    files in each, `config` and `config.worktree`. No name may lead into such a folder, and
+    no file that is one of those files, by a hard link under any name, is copied. `paths`
+    are the folders, as `_git_folder_paths` finds them, when the caller has them already.
+    """
+    identities: set[_Identity] = set()
+    for path in _git_folder_paths(git, folder) if paths is None else paths:
         try:
             info = path.stat()
         except OSError as error:
@@ -360,7 +410,13 @@ def _git_files(folder: Path) -> _Listing:
 
     tracked = listed("--cached")
     untracked = listed("--others", "--exclude-standard") - tracked
-    return _Listing(sorted(tracked | untracked), _git_folders(git, folder), frozenset(untracked))
+    paths = _git_folder_paths(git, folder)
+    return _Listing(
+        sorted(tracked | untracked),
+        _git_folders(git, folder, paths),
+        frozenset(untracked),
+        _Linked(paths),
+    )
 
 
 def _known_git_folders(folder: Path) -> frozenset[_Identity]:
@@ -369,6 +425,15 @@ def _known_git_folders(folder: Path) -> frozenset[_Identity]:
         return _git_folders(_git(), folder)
     except LocalRunError:
         return frozenset()
+
+
+def _known_linked(folder: Path) -> _Linked:
+    """The linked files of the git folders of the repository `folder` is in, or none when
+    git cannot say."""
+    try:
+        return _Linked(_git_folder_paths(_git(), folder))
+    except LocalRunError:
+        return _Linked()
 
 
 def _refuse_a_git_folder(base: Path, git_dirs: frozenset[_Identity]) -> None:
@@ -485,12 +550,12 @@ def _open_folders(
 
 
 def _refuse_a_git_config(
-    name: object, info: os.stat_result, git_dirs: frozenset[_Identity]
+    name: object, info: os.stat_result, git_dirs: frozenset[_Identity], linked: _Linked
 ) -> None:
-    if (info.st_dev, info.st_ino) in git_dirs:
+    if (info.st_dev, info.st_ino) in git_dirs or linked.holds(info):
         raise LocalRunError(
-            f"cannot copy {_shown(name)}: it is the repository's git configuration, "
-            "linked under another name, and can hold a token"
+            f"cannot copy {_shown(name)}: it is the repository's git configuration, or another "
+            "file of its git folder, linked under another name, and can hold a token"
         )
 
 
@@ -500,6 +565,7 @@ def _copy_file(
     leaf: str,
     name: PurePosixPath,
     git_dirs: frozenset[_Identity] = frozenset(),
+    linked: _Linked = _NO_LINKS,
 ) -> None:
     """Copy one regular file between two open folders, refusing one that changes kind, and
     one that is a git configuration file in `git_dirs`, whatever it is called."""
@@ -508,7 +574,7 @@ def _copy_file(
         info = os.fstat(reader)
         if not stat.S_ISREG(info.st_mode):
             raise LocalRunError(f"cannot copy {_shown(name)}: it changed while it was copied")
-        _refuse_a_git_config(name, info, git_dirs)
+        _refuse_a_git_config(name, info, git_dirs, linked)
         mode = stat.S_IMODE(info.st_mode) & 0o777  # no set-id or sticky bits
         writer = os.open(leaf, _WRITE_FLAGS, mode, dir_fd=target)
         try:
@@ -532,6 +598,7 @@ def _copy_files(
     *,
     git_dirs: frozenset[_Identity] = frozenset(),
     untracked: frozenset[PurePosixPath] = frozenset(),
+    linked: _Linked = _NO_LINKS,
 ) -> None:
     """Copy the named files into a new workspace, links as links, leaving the results out.
 
@@ -576,7 +643,14 @@ def _copy_files(
                 if left_out is not None and parts[: len(left_out)] == left_out:
                     continue
                 try:
-                    _copy_name(source_top, target_top, name, git_dirs, untracked=name in untracked)
+                    _copy_name(
+                        source_top,
+                        target_top,
+                        name,
+                        git_dirs,
+                        untracked=name in untracked,
+                        linked=linked,
+                    )
                 except _InAGitFolder as shaped:
                     if shaped.where not in warned:
                         warned.add(shaped.where)
@@ -594,6 +668,7 @@ def _copy_name(
     git_dirs: frozenset[_Identity] = frozenset(),
     *,
     untracked: bool = False,
+    linked: _Linked = _NO_LINKS,
 ) -> None:
     """Copy one name between two open folders, as `_copy_files` describes."""
     parents, leaf = name.parts[:-1], name.parts[-1]
@@ -621,7 +696,7 @@ def _copy_name(
             if stat.S_ISLNK(info.st_mode):
                 os.symlink(os.readlink(leaf, dir_fd=source), leaf, dir_fd=target)
             else:
-                _copy_file(source, target, leaf, name, git_dirs)
+                _copy_file(source, target, leaf, name, git_dirs, linked)
         finally:
             os.close(target)
     finally:
@@ -629,7 +704,11 @@ def _copy_name(
 
 
 def _copy_folder(
-    folder: Path, workspace: Path, out: Path, git_dirs: frozenset[_Identity] = frozenset()
+    folder: Path,
+    workspace: Path,
+    out: Path,
+    git_dirs: frozenset[_Identity] = frozenset(),
+    linked: _Linked = _NO_LINKS,
 ) -> None:
     """Copy all of the folder into its workspace, links as links, leaving out the results,
     any `.git`, however it is spelt, any folder `git_dirs` identifies, whatever it is
@@ -649,7 +728,7 @@ def _copy_folder(
             return True
         info = path.lstat()
         if stat.S_ISREG(info.st_mode):
-            _refuse_a_git_config(path.relative_to(base), info, git_dirs)
+            _refuse_a_git_config(path.relative_to(base), info, git_dirs, linked)
         if not stat.S_ISDIR(info.st_mode):
             return False
         if (info.st_dev, info.st_ino) in git_dirs:
@@ -927,7 +1006,8 @@ async def _go(
     workspace.parent.mkdir(parents=True, exist_ok=True)
     if listing is None:
         git_dirs = await asyncio.to_thread(_known_git_folders, folder)
-        await asyncio.to_thread(_copy_folder, folder, workspace, run.out, git_dirs)
+        linked = await asyncio.to_thread(_known_linked, folder)
+        await asyncio.to_thread(_copy_folder, folder, workspace, run.out, git_dirs, linked)
     else:
         await asyncio.to_thread(
             functools.partial(
@@ -938,6 +1018,7 @@ async def _go(
                 run.out,
                 git_dirs=listing.git_dirs,
                 untracked=listing.untracked,
+                linked=listing.linked,
             )
         )
     env: dict[str, str] = {}
