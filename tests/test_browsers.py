@@ -338,6 +338,19 @@ async def test_chromium_is_launched_as_the_build_that_reads_policies() -> None:
     assert json.loads(options["headers"]["x-playwright-launch-options"]) == {}
 
 
+async def test_the_connection_never_exposes_the_orchestrators_network() -> None:
+    # expose_network would let the run's browser container open sockets from the
+    # orchestrator's side, the one thing between a hostile run-server and the orchestrator's
+    # network. The options are pinned whole, so that no new one arrives unseen.
+    fake = _Playwright()
+    endpoint = "ws://10.89.0.12:3000/Zm9vYmFyYmF6"
+    await connect_run_server(fake, "chromium", endpoint)  # type: ignore[arg-type]
+    await connect_run_server(fake, "webkit", endpoint)  # type: ignore[arg-type]
+    for _, options in [*fake.chromium.calls, *fake.webkit.calls]:
+        assert "expose_network" not in options
+        assert set(options) == {"timeout", "headers"}
+
+
 async def test_a_connection_is_tried_again_until_the_browsers_answer() -> None:
     fake = _Playwright(failures=2)
     endpoint = "ws://10.89.0.12:3000/Zm9vYmFyYmF6"
