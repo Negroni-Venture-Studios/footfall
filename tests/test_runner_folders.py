@@ -206,6 +206,36 @@ def test_the_runs_folder_must_be_roots_alone(tmp_path: Path, case: str) -> None:
     service(tmp_path / "workspaces", runs, os.getuid())
 
 
+def _roots_and_sticky_or_closed(folder: Path) -> bool:
+    """Whether `folder` and every folder above it are root's and writable by root alone,
+    unless sticky."""
+    for each in (folder, *folder.parents):
+        info = each.stat()
+        if info.st_uid != 0 or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+            return False
+    return True
+
+
+def test_a_runs_folder_that_is_not_its_owners_is_refused_for_itself() -> None:
+    """Part A, Minor 2: the last check, on the runs folder itself, tested on its own. The
+    folder lies directly in a sticky folder of root's, so every check above it passes, and it
+    is refused only because it is not the owner's."""
+    import tempfile
+
+    shared = Path("/tmp").resolve()  # noqa: S108  # made and removed here, by this test
+    if not _roots_and_sticky_or_closed(shared):
+        pytest.skip("the shared temporary folder is not root's and sticky here")
+    runs = Path(tempfile.mkdtemp(dir=shared)).resolve()
+    try:
+        with pytest.raises(RunnerSetupError) as refused:
+            _open_path(runs, os.getuid() + 1)
+        assert str(refused.value).startswith(f"{runs} must belong to root")
+        assert f"not user {os.getuid()} with mode 700" in str(refused.value)
+        os.close(_open_path(runs, os.getuid()))  # the control: its own owner is taken
+    finally:
+        runs.rmdir()
+
+
 @pytest.mark.parametrize("where", ["the folder", "a folder above it"])
 def test_a_link_on_the_way_to_the_runs_folder_is_refused(tmp_path: Path, where: str) -> None:
     """The path is resolved once, from the setting; a link found when it is opened, one name
