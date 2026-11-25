@@ -538,6 +538,62 @@ async def test_existing_results_are_never_overwritten(
     assert runner.calls == []
 
 
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        ("summary.json", "dangling"),
+        ("summary.json", "file"),
+        ("grace", "dangling"),
+        ("grace", "folder"),
+    ],
+)
+async def test_a_link_where_results_go_is_refused_before_the_run(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]], name: str, kind: str
+) -> None:
+    # A tested branch can track a link where the results go, when they go inside its folder.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = elsewhere / "planted-by-the-branch"
+    if kind == "file":
+        target.write_text("left alone")
+    elif kind == "folder":
+        target.mkdir()
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / name).symlink_to(target)
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(OutputError, match="is a link"):
+        await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
+    assert runner.calls == []
+    if kind == "dangling":
+        assert list(elsewhere.iterdir()) == []
+    elif kind == "file":
+        assert target.read_text() == "left alone"
+    else:
+        assert list(target.iterdir()) == []
+
+
+async def test_a_results_folder_that_is_a_link_is_refused_before_the_run(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    target = tmp_path / "elsewhere" / "planted-by-the-branch"
+    target.mkdir(parents=True)
+    (tmp_path / "out").symlink_to(target)
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(OutputError, match="is a link"):
+        await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
+    assert runner.calls == []
+    assert list(target.iterdir()) == []
+
+
+def test_a_results_file_is_never_written_through_a_link(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere" / "planted-by-the-branch.json"
+    target.parent.mkdir()
+    (tmp_path / "report.json").symlink_to(target)
+    with pytest.raises(FileExistsError):
+        local._write_json(tmp_path / "report.json", {"summary": "s"}, None)
+    assert not target.exists()
+
+
 async def test_a_bad_manifest_starts_nothing(
     tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
 ) -> None:

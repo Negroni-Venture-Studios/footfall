@@ -1,3 +1,4 @@
+import errno
 import json
 from pathlib import Path
 
@@ -61,6 +62,16 @@ def test_a_line_that_is_not_an_object_is_an_error(tmp_path: Path) -> None:
     path.write_text('"a step"\n', encoding="utf-8")
     with pytest.raises(TraceError, match="line 1"):
         Trace(path).steps()
+
+
+def test_a_trace_is_never_written_through_a_link(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere" / "planted-by-the-branch.jsonl"
+    target.parent.mkdir()
+    (tmp_path / "trace.jsonl").symlink_to(target)
+    with pytest.raises(OSError) as refused:
+        Trace(tmp_path / "trace.jsonl").append(step(1))
+    assert refused.value.errno == errno.ELOOP
+    assert not target.exists()
 
 
 def test_empty_or_missing_trace_has_no_steps(tmp_path: Path) -> None:

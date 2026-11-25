@@ -138,7 +138,8 @@ class NotReadyError(LocalRunError):
 
 
 class OutputError(LocalRunError):
-    """The results folder already holds results that this run would overwrite."""
+    """The results folder already holds results that this run would overwrite, or a link
+    where results would go."""
 
 
 def new_run_id() -> str:
@@ -230,11 +231,14 @@ def _failed(persona: Persona, device: Device, reason: str, started: float) -> Pe
 
 
 def _write_json(path: Path, data: object, password: str | None) -> None:
-    """Write `data` as JSON, with the password taken out once more in case anything held it."""
+    """Write `data` as JSON to a new file, with the password taken out once more in case
+    anything held it. The file is created exclusively, which never follows a link, even one
+    to nothing: a name already there, link or not, raises FileExistsError."""
     text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     if password:
         text = text.replace(password, REDACTED)
-    path.write_text(text, encoding="utf-8")
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 type _Identity = tuple[int, int]  # (st_dev, st_ino)
@@ -1059,10 +1063,21 @@ async def _ready(runner: Runner, run: _Run, copy: str, address: str) -> None:
 
 def _prepare_results(out: Path, personas: Sequence[Persona]) -> list[Path]:
     """Make a results folder for each persona, refusing to overwrite what an earlier run left
-    there, and return them."""
-    taken = [out / p.id for p in personas if (out / p.id).exists()]
-    if (out / "summary.json").exists():
-        taken.append(out / "summary.json")
+    there, and return them.
+
+    The results folder may lie inside the folder under test, whose branch decides what is
+    there, so OutputError also refuses a results folder that is a link, and a link, even one
+    to nothing, where summary.json or a persona's folder would go. Footfall writes no
+    results through a link.
+    """
+    names = [*(out / p.id for p in personas), out / "summary.json"]
+    for name in (out, *names):
+        if name.is_symlink():
+            raise OutputError(
+                f"{name} is a link, and Footfall writes no results through one; choose "
+                "another results folder with --out"
+            )
+    taken = [name for name in names if name.exists()]
     if taken:
         raise OutputError(
             f"{taken[0]} already exists; choose another results folder with --out, "

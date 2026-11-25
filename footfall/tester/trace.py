@@ -8,9 +8,12 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from footfall.tester.report import OBSERVATIONS
+
+# Appended to, and made if it is not there, but never through a link, even one to nothing.
+_APPEND: Final = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
 
 
 class TraceError(ValueError):
@@ -58,7 +61,7 @@ class Trace:
         # ASCII only: a lone surrogate from the model is escaped, not a write error.
         labelled = {"note": OBSERVATIONS, **fields}
         line = json.dumps(labelled, ensure_ascii=True, separators=(",", ":")) + "\n"
-        with self.path.open("a", encoding="utf-8") as handle:
+        with os.fdopen(os.open(self.path, _APPEND, 0o666), "a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
