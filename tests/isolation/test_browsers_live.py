@@ -132,9 +132,9 @@ async def test_chromium_is_the_full_build_and_reads_the_policy(browsers: Browser
 
 async def test_chromium_sends_no_encrypted_client_hello(browsers: Browsers) -> None:
     run = browsers.run
-    _, ready = await run.serve("hello", "hello", 8443)
-    name = ready["hostname"]  # Docker's name for the probe on the run's network
-    target = f"https://{name}:8443/"
+    # By address: Docker's name service does not answer inside gVisor.
+    address, _ = await run.serve("hello", "hello", 8443)
+    target = f"https://{address}/"
 
     async def hellos() -> list[dict[str, Any]]:
         return lines(await run.logs("hello"), HELLO)
@@ -162,7 +162,7 @@ async def test_chromium_sends_no_encrypted_client_hello(browsers: Browsers) -> N
         await shell.close()
     from_shell = (await hellos())[len(from_full) :]
 
-    assert from_full and all(h.get("server_name") == name for h in from_full), from_full
+    assert from_full and all("extensions" in h for h in from_full), from_full
     assert [h for h in from_full if HIDDEN_NAMES & set(h["extensions"])] == [], from_full
     assert any(ECH in h.get("extensions", []) for h in from_shell), from_shell
 

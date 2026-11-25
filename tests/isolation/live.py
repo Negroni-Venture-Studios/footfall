@@ -108,9 +108,12 @@ class LiveRun:
         """Wait until the copy has printed `count` lines with `tag` that `where` accepts."""
         deadline = time.monotonic() + timeout
         while True:
-            found = [line for line in lines(await self.logs(copy), tag) if where(line)]
+            text = await self.logs(copy)
+            found = [line for line in lines(text, tag) if where(line)]
             if len(found) >= count:
                 return found
+            if "Traceback (most recent call last)" in text:
+                raise AssertionError(f"{copy} failed:\n{text[-3000:]}")
             if time.monotonic() > deadline:
                 raise TimeoutError(f"{copy} printed {len(found)} of {count} {tag} lines")
             await asyncio.sleep(POLL)

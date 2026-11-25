@@ -319,7 +319,9 @@ def fetch(url: str) -> dict[str, Any]:
                 )
                 head = _read_head(stream)
                 result["proxy_status"] = _status(head.split(b"\r\n", 1)[0])
-                result["proxy_reason"] = head.split(b"\r\n\r\n", 1)[-1][:200].decode("replace")
+                result["proxy_reason"] = head.split(b"\r\n\r\n", 1)[-1][:200].decode(
+                    "utf-8", "replace"
+                )
                 if result["proxy_status"] != 200:
                     return result
                 context = ssl.create_default_context()
@@ -338,7 +340,9 @@ def fetch(url: str) -> dict[str, Any]:
                 )
                 head = _read_head(stream)
                 result["status"] = _status(head.split(b"\r\n", 1)[0])
-                result["proxy_reason"] = head.split(b"\r\n\r\n", 1)[-1][:200].decode("replace")
+                result["proxy_reason"] = head.split(b"\r\n\r\n", 1)[-1][:200].decode(
+                    "utf-8", "replace"
+                )
     except (OSError, ssl.SSLError) as error:
         result["error"] = errno_name(error) if isinstance(error, OSError) else str(error)
     return result
