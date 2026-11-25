@@ -22,9 +22,10 @@ quoted, and a blocked address is reported by its host alone, never its path or q
 
 The guard has known gaps, and the egress proxy and the container's network cover the first three:
 
-- A request made as a page unloads, such as a `sendBeacon` or a `keepalive` fetch from a
-  `pagehide` or `unload` handler, has no frame left; Playwright continues it without
-  routing it and without a request event, so the guard never sees it.
+- In Chromium, a request made as a page unloads, such as a `sendBeacon` or a `keepalive`
+  fetch from a `pagehide` or `unload` handler, has no frame left; Playwright continues it
+  without routing it and without a request event, so the guard never sees it. WebKit routes
+  such a request, and the guard blocks it (shown by the isolation tests).
 - `<link rel=preconnect>` and `<link rel=dns-prefetch>` open a connection or look a name up
   without making a request, so there is nothing to route.
 - WebRTC sends UDP, which is not HTTP and is not routed.
