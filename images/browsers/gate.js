@@ -15,8 +15,9 @@
 // goes, since its end of a pipe from the gate then closes: so run-server never outlives the
 // gate. On SIGTERM or SIGINT the group gets SIGTERM, then SIGKILL after STOP_GRACE_MS, and
 // the gate exits within EXIT_BOUND_MS whatever happens. The gate exits when the keeper does,
-// with its code. It never prints the path, and the child's own output, which names the
-// path, is discarded.
+// with its code. It never prints the path. The child's standard output, where run-server
+// names the path, is discarded; its standard error goes to the container's log, which only
+// the runner can read and which the runner never passes on.
 //
 //   node gate.js --host 0.0.0.0 --port 3000 --upstream 3001 --path /<token> -- <command...>
 //

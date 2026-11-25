@@ -5,8 +5,9 @@ at most 64 KiB and names an op and exactly that op's fields, each of the right t
 else is refused before the service sees it. The service's methods block, so each request runs
 in a thread of its own. The socket's mode is 0660, so only the runner's user and group can use
 it.
-At most `MAX_CONNECTIONS` connections are served at once, and `stop` and `status` run in a small
-pool of their own, so that they never queue behind long preparations.
+At most `MAX_CONNECTIONS` connections are served at once, every request alike, and `stop` and
+`status` run in a small pool of threads of their own, so that once read they never wait for a
+thread behind long preparations.
 
     {"op": "prepare", "run_id": "...", ...}
     {"ok": true, "result": ...}

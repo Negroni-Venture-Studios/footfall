@@ -48,8 +48,9 @@ LIMITS: Final[Mapping[Role, Limits]] = MappingProxyType(
 
 # The sandbox in one place: every container gets exactly these, whatever its role. The
 # table cannot be changed, and `container_config` copies all of it, so a setting added here
-# reaches every container. Docker's default seccomp profile applies because nothing here
-# turns it off.
+# reaches every container. Nothing here turns off a seccomp filter: under runsc, gVisor's
+# own filter on its sandbox stands between the code under test and the host's kernel, and
+# Docker's default profile applies only under runc, for development.
 _HARDENING: Final[Mapping[str, Any]] = MappingProxyType(
     {
         "CapDrop": ("ALL",),
