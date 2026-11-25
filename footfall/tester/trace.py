@@ -1,10 +1,16 @@
-"""The step trace: one JSON line per action, kept so a run can be replayed without a model."""
+"""The step trace: one JSON line per action, kept so a run can be replayed without a model.
+
+Each line begins with a `note` that its text is what a tester observed and wrote, so that a
+line read on its own is labelled too (AGENTS.md rule 6). The note is not part of a step.
+"""
 
 import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from footfall.tester.report import OBSERVATIONS
 
 
 class TraceError(ValueError):
@@ -50,7 +56,8 @@ class Trace:
                     f"step {step.number}: field `{name}` is nested too deeply"
                 ) from error
         # ASCII only: a lone surrogate from the model is escaped, not a write error.
-        line = json.dumps(fields, ensure_ascii=True, separators=(",", ":")) + "\n"
+        labelled = {"note": OBSERVATIONS, **fields}
+        line = json.dumps(labelled, ensure_ascii=True, separators=(",", ":")) + "\n"
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
@@ -63,7 +70,10 @@ class Trace:
         with self.path.open(encoding="utf-8") as handle:
             for number, line in enumerate(handle, start=1):
                 try:
-                    steps.append(Step(**json.loads(line)))
+                    fields = json.loads(line)
+                    if isinstance(fields, dict):
+                        fields.pop("note", None)
+                    steps.append(Step(**fields))
                 except (ValueError, TypeError) as error:
                     raise TraceError(
                         f"{self.path}: line {number} is not a step: {error}"

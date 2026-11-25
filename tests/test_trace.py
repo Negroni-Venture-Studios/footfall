@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from footfall.tester.report import OBSERVATIONS
 from footfall.tester.trace import Step, Trace, TraceError
 
 
@@ -44,6 +45,22 @@ def test_trace_round_trip(tmp_path: Path) -> None:
     assert trace.steps() == steps
     lines = (tmp_path / "trace.jsonl").read_text(encoding="utf-8").split("\n")
     assert len(lines) == 3 and lines[2] == ""
+
+
+def test_every_line_says_its_text_is_observations(tmp_path: Path) -> None:
+    trace = Trace(tmp_path / "trace.jsonl")
+    trace.append(step(1))
+    trace.append(step(2))
+    for line in trace.path.read_text(encoding="utf-8").splitlines():
+        assert next(iter(json.loads(line).items())) == ("note", OBSERVATIONS)
+    assert trace.steps() == [step(1), step(2)]
+
+
+def test_a_line_that_is_not_an_object_is_an_error(tmp_path: Path) -> None:
+    path = tmp_path / "t.jsonl"
+    path.write_text('"a step"\n', encoding="utf-8")
+    with pytest.raises(TraceError, match="line 1"):
+        Trace(path).steps()
 
 
 def test_empty_or_missing_trace_has_no_steps(tmp_path: Path) -> None:

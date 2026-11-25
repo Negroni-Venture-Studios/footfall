@@ -5,6 +5,7 @@ import pytest
 
 from footfall.tester.report import (
     CAPS,
+    OBSERVATIONS,
     Finding,
     PersonaReport,
     ToolError,
@@ -330,6 +331,7 @@ def test_report_to_json_is_plain_json() -> None:
     )
     out = report.to_json()
     assert json.loads(json.dumps(out)) == out
+    assert next(iter(out.items())) == ("note", OBSERVATIONS)  # the first thing a reader sees
     assert out["findings"][0]["steps"] == ["Open /cart", "Tap the coupon box"]
     assert out["findings"][0]["screenshots"] == ["s7"]
     assert out["actions"] == 17 and out["cost_usd"] == 0.41 and out["score"] == 6

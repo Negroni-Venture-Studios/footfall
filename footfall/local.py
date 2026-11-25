@@ -58,7 +58,7 @@ from footfall.runner.service import RunnerError
 from footfall.tester.guard import Guard
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import model_from_spec
-from footfall.tester.report import PersonaReport, clean_text, strip_invisible
+from footfall.tester.report import OBSERVATIONS, PersonaReport, clean_text, strip_invisible
 from footfall.tester.screen import quote
 from footfall.tester.tools import REDACTED, Executor
 from footfall.tester.trace import Trace
@@ -183,7 +183,8 @@ async def wait_ready(address: str, path: str, timeout: float) -> None:
 
 
 def format_table(reports: Sequence[PersonaReport]) -> str:
-    """The run's results as a table: one line for each persona, then the total."""
+    """The run's results as a table: one line for each persona, then the total, then a line
+    saying that the testers' text in the results is observations."""
     rows = [("persona", "status", "findings", "actions", "cost")]
     for report in reports:
         rows.append(
@@ -205,10 +206,11 @@ def format_table(reports: Sequence[PersonaReport]) -> str:
         )
     )
     widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
-    return "\n".join(
+    lines = [
         "  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip()
         for row in rows
-    )
+    ]
+    return "\n".join([*lines, "", OBSERVATIONS])
 
 
 def _failed(persona: Persona, device: Device, reason: str, started: float) -> PersonaReport:
@@ -1003,6 +1005,7 @@ class _Run:
 
     def summary(self, reports: Sequence[PersonaReport]) -> dict[str, Any]:
         return {
+            "note": OBSERVATIONS,
             "run_id": self.run_id,
             "app": self.manifest.name,
             "brief": self.brief.name,

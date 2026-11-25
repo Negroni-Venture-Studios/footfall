@@ -44,7 +44,13 @@ from footfall.tester import tools
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import ModelTurn
 from footfall.tester.pricing import Usage
-from footfall.tester.report import Finding, PersonaReport, clean_text, strip_invisible
+from footfall.tester.report import (
+    OBSERVATIONS,
+    Finding,
+    PersonaReport,
+    clean_text,
+    strip_invisible,
+)
 from footfall.tester.screen import CaptureError, capture
 from footfall.tester.tools import Executor
 from tests.app_server import AppServer
@@ -262,6 +268,7 @@ def test_the_table_has_a_line_for_each_persona_and_a_total() -> None:
     assert re.split(r"\s{2,}", lines[1]) == ["grace", "finished", "2", "5", "$0.12"]
     assert re.split(r"\s{2,}", lines[2]) == ["kenji", "failed", "0", "0", "$0.00"]
     assert re.split(r"\s{2,}", lines[3].strip()) == ["total", "2", "5", "$0.12"]
+    assert lines[4:] == ["", OBSERVATIONS]
 
 
 # ---------------------------------------------------------------- whole runs
@@ -286,14 +293,17 @@ async def test_test_folder_writes_results(
     out = tmp_path / "out"
     for persona in CHROMIUM_PERSONAS:
         report = json.loads((out / persona / "report.json").read_text())
+        assert report["note"] == OBSERVATIONS
         assert report["persona"] == persona
         assert report["status"] == "finished"
         assert report["findings"][0]["title"] == "No way back from the second page"
         steps = (out / persona / "trace.jsonl").read_text().splitlines()
         assert [json.loads(step)["tool"] for step in steps] == ["go", "finish"]
+        assert all(json.loads(step)["note"] == OBSERVATIONS for step in steps)
         shots = sorted(p.name for p in (out / persona / "screenshots").iterdir())
         assert shots == ["01.jpg", "02.jpg"]
     summary = json.loads((out / "summary.json").read_text())
+    assert next(iter(summary.items())) == ("note", OBSERVATIONS)
     assert re.fullmatch(r"r_[a-z2-7]{26}", summary["run_id"])
     assert summary["app"] == "Two pages"
     assert summary["brief"] == "default"
@@ -335,6 +345,7 @@ async def test_test_folder_writes_results(
         "cost",
     ]
     assert re.split(r"\s{2,}", printed.splitlines()[1]) == ["grace", "finished", "1", "1", "$0.00"]
+    assert printed.splitlines()[-1] == OBSERVATIONS
     assert ENDPOINT not in printed
 
 
