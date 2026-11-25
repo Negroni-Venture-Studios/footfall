@@ -858,7 +858,11 @@ class RunnerService:
             raise ValueError("step_timeout, disk_budget and disk_interval must be positive")
         if lifetime <= 0:
             raise ValueError("a run's lifetime must be positive")
-        workspaces_root, runs_root = workspaces.resolve(), runs.resolve()
+        if not runs.is_absolute():
+            raise RunnerSetupError(f"{runs} is not an absolute path")
+        # The runs folder's path is taken as given, only normalised, and never resolved, so a
+        # link anywhere in it is found when it is opened, one name at a time, and refused.
+        workspaces_root, runs_root = workspaces.resolve(), Path(os.path.normpath(runs))
         if workspaces_root.is_relative_to(runs_root) or runs_root.is_relative_to(workspaces_root):
             raise ValueError("the workspaces and runs folders must not contain each other")
         # Both roots are held open from here on, and everything below them is reached from

@@ -253,10 +253,28 @@ def test_a_runs_folder_that_cannot_be_made_stops_the_runner_with_a_setup_error(
         service(tmp_path / "workspaces", tmp_path / "runs-6612", os.getuid())
 
 
+def test_a_link_in_the_runs_setting_is_refused_not_followed(tmp_path: Path) -> None:
+    """Part A, Minor 7: the setting is taken as given, not resolved, so a link in it is found
+    as the runner opens it, one name at a time, and refused."""
+    (tmp_path / "workspaces").mkdir()
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    (tmp_path / "link").symlink_to(real)
+    with pytest.raises(RunnerSetupError, match="link"):
+        service(tmp_path / "workspaces", tmp_path / "link" / "runs", os.getuid())
+    assert not (real / "runs").exists()
+    with pytest.raises(RunnerSetupError, match="link"):
+        service(tmp_path / "workspaces", tmp_path / "link", os.getuid())
+    # The control: the same folder, named without the link, and the same name with a part
+    # that normalises away.
+    service(tmp_path / "workspaces", tmp_path / "real" / "." / "runs", os.getuid())
+    assert (real / "runs").is_dir()
+
+
 @pytest.mark.parametrize("where", ["the folder", "a folder above it"])
 def test_a_link_on_the_way_to_the_runs_folder_is_refused(tmp_path: Path, where: str) -> None:
-    """The path is resolved once, from the setting; a link found when it is opened, one name
-    at a time, is refused rather than followed."""
+    """The path is taken as the setting gives it, never resolved; a link found when it is
+    opened, one name at a time, is refused rather than followed."""
     above = tmp_path.resolve() / "above"
     (above / "real").mkdir(parents=True, mode=0o700)
     if where == "the folder":
