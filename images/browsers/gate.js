@@ -8,8 +8,14 @@
 // constant time, to run-server on 127.0.0.1, byte for byte. Every other request gets an
 // empty 404. run-server checks the path as well.
 //
-// The gate starts run-server as its child, and exits when the child does. It never prints
-// the path, and the child's own output, which names the path, is discarded.
+// The gate starts run-server through a keeper, a second copy of this script, which runs it
+// in a process group of its own. The keeper stops that whole group, run-server and anything
+// it started, when it is told to, when run-server exits, or when the gate goes, however it
+// goes, since its end of a pipe from the gate then closes: so run-server never outlives the
+// gate. On SIGTERM or SIGINT the group gets SIGTERM, then SIGKILL after STOP_GRACE_MS, and
+// the gate exits within EXIT_BOUND_MS whatever happens. The gate exits when the keeper does,
+// with its code. It never prints the path, and the child's own output, which names the
+// path, is discarded.
 //
 //   node gate.js --host 0.0.0.0 --port 3000 --upstream 3001 --path /<token> -- <command...>
 //
@@ -27,6 +33,9 @@ const PENDING_PER_ADDRESS = 8; // heads one address may keep waiting; the oldest
 const UPSTREAM_WAIT_MS = 30_000; // for run-server to start answering
 const UPSTREAM_RETRY_MS = 200;
 const MAX_CONNECTIONS = 1024;
+const STOP_GRACE_MS = 3_000; // for run-server to close its browsers before its group is killed
+const EXIT_BOUND_MS = 5_000; // the gate is gone this long after a signal, whatever else happens
+const KEEP = "--keep";
 const NOT_FOUND = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const OPTIONS = ["--host", "--port", "--upstream", "--path"];
 const TOKEN_PATH = /^\/[A-Za-z0-9_-]{24,}$/;
@@ -162,21 +171,67 @@ function serve(client, config) {
   client.on("data", onData);
 }
 
-function main() {
-  const config = parse(process.argv.slice(2));
-  const child = childProcess.spawn(config.command[0], config.command.slice(1), {
-    stdio: ["ignore", "ignore", "inherit"],
-  });
-  child.on("error", () => process.exit(1));
-  child.on("exit", (code) => process.exit(code === null ? 1 : code));
-  for (const signal of ["SIGTERM", "SIGINT"]) {
-    process.on(signal, () => child.kill(signal));
+function killGroup(child, signal) {
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    // the group has gone already
   }
+}
+
+// The keeper: run the command in a group of its own, and stop the whole group when told to,
+// when the gate's pipe closes, or when the command exits.
+function keep(command) {
+  const child = childProcess.spawn(command[0], command.slice(1), {
+    stdio: ["ignore", "ignore", "inherit"],
+    detached: true,
+  });
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    killGroup(child, "SIGTERM");
+    setTimeout(() => {
+      killGroup(child, "SIGKILL");
+      process.exit(1);
+    }, STOP_GRACE_MS);
+  };
+  child.on("error", () => process.exit(1));
+  child.on("exit", (code) => {
+    killGroup(child, "SIGKILL"); // anything the command left in its group
+    process.exit(code === null ? 1 : code);
+  });
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+  process.stdin.on("end", stop);
+  process.stdin.on("error", stop);
+  process.stdin.resume();
+}
+
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv[0] === KEEP && argv[1] === "--" && argv.length > 2) {
+    keep(argv.slice(2));
+    return;
+  }
+  const config = parse(argv);
+  // The keeper's end of this pipe closes when the gate goes, however it goes.
+  const keeper = childProcess.spawn(process.execPath, [__filename, KEEP, "--", ...config.command], {
+    stdio: ["pipe", "ignore", "inherit"],
+  });
+  keeper.on("error", () => process.exit(1));
+  keeper.on("exit", (code) => process.exit(code === null ? 1 : code));
+  const stop = (signal) => {
+    keeper.kill(signal);
+    setTimeout(() => process.exit(1), EXIT_BOUND_MS);
+  };
+  process.on("SIGTERM", () => stop("SIGTERM"));
+  process.on("SIGINT", () => stop("SIGINT"));
   const server = net.createServer((client) => serve(client, config));
   server.maxConnections = MAX_CONNECTIONS;
   server.on("error", (error) => {
     console.error(`gate: cannot listen: ${error.code || error.message}`);
-    child.kill("SIGTERM");
+    keeper.kill("SIGTERM");
     process.exit(1);
   });
   server.listen(config.port, config.host, () => {

@@ -8,6 +8,8 @@ answers everything else with an empty 404.
 
 import asyncio
 import contextlib
+import os
+import shutil
 import socket
 import subprocess
 import time
@@ -27,7 +29,36 @@ GATE = ROOT / "images" / "browsers" / "gate.js"
 NODE, CLI = (str(part) for part in compute_driver_executable())
 PATH = "/c2VjcmV0LXBhdGgtZm9yLXRoaXMtcnVuLW9ubHk"
 NOT_FOUND = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-KEEP_RUNNING = [NODE, "-e", "setInterval(() => {}, 1 << 30)"]
+# Every child process a test starts carries this in its command line, so that a test can
+# find any that is left behind.
+MARKER = f"footfall-gate-test-{os.getpid()}"
+KEEP_RUNNING = [NODE, "-e", "setInterval(() => {}, 1 << 30)", MARKER]
+
+
+def keep_running(marker: str) -> list[str]:
+    return [NODE, "-e", "setInterval(() => {}, 1 << 30)", marker]
+
+
+def ignores_term(marker: str) -> list[str]:
+    return [NODE, "-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1 << 30)", marker]
+
+
+PS = shutil.which("ps") or "ps"
+
+
+def running(marker: str) -> list[str]:
+    """The command lines of every process still running that carry `marker`."""
+    listed = subprocess.run([PS, "-axo", "command="], capture_output=True, check=True)
+    return [line for line in listed.stdout.decode().splitlines() if marker in line]
+
+
+def gone(marker: str, within: float) -> bool:
+    deadline = time.monotonic() + within
+    while running(marker):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+    return True
 
 
 def free_port() -> int:
@@ -98,9 +129,20 @@ class Gate:
         assert PATH not in line
 
     def stop(self) -> None:
-        if self.process.poll() is None:
-            self.process.terminate()
-        self.process.communicate(timeout=10)
+        """Stop the gate: terminate it, then kill it if it has not gone in a few seconds,
+        and always close its pipes."""
+        try:
+            if self.process.poll() is None:
+                self.process.terminate()
+            try:
+                self.process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        finally:
+            for pipe in (self.process.stdout, self.process.stderr):
+                if pipe is not None:
+                    pipe.close()
 
 
 @pytest.fixture
@@ -246,10 +288,56 @@ async def test_held_heads_from_one_address_cannot_crowd_out_the_run(
             writer.close()
 
 
+def test_a_stopped_gate_leaves_no_child_behind() -> None:
+    marker = f"{MARKER}-stopped"
+    gate = Gate(free_port(), keep_running(marker))
+    try:
+        assert running(marker)
+        started = time.monotonic()
+        gate.process.terminate()
+        gate.process.wait(timeout=8)
+        assert time.monotonic() - started < 6
+        assert gone(marker, within=2)
+    finally:
+        gate.stop()
+
+
+def test_a_child_that_ignores_sigterm_is_killed_within_a_bound() -> None:
+    # run-server may take its time to close its browsers, longer on some machines than on
+    # others; the gate waits a few seconds, then kills its child's whole group, and exits.
+    marker = f"{MARKER}-stubborn"
+    gate = Gate(free_port(), ignores_term(marker))
+    try:
+        assert running(marker)
+        started = time.monotonic()
+        gate.process.terminate()
+        gate.process.wait(timeout=10)
+        assert time.monotonic() - started < 7
+        assert gone(marker, within=2)
+    finally:
+        gate.stop()
+
+
+def test_a_killed_gate_takes_its_child_with_it() -> None:
+    marker = f"{MARKER}-orphan"
+    gate = Gate(free_port(), keep_running(marker))
+    try:
+        assert running(marker)
+        gate.process.kill()
+        gate.process.wait(timeout=5)
+        assert gone(marker, within=6)
+    finally:
+        gate.stop()
+
+
 def test_the_gate_exits_when_run_server_does() -> None:
-    gate = Gate(free_port(), [NODE, "-e", "setTimeout(() => process.exit(3), 300)"])
-    assert gate.process.wait(timeout=10) == 3
-    gate.stop()
+    marker = f"{MARKER}-exits"
+    gate = Gate(free_port(), [NODE, "-e", "setTimeout(() => process.exit(3), 300)", marker])
+    try:
+        assert gate.process.wait(timeout=10) == 3
+    finally:
+        gate.stop()
+    assert gone(marker, within=2)
 
 
 @pytest.mark.parametrize(
@@ -287,6 +375,8 @@ def run_server_behind_gate() -> Iterator[int]:
         yield gate.port
     finally:
         gate.stop()
+    # Neither the gate nor run-server, both of which carry the path, is left running.
+    assert gone(PATH, within=5)
 
 
 async def test_a_real_run_server_is_reached_through_the_gate_alone(
