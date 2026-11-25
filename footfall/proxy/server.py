@@ -34,12 +34,14 @@ client address. The proxy logs one line per decision, with the client's address,
 host, the port and the outcome. It never logs a path, a query string, a header value or a body.
 
 So that no client can rotate earlier decisions out of the log by being refused over and over,
-routine refusals are written up to `refusal_lines` lines for each client and run in each
-`refusal_window` seconds. Routine means the 503 of a connection or lookup bound, and the
-policy's 403 for an unknown client or a host off the list. Past that, they are counted by host
-and written as one line for each host when the window closes, or at once when the client's
-allow list is revoked, under the run they belong to. Every other refusal, such as a TLS hello
-that does not match, is always written in full.
+each client's refusals for each run are written in full only up to a budget in each window of
+`refusal_window` seconds. There are two budgets, so that a flood of routine refusals never uses
+up the lines kept for the rest: `routine_refusal_lines` for the 503 of a connection or lookup
+bound and the policy's 403 for an unknown client or a host off the list, and the larger
+`other_refusal_lines` for every other refusal, such as a TLS hello that does not match. Past a
+budget nothing is dropped: refusals are counted by host and reason, and written as one summary
+line for each, with its count and run, when the window closes, or at once when the client's
+allow list is revoked.
 
 Each run's names are looked up on a small pool of threads of its own, made at the run's first
 lookup and shut down when the run is revoked, never on a pool that runs share. A lookup's thread
@@ -330,29 +332,40 @@ def _log(client: str, run_id: str | None, host: str, port: int | None, outcome: 
 
 
 @dataclass(eq=False)
+class _Budget:
+    """The lines of one kind a client has written for a run in a window, and what it holds."""
+
+    kind: str  # "routine refusals" or "other refusals", for the lines that say what happened
+    lines: int
+    written: int = 0
+    held: Counter[tuple[str, str]] = field(default_factory=Counter)  # by host and outcome
+    others: int = 0  # held past MOST_HELD hosts and reasons
+
+
+@dataclass(eq=False)
 class _Window:
-    """One client's routine refusals for one run, from the first until the window closes."""
+    """One client's refusals for one run, from the first until the window closes."""
 
     timer: asyncio.TimerHandle
-    written: int = 0
-    held: Counter[str] = field(default_factory=Counter)  # by host, past the lines allowed
-    others: int = 0  # held for hosts past MOST_HOSTS
+    routine: _Budget
+    other: _Budget
 
 
 class _RefusalLog:
-    """Writes the proxy's refusal lines, summarising the repeats of routine ones.
+    """Writes the proxy's refusal lines, summarising what is past a budget.
 
-    Routine refusals are written up to `lines` lines for each client and run in a window of
-    `window` seconds, which starts with the first. Past that they are counted by host, for up
-    to `MOST_HOSTS` hosts and together for any more, and written as one line for each when the
-    window closes or the client is forgotten, under the run they belong to. Every other refusal
-    is written as it happens. Every method runs on the event loop.
+    For each client and run, a window of `window` seconds starts with the first refusal. In it,
+    `routine_lines` routine refusals and `other_lines` others are written in full. Past its
+    budget a refusal is counted by host and outcome, for up to `MOST_HELD` of them and together
+    for any more, and each count is written as one summary line when the window closes or the
+    client is forgotten, under the run it belongs to. Every method runs on the event loop.
     """
 
-    MOST_HOSTS: Final = 32
+    MOST_HELD: Final = 32
 
-    def __init__(self, lines: int, window: float) -> None:
-        self._lines = lines
+    def __init__(self, routine_lines: int, other_lines: int, window: float) -> None:
+        self._routine_lines = routine_lines
+        self._other_lines = other_lines
         self._window = window
         self._windows: dict[tuple[str, str | None], _Window] = {}  # by client and run
 
@@ -366,26 +379,28 @@ class _RefusalLog:
         *,
         routine: bool,
     ) -> None:
-        if not routine:
-            _log(client, run_id, host, port, outcome)
-            return
         key = (_client_key(client), run_id)
         window = self._windows.get(key)
         if window is None:
             timer = asyncio.get_running_loop().call_later(self._window, self._close, key)
-            window = self._windows[key] = _Window(timer)
-        if window.written < self._lines:
-            window.written += 1
-            if window.written == self._lines:
+            window = self._windows[key] = _Window(
+                timer,
+                _Budget("routine refusals", self._routine_lines),
+                _Budget("other refusals", self._other_lines),
+            )
+        budget = window.routine if routine else window.other
+        if budget.written < budget.lines:
+            budget.written += 1
+            if budget.written == budget.lines:
                 outcome += (
-                    "; further routine refusals for this client and run are summarised by host"
+                    f"; further {budget.kind} for this client and run are summarised"
                     f" for up to {self._window:g} s"
                 )
             _log(client, run_id, host, port, outcome)
-        elif host in window.held or len(window.held) < self.MOST_HOSTS:
-            window.held[host] += 1
+        elif (host, outcome) in budget.held or len(budget.held) < self.MOST_HELD:
+            budget.held[host, outcome] += 1
         else:
-            window.others += 1
+            budget.others += 1
 
     def forget(self, client: str) -> None:
         """Write what is held for a client, under each run it was held for, and forget it."""
@@ -404,16 +419,17 @@ class _RefusalLog:
             return
         window.timer.cancel()
         client, run_id = key
-        for host, count in window.held.items():
-            _log(client, run_id, host, None, f"refused {count} more times, summarised")
-        if window.others:
-            _log(
-                client,
-                run_id,
-                "-",
-                None,
-                f"refused {window.others} more times for other hosts, summarised",
-            )
+        for budget in (window.routine, window.other):
+            for (host, outcome), count in budget.held.items():
+                _log(client, run_id, host, None, f"summary of {count} more refusals: {outcome}")
+            if budget.others:
+                _log(
+                    client,
+                    run_id,
+                    "-",
+                    None,
+                    f"summary of {budget.others} more {budget.kind} for other hosts and reasons",
+                )
 
 
 # ---------------------------------------------------------------- moving bytes
@@ -695,7 +711,8 @@ class ProxyServer:
         max_per_client: int = 128,
         max_lookups_per_client: int = 8,
         max_lookups_per_run: int = 16,
-        refusal_lines: int = 20,
+        routine_refusal_lines: int = 20,
+        other_refusal_lines: int = 100,
         refusal_window: float = 60.0,
         lookup_threads: int = 16,
         open_upstream: Opener = _open_upstream,
@@ -708,8 +725,8 @@ class ProxyServer:
             raise ValueError("max_connections and max_per_client must be at least 1")
         if max_lookups_per_client < 1 or max_lookups_per_run < 1 or lookup_threads < 1:
             raise ValueError("the lookup bounds and lookup_threads must be at least 1")
-        if refusal_lines < 1 or refusal_window <= 0:
-            raise ValueError("refusal_lines must be at least 1 and refusal_window positive")
+        if routine_refusal_lines < 1 or other_refusal_lines < 1 or refusal_window <= 0:
+            raise ValueError("the refusal budgets must be at least 1, refusal_window positive")
         if not 0 <= port <= 65535:
             raise ValueError("port must be from 0 to 65535")
         self._policy = policy
@@ -721,7 +738,7 @@ class ProxyServer:
         self._lookup_pools: dict[str, ThreadPoolExecutor] = {}  # by run
         self._max_lookups_per_client = max_lookups_per_client
         self._max_lookups_per_run = max_lookups_per_run
-        self._refusal_log = _RefusalLog(refusal_lines, refusal_window)
+        self._refusal_log = _RefusalLog(routine_refusal_lines, other_refusal_lines, refusal_window)
         # Lookups in flight, by run, client, name and port, and how many each of a run's clients
         # and each run holds. A client is counted with its run, so that a run given an address
         # another run held starts with nothing counted against it.
@@ -1062,7 +1079,9 @@ class ProxyServer:
         except (asyncio.IncompleteReadError, TimeoutError):
             refusal = "no TLS ClientHello arrived"
         if refusal is not None:
-            _log(client, run_id, request.host, request.port, f"refused: {refusal}")
+            self._refusal_log.write(
+                client, run_id, request.host, request.port, f"refused: {refusal}", routine=False
+            )
             return
         _log(client, run_id, request.host, request.port, "allowed")
         upstream = await self._connect(client, request.host, address, request.port)
@@ -1090,6 +1109,13 @@ class ProxyServer:
                 outcomes = await _finish(client, tasks)
             for outcome in outcomes:
                 if isinstance(outcome, _TunnelRefused):
-                    _log(client, run_id, request.host, request.port, f"refused: {outcome}")
+                    self._refusal_log.write(
+                        client,
+                        run_id,
+                        request.host,
+                        request.port,
+                        f"refused: {outcome}",
+                        routine=False,
+                    )
         finally:
             upstream_writer.close()

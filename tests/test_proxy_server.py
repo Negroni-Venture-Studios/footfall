@@ -1174,7 +1174,8 @@ async def test_connections_in_all_are_capped() -> None:
         {"max_lookups_per_client": 0},
         {"max_lookups_per_run": 0},
         {"lookup_threads": 0},
-        {"refusal_lines": 0},
+        {"routine_refusal_lines": 0},
+        {"other_refusal_lines": 0},
         {"refusal_window": 0},
     ],
 )
@@ -1442,20 +1443,58 @@ def proxy_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.name == "footfall.proxy.server"]
 
 
-async def test_routine_refusals_are_summarised_but_a_tls_refusal_is_not(
+async def wait_for_lines(caplog: pytest.LogCaptureFixture, count: int) -> list[str]:
+    async with asyncio.timeout(TIMEOUT):
+        while len(proxy_lines(caplog)) < count:
+            await asyncio.sleep(0.05)
+    return proxy_lines(caplog)
+
+
+async def sni_mismatch(port: int) -> None:
+    """A tunnel to the allowed host whose ClientHello names another, which the proxy refuses."""
+    async with tunnel(port, f"{ALLOWED}:443") as t:
+        t.writer.write(real_client_hello("evil.example.com"))
+        await t.writer.drain()
+        await read_to_end(t.reader)
+
+
+SNI_REFUSAL = "refused: the TLS server name is not the CONNECT host"
+
+
+async def test_a_flood_of_tls_refusals_is_logged_to_its_budget_then_summarised(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO, logger="footfall.proxy.server")
-    async with running(refusal_lines=2, refusal_window=0.6) as live, second_listener(live) as port:
+    async with running(other_refusal_lines=3, refusal_window=0.6) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        for _ in range(8):
+            await sni_mismatch(live.port)
+        logged = proxy_lines(caplog)
+        assert len(logged) == 3
+        assert all(SNI_REFUSAL in line for line in logged)
+        assert "summarised" in logged[2] and "summarised" not in logged[1]
+        # When the window closes, the rest are one line, with the count, host, reason and run.
+        summary = (await wait_for_lines(caplog, 4))[3]
+        assert summary.startswith(f"{CLIENT} run={RUN} host={ALLOWED} ")
+        assert f"summary of 5 more refusals: {SNI_REFUSAL}" in summary
+
+
+async def test_routine_refusals_do_not_use_up_the_budget_of_others(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+    budgets: dict[str, Any] = {
+        "routine_refusal_lines": 2,
+        "other_refusal_lines": 2,
+        "refusal_window": 0.6,
+    }
+    async with running(**budgets) as live, second_listener(live) as port:
         live.policy.allow(CLIENT, RUN, [ALLOWED])
         live.policy.allow(SECOND, OTHER_RUN, [ALLOWED])
         for name in ["evil0", "evil0", "evil0", "evil1", "evil0", "evil1", "evil1"]:
             assert status(await exchange(live.port, get(f"http://{name}.example.com/"))) == 403
-        # Inside the flood: a TLS refusal, an allowed request, another client's refusal.
-        async with tunnel(live.port, f"{ALLOWED}:443") as t:
-            t.writer.write(real_client_hello("evil.example.com"))
-            await t.writer.drain()
-            await read_to_end(t.reader)
+        # After the flood: a TLS refusal, an allowed request, another client's refusal.
+        await sni_mismatch(live.port)
         assert await exchange(live.port, get(f"http://{ALLOWED}/")) == RESPONSE
         reader, writer = await asyncio.open_connection(SECOND, port)
         writer.write(get("http://evil.example.com/"))
@@ -1465,63 +1504,76 @@ async def test_routine_refusals_are_summarised_but_a_tls_refusal_is_not(
         logged = proxy_lines(caplog)
         assert len(logged) == 5
         assert "host=evil0.example.com" in logged[0]
-        assert "host=evil0.example.com" in logged[1] and "summarised by host" in logged[1]
-        assert "refused" in logged[2] and "server name" in logged[2]
+        assert "host=evil0.example.com" in logged[1] and "summarised" in logged[1]
+        assert SNI_REFUSAL in logged[2]
         assert "allowed" in logged[3]
         assert logged[4].startswith(f"{SECOND} ") and "refused" in logged[4]
         # When the window closes, with no refusal after it, the repeats are summed by host.
-        async with asyncio.timeout(TIMEOUT):
-            while len(proxy_lines(caplog)) < 7:
-                await asyncio.sleep(0.05)
-        summaries = sorted(proxy_lines(caplog)[5:])
+        summaries = sorted((await wait_for_lines(caplog, 7))[5:])
         assert summaries[0].startswith(f"{CLIENT} run={RUN} host=evil0.example.com ")
-        assert "refused 2 more times" in summaries[0]
+        assert "summary of 2 more refusals: refused (403): evil0.example.com" in summaries[0]
         assert summaries[1].startswith(f"{CLIENT} run={RUN} host=evil1.example.com ")
-        assert "refused 3 more times" in summaries[1]
+        assert "summary of 3 more refusals: refused (403): evil1.example.com" in summaries[1]
 
 
-async def test_a_revoked_runs_summary_is_written_under_its_own_run(
+async def test_a_revoked_runs_held_refusals_are_written_under_its_own_run(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO, logger="footfall.proxy.server")
-    async with running(refusal_lines=1, refusal_window=60.0) as live:
+    budgets: dict[str, Any] = {
+        "routine_refusal_lines": 1,
+        "other_refusal_lines": 1,
+        "refusal_window": 60.0,
+    }
+    async with running(**budgets) as live:
         live.policy.allow(CLIENT, RUN, [ALLOWED])
         for _ in range(3):
             assert status(await exchange(live.port, get("http://evil.example.com/"))) == 403
-        assert len(proxy_lines(caplog)) == 1
+            await sni_mismatch(live.port)
+        assert len(proxy_lines(caplog)) == 2
         live.policy.revoke(CLIENT)
         live.proxy.drop(CLIENT)
-        logged = proxy_lines(caplog)
-        assert len(logged) == 2
-        assert logged[1].startswith(f"{CLIENT} run={RUN} host=evil.example.com ")
-        assert "refused 2 more times" in logged[1]
-        # The address goes to another run, which starts with a whole budget of its own.
+        summaries = sorted(proxy_lines(caplog)[2:])
+        assert len(summaries) == 2
+        assert summaries[0].startswith(f"{CLIENT} run={RUN} host={ALLOWED} ")
+        assert f"summary of 2 more refusals: {SNI_REFUSAL}" in summaries[0]
+        assert summaries[1].startswith(f"{CLIENT} run={RUN} host=evil.example.com ")
+        assert "summary of 2 more refusals: refused (403)" in summaries[1]
+        # The address goes to another run, which starts with whole budgets of its own.
         live.policy.allow(CLIENT, OTHER_RUN, [ALLOWED])
         assert status(await exchange(live.port, get("http://evil.example.com/"))) == 403
+        await sni_mismatch(live.port)
         logged = proxy_lines(caplog)
-        assert len(logged) == 3
-        assert logged[2].startswith(f"{CLIENT} run={OTHER_RUN} host=evil.example.com ")
-        assert "more times" not in logged[2]
+        assert len(logged) == 6
+        assert logged[4].startswith(f"{CLIENT} run={OTHER_RUN} host=evil.example.com ")
+        assert logged[5].startswith(f"{CLIENT} run={OTHER_RUN} host={ALLOWED} ")
+        assert SNI_REFUSAL in logged[5]
     # The proxy closing writes what it still held, and nothing of the first run's.
-    assert len(proxy_lines(caplog)) == 3
+    assert len(proxy_lines(caplog)) == 6
 
 
 async def test_summaries_name_a_bounded_number_of_hosts(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="footfall.proxy.server")
-    log = _RefusalLog(1, 60.0)
-    for n in range(_RefusalLog.MOST_HOSTS + 6):
-        log.write(
-            CLIENT, RUN, f"host{n}.example.com", 80, "refused (403): off the list", routine=True
-        )
-    log.write(CLIENT, RUN, "host1.example.com", 80, "refused (403): off the list", routine=True)
-    assert len(proxy_lines(caplog)) == 1
+    log = _RefusalLog(1, 1, 60.0)
+    off_list = "refused (403): off the list"
+    for n in range(_RefusalLog.MOST_HELD + 6):
+        log.write(CLIENT, RUN, f"host{n}.example.com", 80, off_list, routine=True)
+    log.write(CLIENT, RUN, "host1.example.com", 80, off_list, routine=True)
+    log.write(CLIENT, RUN, ALLOWED, 443, SNI_REFUSAL, routine=False)
+    log.write(CLIENT, RUN, ALLOWED, 443, SNI_REFUSAL, routine=False)
+    assert len(proxy_lines(caplog)) == 2  # one of each kind, in full
     log.close()
-    summaries = proxy_lines(caplog)[1:]
-    assert len(summaries) == _RefusalLog.MOST_HOSTS + 1
+    summaries = proxy_lines(caplog)[2:]
+    # 38 hosts: 1 written, 32 held by name and 5 in all; the held TLS refusal has its own line.
+    assert len(summaries) == _RefusalLog.MOST_HELD + 2
     assert any(
-        "host=host1.example.com" in line and "refused 2 more times" in line for line in summaries
+        "host=host1.example.com" in line and "summary of 2 more refusals" in line
+        for line in summaries
     )
-    assert summaries[-1].startswith(f"{CLIENT} run={RUN} host=- ")
-    assert "refused 5 more times for other hosts" in summaries[-1]  # 38 hosts: 1, 32 and 5
+    assert any(f"host={ALLOWED}" in line and SNI_REFUSAL in line for line in summaries)
+    others = [line for line in summaries if "host=- " in line]
+    assert len(others) == 1
+    assert others[0].startswith(f"{CLIENT} run={RUN} host=- ")
+    assert "summary of 5 more routine refusals for other hosts" in others[0]
     log.close()  # twice is harmless
-    assert len(proxy_lines(caplog)) == _RefusalLog.MOST_HOSTS + 2
+    assert len(proxy_lines(caplog)) == _RefusalLog.MOST_HELD + 4
