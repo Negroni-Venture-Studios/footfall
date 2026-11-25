@@ -3,8 +3,13 @@ tells the proxy where to listen.
 
 Each connection carries one request and one reply, each a JSON object on one line. A request
 is at most 64 KiB and names an op and exactly that op's fields, each of the right type; anything
-else is refused before the policy sees it. The socket's mode is 0600: the proxy runs as its own
-user, and the runner, which runs as root, is the only other process that can connect.
+else is refused before the policy sees it.
+
+Only the runner, which runs as root, may use the socket. Its mode is 0600, but the proxy and the
+orchestrator run as the same user, so the mode alone does not keep the orchestrator out. The
+proxy therefore asks the kernel which user is at the other end of each connection (SO_PEERCRED
+on Linux, LOCAL_PEERCRED on macOS) and answers only root, refusing everyone else, and everyone
+on a platform that cannot say, before it reads the request.
 
     {"op": "allow", "ip": "10.89.0.10", "run_id": "r_...", "hosts": ["api.example.com"]}
     {"op": "revoke", "ip": "10.89.0.10"}
@@ -31,6 +36,7 @@ import logging
 import os
 import socket
 import stat
+import struct
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
@@ -48,6 +54,13 @@ _DISCARD_LIMIT: Final = 1024 * 1024
 _REPLY_LIMIT: Final = 1024 * 1024
 _MAX_ERROR: Final = 4000
 _SOCKET_MODE: Final = 0o600
+_ROOT: Final = 0
+# What the kernel reports of a Unix socket's peer: struct ucred on Linux (pid, uid, gid), and
+# struct xucred on macOS and the BSDs (a version, which is 0, the uid, then the groups).
+_UCRED: Final = struct.Struct("iII")
+_XUCRED_HEAD: Final = struct.Struct("=II")
+_XUCRED_SIZE: Final = 76
+_SOL_LOCAL: Final = 0
 
 
 class ProxyRefused(ValueError):
@@ -180,15 +193,42 @@ async def _reply(proxy: ProxyServer, reader: asyncio.StreamReader) -> dict[str, 
     return {"ok": True, "result": result}
 
 
+def _peer_uid(sock: socket.socket) -> int | None:
+    """The user id of the process at the other end of a Unix socket, as the kernel reports it,
+    or None if this platform, or the socket, cannot say."""
+    try:
+        peercred = getattr(socket, "SO_PEERCRED", None)
+        if peercred is not None:
+            _, uid, _ = _UCRED.unpack(sock.getsockopt(socket.SOL_SOCKET, peercred, _UCRED.size))
+            return int(uid)
+        local_peercred = getattr(socket, "LOCAL_PEERCRED", None)
+        if local_peercred is not None:
+            raw = sock.getsockopt(_SOL_LOCAL, local_peercred, _XUCRED_SIZE)
+            version, uid = _XUCRED_HEAD.unpack_from(raw)
+            return int(uid) if version == 0 else None
+    except (OSError, struct.error):
+        return None
+    return None
+
+
 async def _handle(
     proxy: ProxyServer,
+    allowed_uid: int,
     gate: asyncio.Semaphore,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
     try:
         async with gate:
-            reply = await _reply(proxy, reader)
+            uid = _peer_uid(writer.get_extra_info("socket"))
+            if uid is None or uid != allowed_uid:
+                logger.warning(
+                    "refused a control connection from user %s",
+                    "unknown" if uid is None else uid,
+                )
+                reply = _failure(f"this control socket answers only user {allowed_uid}")
+            else:
+                reply = await _reply(proxy, reader)
             writer.write(json.dumps(reply).encode() + b"\n")
             await writer.drain()
     except ConnectionError:
@@ -222,14 +262,18 @@ def _bind(path: Path) -> socket.socket:
     return sock
 
 
-async def serve_control(proxy: ProxyServer, socket_path: Path) -> None:
-    """Answer control requests for `proxy` and its policy on `socket_path` until cancelled."""
+async def serve_control(proxy: ProxyServer, socket_path: Path, *, allowed_uid: int = _ROOT) -> None:
+    """Answer control requests for `proxy` and its policy on `socket_path` until cancelled.
+
+    Only a peer running as `allowed_uid` is answered: root, the runner, unless a test says
+    otherwise.
+    """
     sock = _bind(socket_path)
     inode = socket_path.lstat().st_ino
     gate = asyncio.Semaphore(MAX_CONNECTIONS)
     try:
         server = await asyncio.start_unix_server(
-            functools.partial(_handle, proxy, gate), sock=sock, limit=MAX_REQUEST
+            functools.partial(_handle, proxy, allowed_uid, gate), sock=sock, limit=MAX_REQUEST
         )
         async with server:
             await server.serve_forever()

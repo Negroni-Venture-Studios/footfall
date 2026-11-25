@@ -1,12 +1,15 @@
 """The egress proxy's control socket, through `serve_control` and `ProxyControlClient`.
 
 The client is synchronous, as the runner's `ProxyControl` is, so these tests call it from a
-thread while the server runs on the event loop.
+thread while the server runs on the event loop. The socket answers root alone by default; these
+tests run as another user, so they serve it for their own user id, which the kernel reports for
+each connection on Linux (SO_PEERCRED) and on macOS (LOCAL_PEERCRED) alike.
 """
 
 import asyncio
 import contextlib
 import json
+import os
 import socket
 import stat
 import tempfile
@@ -18,6 +21,7 @@ from typing import Any
 
 import pytest
 
+import footfall.proxy.control
 from footfall.proxy.control import (
     MAX_REQUEST,
     ProxyControlClient,
@@ -73,7 +77,7 @@ async def live() -> AsyncIterator[Live]:
     proxy = ProxyServer(policy, port=port)
     with short_directory() as directory:
         path = directory / "p.sock"
-        task = asyncio.create_task(serve_control(proxy, path))
+        task = asyncio.create_task(serve_control(proxy, path, allowed_uid=os.getuid()))
         try:
             await wait_for_socket(path, task)
             yield Live(policy, proxy, ProxyControlClient(path), path, port)
@@ -248,6 +252,56 @@ async def test_policy_refusals_raise_proxy_refused(
     assert live.policy.decide(APP, "api.example.com", 443).allowed  # nothing changed
 
 
+@contextlib.asynccontextmanager
+async def serving(**options: Any) -> AsyncIterator[tuple[Policy, ProxyControlClient]]:
+    """A control socket served with `options`, for tests of who may use it."""
+    policy = Policy()
+    proxy = ProxyServer(policy, port=free_port())
+    with short_directory() as directory:
+        path = directory / "p.sock"
+        task = asyncio.create_task(serve_control(proxy, path, **options))
+        try:
+            await wait_for_socket(path, task)
+            yield policy, ProxyControlClient(path)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await proxy.close()
+
+
+async def test_a_peer_of_another_user_is_refused(caplog: pytest.LogCaptureFixture) -> None:
+    async with serving(allowed_uid=os.getuid() + 1) as (policy, client):
+        with pytest.raises(ProxyRefused, match="answers only user"):
+            await call(client.allow, APP, RUN, ["api.example.com"])
+        assert policy.decide(APP, "api.example.com", 443).run_id is None
+    assert f"from user {os.getuid()}" in caplog.text
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="the tests run as root, the one user it answers")
+async def test_the_control_socket_answers_root_only_by_default() -> None:
+    async with serving() as (policy, client):
+        with pytest.raises(ProxyRefused, match="answers only user 0"):
+            await call(client.allow, APP, RUN, ["api.example.com"])
+        assert policy.decide(APP, "api.example.com", 443).run_id is None
+
+
+async def test_a_peer_the_platform_cannot_name_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(footfall.proxy.control, "_peer_uid", lambda sock: None)
+    async with serving(allowed_uid=os.getuid()) as (policy, client):
+        with pytest.raises(ProxyRefused, match="answers only user"):
+            await call(client.allow, APP, RUN, ["api.example.com"])
+        assert policy.decide(APP, "api.example.com", 443).run_id is None
+
+
+def test_the_peers_user_id_comes_from_the_kernel() -> None:
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    with first, second:
+        assert footfall.proxy.control._peer_uid(first) == os.getuid()
+
+
 def test_unreachable_proxy_raises_os_error() -> None:
     with short_directory() as directory:
         client = ProxyControlClient(directory / "missing.sock")
@@ -339,7 +393,7 @@ async def test_serve_replaces_a_stale_socket_but_not_a_file() -> None:
         stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         stale.bind(str(path))
         stale.close()  # leaves the socket file behind, as a crashed proxy would
-        task = asyncio.create_task(serve_control(proxy, path))
+        task = asyncio.create_task(serve_control(proxy, path, allowed_uid=os.getuid()))
         try:
             client = ProxyControlClient(path)
             for _ in range(500):

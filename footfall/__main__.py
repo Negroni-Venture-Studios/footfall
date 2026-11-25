@@ -187,15 +187,16 @@ async def run_runner(settings: Settings) -> None:
     await serve(service, settings.runner_socket, group=group)
 
 
-async def run_proxy(settings: Settings, *, port: int = PROXY_PORT) -> None:
+async def run_proxy(settings: Settings, *, port: int = PROXY_PORT, allowed_uid: int = 0) -> None:
     """Serve the egress proxy's control socket until stopped.
 
     The proxy listens on no interface of its own: the runner tells it, over the control
     socket, its address on each run's network, and it listens there on `port` for that run.
+    The control socket answers only `allowed_uid`, root, which is the runner's user.
     """
     proxy = ProxyServer(Policy(), port=port)
     try:
-        await serve_control(proxy, settings.proxy_control)
+        await serve_control(proxy, settings.proxy_control, allowed_uid=allowed_uid)
     finally:
         await proxy.close()
 

@@ -466,7 +466,7 @@ async def test_the_proxy_listens_only_where_the_runner_tells_it() -> None:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        task = asyncio.create_task(cli.run_proxy(settings, port=port))
+        task = asyncio.create_task(cli.run_proxy(settings, port=port, allowed_uid=os.getuid()))
         try:
             for _ in range(200):
                 if control.exists():
