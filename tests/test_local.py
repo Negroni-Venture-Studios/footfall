@@ -1205,11 +1205,12 @@ def test_git_runs_with_a_bare_environment_and_no_input(
     monkeypatch.setattr(subprocess, "run", run)
     listing = local._git_files(folder)
     assert PurePosixPath("footfall.toml") in listing.names
-    assert len(calls) == 2  # ls-files, then rev-parse for the git folder
+    assert len(calls) == 3  # ls-files, then rev-parse for the git folder and the common one
     allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL"}
     for command, options in calls:
         assert not any("safe.directory" in part for part in command)
         assert options["stdin"] is subprocess.DEVNULL
+        assert options["start_new_session"] is True  # no terminal of the developer's to read
         env = options["env"]
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         assert env["GIT_OPTIONAL_LOCKS"] == "0"
@@ -1262,7 +1263,7 @@ def test_the_git_folder_is_refused_whatever_it_is_called(tmp_path: Path) -> None
             tmp_path / "workspace",
             [PurePosixPath("meta/config")],
             tmp_path / "out",
-            git_dir=(info.st_dev, info.st_ino),
+            git_dirs=frozenset({(info.st_dev, info.st_ino)}),
         )
     assert not (tmp_path / "workspace" / "meta").exists()
 
@@ -1307,3 +1308,120 @@ def test_the_workspace_must_be_new(tmp_path: Path) -> None:
     (tmp_path / "workspace").mkdir()
     with pytest.raises(FileExistsError):
         local._copy_files(folder, tmp_path / "workspace", [], tmp_path / "out")
+
+
+# ---------------------------------------------------------------- git folders in other places
+
+TOKEN_URL = "https://token-not-real@example.com/app.git"
+
+
+def app_files(folder: Path) -> None:
+    """The two-page app's own files, written into an existing folder."""
+    (folder / "footfall" / "briefs").mkdir(parents=True)
+    (folder / "footfall.toml").write_text(MANIFEST)
+    (folder / "footfall" / "briefs" / "default.md").write_text("Look around both pages.\n")
+    (folder / "serve.py").write_text("print('not run in these tests')\n")
+
+
+def moved_git_folder(folder: Path, name: str) -> Path:
+    """A repository whose git folder is `name`, reached through a .git file."""
+    git(folder, "init", "-q")
+    moved = folder / name
+    (folder / ".git").rename(moved)
+    (folder / ".git").write_text(f"gitdir: {name}\n")
+    git(folder, "config", "remote.origin.url", TOKEN_URL)
+    return moved
+
+
+async def refused_without_the_token(
+    folder: Path, tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    copied: list[bytes] = []
+    real_prepare = FakeRunner.prepare
+
+    class Recording(FakeRunner):
+        async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> None:
+            copied.extend(p.read_bytes() for p in workspace.rglob("*") if p.is_file())
+            await real_prepare(self, run_id, workspace, *rest)
+
+    runner = Recording(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError, match="git folder"):
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert "prepare" not in runner.ops()
+    assert not any(b"token-not-real" in data for data in copied)
+
+
+async def test_a_git_folder_reached_through_a_git_file_is_never_copied(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    folder = two_pages(tmp_path)
+    moved_git_folder(folder, "meta")
+    await refused_without_the_token(folder, tmp_path, connect)
+
+
+async def test_a_git_folder_whose_name_ends_in_a_space_is_never_copied(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    # git keeps the space in "gitdir: meta ", and a decoy called meta stands beside it.
+    folder = two_pages(tmp_path)
+    moved = moved_git_folder(folder, "meta ")
+    (folder / "meta").mkdir()
+    craft_index(moved / "index", ["footfall.toml", "meta /config"])
+    await refused_without_the_token(folder, tmp_path, connect)
+
+
+async def test_a_linked_worktrees_common_folder_is_never_copied(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    # The git folder is meta/worktrees/w, but the configuration is in meta, its common folder.
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    (folder / ".git").rename(folder / "meta")
+    worktree = folder / "meta" / "worktrees" / "w"
+    worktree.mkdir(parents=True)
+    (worktree / "HEAD").write_text("ref: refs/heads/main\n")
+    (worktree / "commondir").write_text("../..\n")
+    (worktree / "gitdir").write_text(f"{folder / '.git'}\n")
+    (folder / ".git").write_text("gitdir: meta/worktrees/w\n")
+    (folder / ".gitignore").write_text("/meta/worktrees/\n")
+    git(folder, "config", "remote.origin.url", TOKEN_URL)
+    await refused_without_the_token(folder, tmp_path, connect)
+
+
+async def test_a_folder_that_is_itself_the_git_folder_is_never_copied(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    # Tested from inside the git folder, whose core.worktree is its parent: its config and
+    # HEAD are listed at the top, where no folder above them is opened.
+    top = tmp_path / "top"
+    top.mkdir()
+    git(top, "init", "-q")
+    folder = top / "app"
+    (top / ".git").rename(folder)
+    subprocess.run([GIT, "--git-dir", str(folder), "config", "core.worktree", ".."], check=True)
+    subprocess.run(
+        [GIT, "--git-dir", str(folder), "config", "remote.origin.url", TOKEN_URL], check=True
+    )
+    app_files(folder)
+    await refused_without_the_token(folder, tmp_path, connect)
+
+
+async def test_all_files_never_copies_the_git_folder(
+    tmp_path: Path, app_server: AppServer, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    serve_two_pages(app_server)
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    git(folder, "config", "remote.origin.url", TOKEN_URL)
+    other = tmp_path / "other"
+    other.mkdir()
+    moved_git_folder(other, "meta")
+    (folder / "vendored").symlink_to(other)  # a link is copied as a link, never followed
+    nested = folder / "lib"
+    nested.mkdir()
+    moved_git_folder(nested, "meta")  # a moved git folder, which only git can name
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    await run_folder(folder, runner, connect[0], tmp_path, all_files=True)
+    assert not any(".git" in name.split("/") for name in runner.workspace_files)
+    assert "lib/.git" not in runner.workspace_files
+    assert not any(name.startswith(".git") for name in runner.workspace_files)

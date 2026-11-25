@@ -535,3 +535,90 @@ async def test_a_handle_is_let_go_when_its_frame_cannot_be_read() -> None:
     with pytest.raises(PlaywrightError):
         await browsers._on_app(Page(), Locator(), "http://10.89.0.11:8080", 1000)  # type: ignore[arg-type]
     assert disposed == [True]
+
+
+APP = "http://10.89.0.11:8080"
+
+
+class _Frame:
+    """A main frame whose address can be set to change after it has been read `reads` times."""
+
+    def __init__(self, url: str) -> None:
+        self._url = url
+        self.moves_after: int | None = None
+
+    @property
+    def url(self) -> str:
+        if self.moves_after is not None:
+            if self.moves_after == 0:
+                self._url, self.moves_after = "http://10.89.0.99:8080/login", None
+            else:
+                self.moves_after -= 1
+        return self._url
+
+
+class _Handle:
+    def __init__(self, page: "_FakePage", role: str) -> None:
+        self.page = page
+        self.role = role
+
+    async def owner_frame(self) -> _Frame:
+        frame = self.page.main_frame
+        if self.role == "button":
+            # The page moves on once the last handle has been taken and checked: the check
+            # reads the address once more, and then it is elsewhere.
+            frame.moves_after = 1
+        return frame
+
+    async def fill(self, value: str, timeout: float) -> None:
+        self.page.acted.append(("fill", self.role))
+
+    async def click(self, timeout: float) -> None:
+        self.page.acted.append(("click", self.role))
+
+    async def dispose(self) -> None:
+        pass
+
+
+class _Locator:
+    def __init__(self, page: "_FakePage", role: str) -> None:
+        self.page = page
+        self.role = role
+
+    async def element_handle(self, timeout: float) -> _Handle:
+        return _Handle(self.page, self.role)
+
+
+class _FakePage:
+    def __init__(self) -> None:
+        self.main_frame = _Frame(APP + "/")
+        self.acted: list[tuple[str, str]] = []
+
+    @property
+    def url(self) -> str:
+        return self.main_frame.url
+
+    async def goto(self, url: str, timeout: float) -> None:
+        self.main_frame = _Frame(url)
+
+    def get_by_label(self, label: str, exact: bool) -> _Locator:
+        return _Locator(self, label)
+
+    def get_by_role(self, role: str, name: str, exact: bool) -> _Locator:
+        return _Locator(self, role)
+
+
+def test_still_on_app_refuses_a_main_frame_off_the_app() -> None:
+    page = _FakePage()
+    browsers._still_on_app(page, APP)  # type: ignore[arg-type]
+    page.main_frame.moves_after = 0
+    with pytest.raises(browsers._LeftTheApp):
+        browsers._still_on_app(page, APP)  # type: ignore[arg-type]
+
+
+async def test_sign_in_fills_nothing_once_the_page_has_moved_on() -> None:
+    # Every handle was taken while the page was on the app; then the main frame left it.
+    page = _FakePage()
+    with pytest.raises(SignInError, match="left the app"):
+        await sign_in(page, LOGIN, USERNAME, PASSWORD, APP)  # type: ignore[arg-type]
+    assert page.acted == []

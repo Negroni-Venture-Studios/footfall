@@ -98,7 +98,8 @@ def test_footfall_image_installs_git_from_its_own_release() -> None:
     assert "rm -rf /var/lib/apt/lists/*" in runtime
     # Only the dev stack's mount point is trusted, whoever owns it, and only system-wide.
     assert re.search(r"&& git config --system --add safe\.directory /repo\b", runtime)
-    assert "safe.directory '*'" not in text and "safe.directory=*" not in text
+    assert re.findall(r"safe\.directory\s+(\S+)", text) == ["/repo"]
+    assert "safe.directory=" not in text
     assert "safe.directory" not in (ROOT / "footfall" / "local.py").read_text()
     assert re.search(r"^FROM python:[^ ]+-trixie@sha256:", runtime, re.MULTILINE)
 
@@ -108,18 +109,19 @@ def test_footfall_image_installs_git_from_its_own_release() -> None:
 
 def _pattern(text: str) -> re.Pattern[str]:
     """A .dockerignore pattern as a regular expression, as Docker's matcher reads it: `*`
-    and `?` stay within one folder, `**` crosses folders, `**/` may match no folder at all,
-    and `[...]` is a character class."""
+    and `?` stay within one folder, `**` and `**/` stand for any folders or none, a final
+    `**` for anything, and `[...]` is a character class."""
     parts = []
     index = 0
     clean = text.strip().strip("/")
     while index < len(clean):
-        if clean.startswith("**/", index):
-            parts.append("(?:.*/)?")
-            index += 3
-        elif clean.startswith("**", index):
-            parts.append(".*")
+        if clean.startswith("**", index):
+            # As Docker's patternmatcher compiles it: a / after ** is eaten, and ** stands for
+            # any folders or none, except at the end, where it stands for anything.
             index += 2
+            if clean.startswith("/", index):
+                index += 1
+            parts.append(".*" if index == len(clean) else "(?:.*/)?")
         elif clean[index] == "[" and "]" in clean[index + 1 :]:
             end = clean.index("]", index + 1)
             parts.append(clean[index : end + 1])
@@ -206,6 +208,10 @@ def test_the_matcher_reads_patterns_as_docker_does() -> None:
     assert not admitted("notes3.txt", "notes[0-9].txt")
     assert admitted("notesX.txt", "notes[0-9].txt")
     assert not admitted("a/b", "a/*")
+    # A ** inside a pattern stands for any folders, or none, as Docker reads it.
+    assert not admitted("a/b", "a/**b")
+    assert not admitted("a/x/y/b", "a/**b")
+    assert admitted("a/xb", "a/**b")
     assert admitted("a/b/c", "*/b\n!a/b/c") is True
 
 
