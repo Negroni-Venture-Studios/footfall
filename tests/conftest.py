@@ -17,20 +17,36 @@ LOOPBACK = {"127.0.0.1", "::1"}
 OTHER_HOSTS = ("evil.test", "assets.test")
 
 
+def _check(sock: socket.socket, address: Any) -> None:
+    """Raise unless the address is a Unix socket or loopback."""
+    if sock.family == socket.AF_UNIX:
+        return
+    host = address[0] if isinstance(address, tuple) else address
+    if host not in LOOPBACK:
+        raise OSError(f"network blocked in tests: {host}")
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test reaches the internet: only loopback and Unix sockets may be connected to."""
+    """No test reaches the internet: only loopback and Unix sockets may be connected to.
+
+    Both ways a socket connects are guarded: `connect`, and `connect_ex`, which returns an
+    error number instead of raising. A refused `connect_ex` raises all the same, so that
+    no caller mistakes the refusal for an ordinary failure to connect.
+    """
     real_connect: Callable[[socket.socket, Any], None] = socket.socket.connect
+    real_connect_ex: Callable[[socket.socket, Any], int] = socket.socket.connect_ex
 
     def guarded(self: socket.socket, address: Any) -> None:
-        if self.family == socket.AF_UNIX:
-            return real_connect(self, address)
-        host = address[0] if isinstance(address, tuple) else address
-        if host not in LOOPBACK:
-            raise OSError(f"network blocked in tests: {host}")
+        _check(self, address)
         return real_connect(self, address)
 
+    def guarded_ex(self: socket.socket, address: Any) -> int:
+        _check(self, address)
+        return real_connect_ex(self, address)
+
     monkeypatch.setattr(socket.socket, "connect", guarded)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_ex)
 
 
 @pytest.fixture
