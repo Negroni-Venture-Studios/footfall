@@ -13,7 +13,7 @@ import socket
 import stat
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
@@ -49,6 +49,14 @@ async def main(op, run_id):
         if op == "browsers":
             await client.start_browsers(run_id, [])  # its endpoint holds a secret: never shown
             return {"ok": True}
+        if op == "echo":
+            start = "python3 probes/probe.py echo 8053"
+            address = await client.start_app(run_id, "echo", start, 8053, [])
+            for _ in range(180):
+                if "FOOTFALL-READY" in await client.logs(run_id, "echo"):
+                    return {"address": address}
+                await asyncio.sleep(0.5)
+            return {"error": "the echo server did not start"}
         await client.stop(run_id)
         shutil.rmtree(WORKSPACES / run_id, ignore_errors=True)
         return {"ok": True}
@@ -190,6 +198,95 @@ def test_the_proxy_listens_only_at_a_live_runs_address(engine: DockerEngine) -> 
     assert while_live == [on_run]
     assert on_bridge == "ConnectionRefusedError"
     assert after == []
+
+
+# Run with node in the browser container: each datagram target is sent a DNS question and a
+# STUN binding request, as a page's WebRTC would send one, and each name is looked up as the
+# browsers would look it up. One line of JSON says what answered.
+_FROM_THE_BROWSERS = r"""
+const dgram = require("dgram");
+const dns = require("dns").promises;
+const { datagrams, names } = JSON.parse(process.argv[1]);
+const question = Buffer.from(
+  "123401000001000000000000076578616d706c6503636f6d0000010001", "hex");
+const stun = Buffer.concat([
+  Buffer.from("000100002112a442", "hex"), Buffer.from("f00df00df00df00df00df00d", "hex")]);
+function send(target, payload) {
+  const at = target.lastIndexOf(":");
+  const host = target.slice(0, at), port = Number(target.slice(at + 1));
+  return new Promise((resolve) => {
+    const sock = dgram.createSocket("udp4");
+    let timer;
+    const done = (outcome) => {
+      clearTimeout(timer);
+      try { sock.close(); } catch (error) {}
+      resolve(outcome);
+    };
+    timer = setTimeout(() => done("no answer"), 5000);
+    sock.on("message", (message) => done(`answered ${message.length} bytes`));
+    sock.on("error", (error) => done(error.code || String(error)));
+    sock.send(payload, port, host, (error) => { if (error) done(error.code || String(error)); });
+  });
+}
+function look(name) {
+  const late = new Promise((resolve) => setTimeout(() => resolve("no answer"), 30000));
+  return Promise.race([
+    dns.lookup(name).then((found) => [found.address], (error) => error.code || String(error)),
+    late,
+  ]);
+}
+(async () => {
+  const result = { dns: {}, stun: {}, names: {} };
+  await Promise.all([
+    ...datagrams.map(async (t) => { result.dns[t] = await send(t, question); }),
+    ...datagrams.map(async (t) => { result.stun[t] = await send(t, stun); }),
+    ...names.map(async (name) => { result.names[name] = await look(name); }),
+  ]);
+  console.log(JSON.stringify(result));
+  process.exit(0);
+})();
+"""
+# Docker's resolver, public resolvers, and STUN servers a page's WebRTC might use: Google's
+# and Cloudflare's, by address, since no outside name resolves.
+_OUTSIDE: Final = (
+    "127.0.0.11:53",
+    "8.8.8.8:53",
+    "1.1.1.1:53",
+    "74.125.250.129:19302",
+    "162.159.207.0:3478",
+)
+
+
+def test_the_browser_container_sends_no_datagram_or_lookup_out_of_the_run(
+    engine: DockerEngine,
+) -> None:
+    """Ruling R75, with WebRTC and STUN in mind: V-02 showed that nothing leaves an app
+    container by datagram or name lookup, and this shows the same of the browser container,
+    from inside it. No DNS question or STUN binding request by datagram is answered, by
+    Docker's resolver, a public resolver or a STUN server, and no outside name resolves. The
+    controls: an echo server on the run's network answers both datagrams, and the proxy's
+    name, which the container's hosts file holds, resolves."""
+    run_id = new_run_id()
+    container = f"footfall-{run_id}-browsers-browsers"
+    try:
+        assert drive("prepare", run_id) == {"ok": True}
+        echo = drive("echo", run_id)
+        assert "address" in echo, echo
+        assert drive("browsers", run_id) == {"ok": True}
+        asked = {"datagrams": [echo["address"], *_OUTSIDE], "names": [PROXY, "example.com"]}
+        done = in_container(container, "node", "-e", _FROM_THE_BROWSERS, json.dumps(asked))
+        resolver = in_container(container, "cat", "/etc/resolv.conf").stdout[:2000]
+    finally:
+        drive("stop", run_id)
+    assert done.returncode == 0, done.stderr[-2000:]
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    record("the resolver the browser container is given", resolver)
+    record("datagrams and lookups from the browser container", found)
+    for kind in ("dns", "stun"):
+        assert found[kind].pop(echo["address"]).startswith("answered"), found  # the control
+        assert not any(outcome.startswith("answered") for outcome in found[kind].values())
+    assert isinstance(found["names"].pop(PROXY), list), found  # the control: its hosts file
+    assert not any(isinstance(outcome, list) for outcome in found["names"].values()), found
 
 
 def _inspect(engine: DockerEngine, what: str) -> dict[str, Any]:
