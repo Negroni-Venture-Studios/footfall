@@ -36,6 +36,7 @@ from tests.isolation.live import (
     ProxyLog,
     address_of,
     allowed,
+    fact,
     lines,
     refused,
 )
@@ -155,6 +156,13 @@ async def test_the_browser_container_runs_on_gvisors_kernel(browsers: Browsers) 
     shown = re.findall(r"Operating system[^\n]{0,60}", text)
     found = set(re.findall(r"Operating system\s*:?\s*Linux\s+(\d+\.\d+\.\d+)-gvisor", text))
     host = re.match(r"\d+\.\d+\.\d+", os.uname().release)
+    fact(
+        "the kernel release full Chromium reports in the browser container",
+        {
+            "chromium": [f"{release}-gvisor" for release in sorted(found)],
+            "orchestrator": os.uname().release,
+        },
+    )
     assert host is not None
     # gVisor names itself in the release it reports, such as 4.19.0-gvisor; the host's own
     # kernel, which the orchestrator runs on, is another release.

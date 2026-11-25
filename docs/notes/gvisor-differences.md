@@ -1,6 +1,6 @@
 # Where gVisor differs from Linux
 
-The isolation workflow runs Footfall's containers under [gVisor](https://gvisor.dev/), Google's user-space kernel, release 20261026, on GitHub's Ubuntu 24.04 runners with Docker 28.0.4. These are the places where a test found gVisor behaving differently from Linux, and what Footfall does about each. Every isolation run writes what it finds on each of them to the job's log as a `FOOTFALL-FACT` line, so these notes can be checked against any run; the figures here are from run 45656207833, on 25 November 2026. They belong in the plain-English `docs/security.md` for deployers that the design promises.
+The isolation workflow runs Footfall's containers under [gVisor](https://gvisor.dev/), Google's user-space kernel, release 20261026, on GitHub's Ubuntu 24.04 runners with Docker 28.0.4. These are the places where a test found gVisor behaving differently from Linux, and what Footfall does about each. Every isolation run writes what it finds on each difference below to the job's log as a `FOOTFALL-FACT` line, so these notes can be checked against any run; the Docker facts at the end go to the job's summary instead. The figures here are from run 45656207833, on 25 November 2026. They belong in the plain-English `docs/security.md` for deployers that the design promises.
 
 ## Docker's name service does not answer
 
