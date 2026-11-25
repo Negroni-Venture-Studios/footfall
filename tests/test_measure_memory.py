@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 from types import ModuleType
 
@@ -85,16 +86,67 @@ def test_peaks_keep_the_largest_container_and_the_largest_total_of_each_role() -
         "containers": 2,
         "peak_one_mib": 100.0,
         "peak_all_mib": 170.0,
+        "kernel_peak_one_mib": None,
+        "kernel_peak_sum_mib": None,
     }
-    assert report["roles"]["proxy"] == {"containers": 1, "peak_one_mib": 40.0, "peak_all_mib": 40.0}
+    assert report["roles"]["proxy"]["peak_one_mib"] == 40.0
     assert "unrelated" not in json.dumps(report)
     assert report["peak_total_mib"] == 170.0
     table = peaks.markdown()
-    assert "| app | 2 | 100.0 | 170.0 |" in table
-    assert "| proxy | 1 | 40.0 | 40.0 |" in table
+    assert "| app | 2 | 100.0 | 170.0 | not read | not read |" in table
+
+
+def test_the_kernels_own_peak_outranks_any_sample() -> None:
+    # A sample can fall between a container's highest moments, and a short-lived container
+    # between two samples; the cgroup's memory.peak is the kernel's own high-water mark.
+    peaks = measure.Peaks()
+    mib = 1024**2
+    sven, grace = f"footfall-{RUN}-app-sven", f"footfall-{RUN}-app-grace"
+    peaks.add([(sven, 30 * mib), (grace, 20 * mib)])
+    peaks.note_peak(sven, 120 * mib)
+    peaks.note_peak(sven, 110 * mib)  # read later; the peak never falls
+    peaks.note_peak(grace, 60 * mib)
+    peaks.note_peak(f"footfall-{RUN}-seed-prepare", 45 * mib)  # never sampled
+    peaks.note_peak("unrelated", 999 * mib)
+    report = peaks.to_json()
+    assert report["roles"]["app"]["kernel_peak_one_mib"] == 120.0
+    assert report["roles"]["app"]["kernel_peak_sum_mib"] == 180.0
+    assert report["roles"]["seed"]["containers"] == 1
+    assert report["roles"]["seed"]["kernel_peak_one_mib"] == 45.0
+    assert report["kernel_peak_sum_mib"] == 225.0
+    assert "| seed | 1 | 0.0 | 0.0 | 45.0 | 45.0 |" in peaks.markdown()
+
+
+def test_cgroup_files_are_read_where_docker_puts_them(tmp_path: Path) -> None:
+    full = "a" * 64
+    scope = tmp_path / "system.slice" / f"docker-{full}.scope"
+    scope.mkdir(parents=True)
+    (scope / "memory.peak").write_text("52428800\n")
+    (scope / "memory.current").write_text("1048576\n")
+    assert measure.cgroup_memory(full, roots=(tmp_path / "system.slice",)) == (1048576, 52428800)
+    assert measure.cgroup_memory("b" * 64, roots=(tmp_path / "system.slice",)) is None
+    plain = tmp_path / "docker" / full
+    plain.mkdir(parents=True)
+    (plain / "memory.current").write_text("2048\n")
+    (plain / "memory.peak").write_text("max\n")  # unreadable as a number: no peak
+    assert measure.cgroup_memory(full, roots=(tmp_path / "docker",)) == (2048, None)
+
+
+def test_a_docker_command_that_hangs_gives_no_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    def hang(*args: object, **options: object) -> None:
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=1)
+
+    monkeypatch.setattr(measure.subprocess, "run", hang)
+    assert measure.sample() == []
+    assert measure.containers() == []
 
 
 def test_no_samples_say_so() -> None:
     peaks = measure.Peaks()
-    assert peaks.to_json() == {"samples": 0, "roles": {}, "peak_total_mib": 0.0}
+    assert peaks.to_json() == {
+        "samples": 0,
+        "roles": {},
+        "peak_total_mib": 0.0,
+        "kernel_peak_sum_mib": 0.0,
+    }
     assert "No container was sampled" in peaks.markdown()
