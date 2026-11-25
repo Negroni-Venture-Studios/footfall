@@ -40,6 +40,8 @@ class Engine(Protocol):
     def disconnect(self, network: str, container: str) -> None: ...
     def remove_network(self, name: str) -> None: ...
     def containers(self, label: str) -> list[str]: ...
+    def labelled(self, key: str) -> list[tuple[str, str]]: ...
+    def labelled_networks(self, key: str) -> list[tuple[str, str]]: ...
 
 
 class _UnixConnection(http.client.HTTPConnection):
@@ -241,3 +243,28 @@ class DockerEngine:
         ):
             raise EngineError("Docker sent a list of containers of the wrong shape")
         return [item["Id"] for item in items]
+
+    def labelled(self, key: str) -> list[tuple[str, str]]:
+        """Return (id, the label's value) for every container, running or not, carrying the
+        label `key` with any value."""
+        query = urlencode({"all": 1, "filters": json.dumps({"label": [key]})}, quote_via=quote)
+        _, data = self._request("GET", f"/containers/json?{query}")
+        return _labelled(self._json(data), "Id", key, "containers")
+
+    def labelled_networks(self, key: str) -> list[tuple[str, str]]:
+        """Return (name, the label's value) for every network carrying the label `key`."""
+        query = urlencode({"filters": json.dumps({"label": [key]})}, quote_via=quote)
+        _, data = self._request("GET", f"/networks?{query}")
+        return _labelled(self._json(data), "Name", key, "networks")
+
+
+def _labelled(items: Any, name: str, key: str, what: str) -> list[tuple[str, str]]:
+    """(name, label value) from a list of Docker's objects, each with `name` and `Labels`."""
+    if not isinstance(items, list) or not all(
+        isinstance(item, dict)
+        and isinstance(item.get(name), str)
+        and isinstance(item.get("Labels"), dict)
+        for item in items
+    ):
+        raise EngineError(f"Docker sent a list of {what} of the wrong shape")
+    return [(item[name], str(item["Labels"].get(key, ""))) for item in items]

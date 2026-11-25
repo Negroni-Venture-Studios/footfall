@@ -172,6 +172,22 @@ class FakeEngine:
                 if self.configs[name]["Labels"].get(key) == value
             ]
 
+    def labelled(self, key: str) -> list[tuple[str, str]]:
+        with self._lock:
+            self.calls.append(("labelled", key))
+            self._maybe_fail("labelled")
+            return [
+                (container_id, self.configs[name]["Labels"][key])
+                for name, container_id in self.live.items()
+                if key in self.configs[name]["Labels"]
+            ]
+
+    def labelled_networks(self, key: str) -> list[tuple[str, str]]:
+        with self._lock:
+            self.calls.append(("labelled_networks", key))
+            self._maybe_fail("labelled_networks")
+            return [(name, labels[key]) for name, labels in self.networks.items() if key in labels]
+
     def names(self, method: str) -> list[str]:
         """The first argument of every call to `method`, in order."""
         return [call[1] for call in self.calls if call[0] == method]

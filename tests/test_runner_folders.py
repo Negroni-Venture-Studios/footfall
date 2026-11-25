@@ -15,7 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from footfall.runner.service import RunnerError, RunnerService, RunnerSetupError, _open_path
+from footfall.runner.service import (
+    LIFETIME_REASON,
+    SWEPT_REASON,
+    RunnerError,
+    RunnerService,
+    RunnerSetupError,
+    _open_path,
+)
 from tests.runner_fakes import (
     BROWSERS_IMAGE,
     IMAGES,
@@ -25,6 +32,7 @@ from tests.runner_fakes import (
     FakeProxy,
     Harness,
     make_harness,
+    recording,
 )
 
 RUN = "r_abcdefghijklmnopqrstuvwxyz"
@@ -286,3 +294,125 @@ def test_a_deep_tree_is_removed_under_a_low_open_file_limit(h: Harness) -> None:
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
     assert not (h.runs / RUN).exists()
+
+
+# ---------------------------------------------------------------- what an earlier runner left
+
+
+def restarted(h: Harness, **settings: object) -> RunnerService:
+    """A second runner over the same Docker, proxy and folders, as after a restart."""
+    return RunnerService(
+        h.engine,
+        h.proxy,
+        workspaces=h.workspaces,
+        runs=h.runs,
+        images=IMAGES,
+        browsers_image=BROWSERS_IMAGE,
+        proxy_container=PROXY,
+        orchestrator_container=ORCHESTRATOR,
+        chown=recording(h.chowned.append),
+        runs_owner=os.getuid(),
+        clock=h.clock,
+        **settings,  # type: ignore[arg-type]
+    )
+
+
+OTHER = "r_" + "q" * 26
+THIRD = "r_" + "t" * 26
+
+
+def test_a_runner_removes_what_an_earlier_runner_left_before_it_serves(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit F-08, ruling R67: a run the runner has no record of is never measured or ended,
+    so at start it removes every labelled container and network and every run folder."""
+    h.workspace()
+    h.service.prepare(RUN, h.workspaces / "app", "python3.13", None, None, [], {})
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, ["api.example.com"])
+    (h.runs / OTHER / "prepared").mkdir(parents=True)  # a folder whose run Docker forgot
+    (h.runs / OTHER / "prepared" / "left.txt").write_text("left\n")
+    h.engine.create_network({"Name": f"footfall-{THIRD}", "Labels": {"footfall.run": THIRD}})
+
+    later = restarted(h)
+    with caplog.at_level("WARNING", logger="footfall.runner.service"):
+        assert later.sweep() == sorted([RUN, OTHER, THIRD])
+
+    assert h.engine.live == {}
+    assert h.engine.networks == {}
+    assert h.engine.attached == set()
+    assert h.proxy.allowed == {}
+    assert list(h.runs.iterdir()) == []
+    for run_id in (RUN, OTHER, THIRD):
+        assert ("revoke_run", run_id) in h.proxy.calls
+        assert later.status(run_id) == SWEPT_REASON
+        assert any(run_id in record.getMessage() for record in caplog.records)
+    with pytest.raises(RunnerError, match="was stopped"):
+        later.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+
+
+def test_a_sweep_with_nothing_left_does_nothing(h: Harness) -> None:
+    assert restarted(h).sweep() == []
+    listing = ("labelled", "labelled_networks")
+    assert [call for call in h.engine.calls if call[0] not in listing] == []
+
+
+def test_a_sweep_that_cannot_list_what_docker_holds_stops_the_runner(h: Harness) -> None:
+    from footfall.runner.engine import EngineError
+
+    h.engine.fail("labelled", EngineError("Cannot connect to the Docker daemon"))
+    with pytest.raises(EngineError):
+        restarted(h).sweep()
+
+
+def test_a_run_the_sweep_cannot_remove_is_kept_for_the_watch(h: Harness) -> None:
+    from footfall.runner.engine import EngineError
+
+    h.workspace()
+    h.service.prepare(RUN, h.workspaces / "app", "python3.13", None, None, [], {})
+    h.engine.fail("remove_network", EngineError("network is busy"))
+    later = restarted(h)
+    later.sweep()
+    status = later.status(RUN)
+    assert status is not None and "network is busy" in status
+    assert f"footfall-{RUN}" in h.engine.networks
+
+    h.engine.failures.clear()
+    h.clock.advance(60)
+    later.check_runs()
+    assert h.engine.networks == {}
+    assert not (h.runs / RUN).exists()
+    assert later.status(RUN) == SWEPT_REASON
+
+
+def test_a_folder_that_is_not_a_run_is_left_and_named(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    (h.runs / "lost+found").mkdir()
+    with caplog.at_level("WARNING", logger="footfall.runner.service"):
+        assert restarted(h).sweep() == []
+    assert (h.runs / "lost+found").is_dir()
+    assert any("lost+found" in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------- a run's lifetime
+
+
+def test_a_run_past_its_lifetime_is_stopped(tmp_path: Path) -> None:
+    h = make_harness(tmp_path / "h", lifetime=1234.0)
+    h.workspace()
+    h.service.prepare(RUN, h.workspaces / "app", "python3.13", None, None, [], {})
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    h.clock.advance(1233)
+    h.service.check_runs()
+    assert h.service.status(RUN) is None
+    assert h.engine.live != {}
+    h.clock.advance(2)
+    h.service.check_runs()
+    assert h.service.status(RUN) == LIFETIME_REASON
+    assert h.engine.live == {}
+    assert not (h.runs / RUN).exists()
+
+
+def test_a_lifetime_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="lifetime"):
+        make_harness(tmp_path / "h", lifetime=0)

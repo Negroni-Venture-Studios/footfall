@@ -250,6 +250,55 @@ def test_containers_filters_by_label(docker: tuple[FakeDocker, DockerEngine]) ->
     assert json.loads(params["filters"][0]) == {"label": ["footfall.run=r_x"]}
 
 
+def test_labelled_lists_every_container_with_the_label_and_its_value(
+    docker: tuple[FakeDocker, DockerEngine],
+) -> None:
+    fake, engine = docker
+    fake.on(
+        "GET",
+        "/containers/json",
+        json_reply(
+            200,
+            [
+                {"Id": "a1", "Labels": {"footfall.run": "r_one", "other": "x"}},
+                {"Id": "b2", "Labels": {"footfall.run": "r_two"}},
+            ],
+        ),
+    )
+    assert engine.labelled("footfall.run") == [("a1", "r_one"), ("b2", "r_two")]
+    (request,) = fake.requests
+    params = parse_qs(request.query)
+    assert params["all"] == ["1"]
+    assert json.loads(params["filters"][0]) == {"label": ["footfall.run"]}
+
+
+def test_labelled_networks_lists_every_network_with_the_label_and_its_value(
+    docker: tuple[FakeDocker, DockerEngine],
+) -> None:
+    fake, engine = docker
+    fake.on(
+        "GET",
+        "/networks",
+        json_reply(200, [{"Name": "footfall-r_one", "Labels": {"footfall.run": "r_one"}}]),
+    )
+    assert engine.labelled_networks("footfall.run") == [("footfall-r_one", "r_one")]
+    (request,) = fake.requests
+    assert json.loads(parse_qs(request.query)["filters"][0]) == {"label": ["footfall.run"]}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"Id": "a"}, [{"Id": "a"}], [{"Id": "a", "Labels": None}], [{"Id": 3, "Labels": {}}]],
+)
+def test_a_labelled_list_of_the_wrong_shape_is_an_engine_error(
+    docker: tuple[FakeDocker, DockerEngine], payload: object
+) -> None:
+    fake, engine = docker
+    fake.on("GET", "/containers/json", json_reply(200, payload))
+    with pytest.raises(EngineError, match="wrong shape"):
+        engine.labelled("footfall.run")
+
+
 def test_path_segments_are_encoded(docker: tuple[FakeDocker, DockerEngine]) -> None:
     fake, engine = docker
     fake.on("POST", "/containers/a%2Fb/start", Reply(204))

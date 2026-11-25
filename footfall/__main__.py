@@ -22,12 +22,14 @@ Settings come from the environment:
 | `FOOTFALL_PROXY_CONTAINER` | `footfall-proxy` |
 | `FOOTFALL_ORCHESTRATOR_CONTAINER` | `footfall-orchestrator` |
 | `FOOTFALL_DISK_BUDGET_MIB` | `8192` |
+| `FOOTFALL_RUN_LIFETIME_MINUTES` | `90` |
 
 `FOOTFALL_RUNTIME=runc` starts containers without gVisor, for development on a machine that
 lacks it, and every command then prints a warning. `FOOTFALL_DISK_BUDGET_MIB` is the most
 disk, in MiB, that the runner lets one run use, counting every copy of its app.
-`FOOTFALL_RUNS` must belong to root and be writable by root alone, as must every folder above
-it, or the runner will not start.
+`FOOTFALL_RUN_LIFETIME_MINUTES` is the longest a run may last before the runner stops it,
+whether or not its caller is still there. `FOOTFALL_RUNS` must belong to root and be writable
+by root alone, as must every folder above it, or the runner will not start.
 """
 
 import argparse
@@ -76,6 +78,7 @@ DEFAULT_OUT: Final = Path("footfall-results")
 _CONTAINER_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 _MIB: Final = 1024**2
 _MOST_MIB: Final = 16 * 1024**2  # 16 TiB, far beyond any disk a run could have
+_MOST_MINUTES: Final = 7 * 24 * 60  # a week, far beyond any run's own limits
 _LOG_TAIL_CAP: Final = 20_000
 # What each line of the app's output is printed behind: not white space, which the GitHub
 # Actions runner trims before it looks for a command, and not a character it can skip.
@@ -96,6 +99,9 @@ _DEFAULTS: Final = {
     "FOOTFALL_PROXY_CONTAINER": "footfall-proxy",
     "FOOTFALL_ORCHESTRATOR_CONTAINER": "footfall-orchestrator",
     "FOOTFALL_DISK_BUDGET_MIB": "8192",
+    # A persona stops by its own limits within about an hour of the run's start, install and
+    # seed included (docs/design.md, Limits and spend), so this is margin, not a limit on work.
+    "FOOTFALL_RUN_LIFETIME_MINUTES": "90",
 }
 
 
@@ -115,6 +121,7 @@ class Settings:
     proxy_container: str
     orchestrator_container: str
     disk_budget: int  # bytes
+    run_lifetime: int  # seconds
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -136,14 +143,14 @@ class Settings:
                 )
             return value
 
-        def mebibytes(name: str) -> int:
-            # Set but empty is an error too: a budget is never the default in silence.
+        def whole(name: str, unit: str, most: int) -> int:
+            # Set but empty is an error too: a limit is never the default in silence.
             value = env[name] if name in env else _DEFAULTS[name]
-            if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= _MOST_MIB:
+            if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= most:
                 raise SettingsError(
-                    f"{name} must be a whole number of MiB from 1 to {_MOST_MIB}, not {value!r}"
+                    f"{name} must be a whole number of {unit} from 1 to {most}, not {value!r}"
                 )
-            return int(value) * _MIB
+            return int(value)
 
         runtime = get("FOOTFALL_RUNTIME")
         if runtime not in RUNTIMES:
@@ -156,7 +163,8 @@ class Settings:
             runtime=runtime,
             proxy_container=container("FOOTFALL_PROXY_CONTAINER"),
             orchestrator_container=container("FOOTFALL_ORCHESTRATOR_CONTAINER"),
-            disk_budget=mebibytes("FOOTFALL_DISK_BUDGET_MIB"),
+            disk_budget=whole("FOOTFALL_DISK_BUDGET_MIB", "MiB", _MOST_MIB) * _MIB,
+            run_lifetime=whole("FOOTFALL_RUN_LIFETIME_MINUTES", "minutes", _MOST_MINUTES) * 60,
         )
 
 
@@ -164,7 +172,7 @@ class Settings:
 
 
 async def run_runner(settings: Settings) -> None:
-    """Serve the runner on its socket until stopped.
+    """Remove what an earlier runner left, then serve the runner on its socket until stopped.
 
     The socket's mode is 0660 and its group is the runner's own, so a runner started as
     "0:10001" can be reached by the orchestrator's user, 10001, and by nobody else.
@@ -181,7 +189,9 @@ async def run_runner(settings: Settings) -> None:
         proxy_port=PROXY_PORT,
         runtime=settings.runtime,
         disk_budget=settings.disk_budget,
+        lifetime=settings.run_lifetime,
     )
+    await asyncio.to_thread(service.sweep)
     group = os.getegid()
     logging.getLogger(__name__).info(
         "the runner is serving %s for group %d", settings.runner_socket, group
@@ -204,13 +214,16 @@ async def run_proxy(settings: Settings, *, port: int = PROXY_PORT, allowed_uid: 
 
 
 def _until_stopped[T](work: Coroutine[Any, Any, T]) -> T:
-    """Run `work`, cancelling it on SIGTERM as asyncio already does on Ctrl-C, so that its
-    cleanup, such as stopping a run, still happens."""
+    """Run `work`, cancelling it on SIGTERM or SIGHUP as asyncio already does on Ctrl-C, so
+    that its cleanup, such as stopping a run, still happens when it is stopped or its terminal
+    goes."""
 
     async def guarded() -> T:
         task = asyncio.current_task()
         assert task is not None  # noqa: S101  # always inside asyncio.run
-        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+        loop = asyncio.get_running_loop()
+        for stop in (signal.SIGTERM, signal.SIGHUP):
+            loop.add_signal_handler(stop, task.cancel)
         return await work
 
     return asyncio.run(guarded())

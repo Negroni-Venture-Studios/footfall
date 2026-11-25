@@ -68,6 +68,11 @@ UNSTEADY_REASON: Final = (
     "an app should keep its scratch files in /tmp"
 )
 NEVER_PREPARED: Final = "stopped before it was prepared"
+SWEPT_REASON: Final = "removed when the runner started, since an earlier runner had left it"
+LIFETIME_REASON: Final = (
+    "the run went on for longer than a run may, which FOOTFALL_RUN_LIFETIME_MINUTES sets"
+)
+RUN_LABEL: Final = "footfall.run"
 MAX_DEPTH: Final = 100  # folders below a workspace or prepared app
 # How many stopped run ids the runner remembers, to refuse each if it is prepared again, and
 # to say why it was stopped. Run ids are random, so one is reused only by mistake, and a
@@ -197,6 +202,7 @@ class _Run:
     unsteady: int = 0  # measures in a row that skipped something, guarded by the service's lock
     retry_delay: float = 0.0
     retry_at: float = 0.0
+    deadline: float = float("inf")  # when the watch stops it, however it is doing
 
     @property
     def network(self) -> str:
@@ -804,6 +810,7 @@ class RunnerService:
         chown: Chown = _chown_to_app,
         clock: Callable[[], float] = time.monotonic,
         runs_owner: int = 0,
+        lifetime: float = 90 * 60.0,
     ) -> None:
         if runtime not in _SPEC_RUNTIMES:
             raise ValueError(f"runtime must be runsc or runc, not {runtime!r}")
@@ -814,6 +821,8 @@ class RunnerService:
             raise ValueError(f"proxy_port out of range: {proxy_port}")
         if step_timeout <= 0 or disk_budget <= 0 or disk_interval <= 0:
             raise ValueError("step_timeout, disk_budget and disk_interval must be positive")
+        if lifetime <= 0:
+            raise ValueError("a run's lifetime must be positive")
         workspaces_root, runs_root = workspaces.resolve(), runs.resolve()
         if workspaces_root.is_relative_to(runs_root) or runs_root.is_relative_to(workspaces_root):
             raise ValueError("the workspaces and runs folders must not contain each other")
@@ -843,6 +852,7 @@ class RunnerService:
         self._runtime = runtime
         self._disk_budget = disk_budget
         self._disk_interval = disk_interval
+        self._lifetime = lifetime
         self._chown = chown
         self._clock = clock
         self._lock = threading.Lock()  # guards the three below; never held while taking a run's
@@ -888,7 +898,7 @@ class RunnerService:
             if self._has_folder(run_id):
                 raise RunnerError(f"run {run_id} already exists")
             secrets = tuple(v for k, v in env.items() if k == "FOOTFALL_PASSWORD" and v)
-            run = _Run(run_id, image, directory, secrets)
+            run = _Run(run_id, image, directory, secrets, deadline=self._clock() + self._lifetime)
             with run.lock:
                 # Registered only once locked, so that a stop arriving now waits for prepare.
                 self._register(run)
@@ -1026,8 +1036,9 @@ class RunnerService:
         return f"{reason}; {note}" if reason else note
 
     def check_runs(self) -> None:
-        """Stop every live run over its disk budget or that cannot be measured, and try again
-        to finish every stop that could not, waiting longer after each failure."""
+        """Stop every live run past its lifetime, over its disk budget or that cannot be
+        measured, and try again to finish every stop that could not, waiting longer after each
+        failure."""
         with self._lock:
             runs = list(self._runs.values())
         for run in runs:
@@ -1037,6 +1048,12 @@ class RunnerService:
                     with run.lock:
                         if run.closed and run.problems and self._clock() >= run.retry_at:
                             self._teardown_locked(run)
+                continue
+            if self._clock() >= run.deadline:
+                with run.lock:
+                    if not run.closed:
+                        logger.warning("stopping run %s: %s", run.run_id, LIFETIME_REASON)
+                        self._stop_for_locked(run, LIFETIME_REASON)
                 continue
             try:
                 usage, skipped = _measure_settled(self._runs_fd, run.run_id, _RUN_DEPTH)
@@ -1054,6 +1071,47 @@ class RunnerService:
                     if not run.closed:
                         logger.warning("stopping run %s: %s", run.run_id, reason)
                         self._stop_for_locked(run, reason)
+
+    def sweep(self) -> list[str]:
+        """Remove every run an earlier runner left, before this one serves; return their ids.
+
+        A run the runner has no record of is never measured, never reaches its lifetime and
+        is stopped only if its caller is still there to ask, so whatever carries Footfall's run
+        label in Docker, and every run's folder, is removed as `stop` removes a run it does not
+        know, and logged. A removal that fails keeps the run on record for the watch to try
+        again. Failing to list what Docker holds is raised: the runner must not serve without
+        knowing. A folder in the runs folder that is not a run's is named and left alone.
+        """
+        found: dict[str, list[str]] = {}
+        for container, value in self._engine.labelled(RUN_LABEL):
+            found.setdefault(value, []).append(f"container {container[:12]}")
+        for network, value in self._engine.labelled_networks(RUN_LABEL):
+            found.setdefault(value, []).append(f"network {network}")
+        listing = _open_folder(self._runs_fd, _TOP)
+        try:
+            with os.scandir(listing) as entries:
+                names = sorted(entry.name for entry in entries)
+        finally:
+            os.close(listing)
+        for name in names:
+            if _RUN_ID.fullmatch(name):
+                found.setdefault(name, []).append("folder")
+            else:
+                logger.warning("left %s in the runs folder alone: it is not a run's", _show(name))
+        for value in sorted(found):
+            if not _RUN_ID.fullmatch(value):
+                # Footfall never labels anything so, so it is not a run this runner can stop.
+                logger.warning("left %s alone: its run label is not a run id", found[value])
+                continue
+            logger.warning(
+                "removing run %s, which an earlier runner left: %s", value, ", ".join(found[value])
+            )
+            with self._lock:
+                self._remember_stop_locked(value, SWEPT_REASON)
+            run = _Run(value, "", self._runs_root / value, ())
+            with run.lock:
+                self._teardown_locked(run)
+        return sorted(value for value in found if _RUN_ID.fullmatch(value))
 
     def watch(self, stop: threading.Event) -> None:
         """Call `check_runs` every `disk_interval` seconds until `stop` is set."""

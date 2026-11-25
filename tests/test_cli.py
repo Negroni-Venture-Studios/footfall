@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import os
+import signal
 import socket
 import stat
 import tempfile
@@ -72,6 +73,7 @@ def test_settings_have_the_documented_defaults() -> None:
         proxy_container="footfall-proxy",
         orchestrator_container="footfall-orchestrator",
         disk_budget=8 * 1024**3,
+        run_lifetime=90 * 60,
     )
 
 
@@ -86,6 +88,7 @@ def test_settings_come_from_the_environment() -> None:
             "FOOTFALL_PROXY_CONTAINER": "dev-proxy",
             "FOOTFALL_ORCHESTRATOR_CONTAINER": "dev-orchestrator",
             "FOOTFALL_DISK_BUDGET_MIB": "96",
+            "FOOTFALL_RUN_LIFETIME_MINUTES": "45",
         }
     )
     assert settings == Settings(
@@ -97,6 +100,7 @@ def test_settings_come_from_the_environment() -> None:
         proxy_container="dev-proxy",
         orchestrator_container="dev-orchestrator",
         disk_budget=96 * 1024**2,
+        run_lifetime=45 * 60,
     )
 
 
@@ -320,6 +324,36 @@ def test_a_runs_folder_others_can_write_stops_the_runner_before_it_starts(
     assert "runs-6203" in err
 
 
+@pytest.mark.parametrize("value", ["0", "", "soon", "-5", "1.5", "10081", "\uff13"])
+def test_a_bad_run_lifetime_stops_the_runner_before_it_starts(
+    value: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    started = stub_services(monkeypatch)
+    monkeypatch.setenv("FOOTFALL_RUN_LIFETIME_MINUTES", value)
+    assert main(["runner"]) == 2
+    assert started == []
+    assert (
+        "FOOTFALL_RUN_LIFETIME_MINUTES must be a whole number of minutes from 1 to 10080"
+        in capsys.readouterr().err
+    )
+
+
+def test_a_hang_up_stops_a_command_as_a_terminate_does() -> None:
+    """A lost terminal sends SIGHUP; the command must still stop its run on the way out."""
+    cleaned: list[str] = []
+
+    async def work() -> None:
+        try:
+            os.kill(os.getpid(), signal.SIGHUP)
+            await asyncio.sleep(30)
+        finally:
+            cleaned.append("stopped the run")
+
+    with pytest.raises(asyncio.CancelledError):
+        cli._until_stopped(work())
+    assert cleaned == ["stopped the run"]
+
+
 # ---------------------------------------------------------------- the runc warning
 
 
@@ -397,12 +431,21 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built: list[dict[str, Any]] = []
+    swept: list[bool] = []
     real = RunnerService
 
     def recording(*args: Any, **options: Any) -> RunnerService:
         built.append(options)
         # The runs folder must be root's; here, the test's own user stands in for root.
-        return real(*args, **options, runs_owner=os.getuid())
+        service = real(*args, **options, runs_owner=os.getuid())
+        # There is no Docker here to sweep; that the runner sweeps before it serves is what
+        # this records.
+        def sweep() -> list[str]:
+            swept.append(socket_path.exists())
+            return []
+
+        monkeypatch.setattr(service, "sweep", sweep)
+        return service
 
     monkeypatch.setattr(cli, "RunnerService", recording)
     (tmp_path / "workspaces").mkdir()
@@ -459,6 +502,8 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
     assert options["orchestrator_container"] == "dev-orchestrator"
     assert options["proxy_port"] == 3128
     assert options["disk_budget"] == 77 * 1024**2
+    assert options["lifetime"] == 90 * 60
+    assert swept == [False]  # swept once, before the socket was there to answer
     assert options["browsers_image"] == "footfall-browsers:dev"
     assert options["images"] == {
         "python3.13": "footfall-python3.13:dev",
