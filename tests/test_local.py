@@ -795,6 +795,59 @@ async def test_a_link_the_branch_commits_outside_the_tested_folder_is_refused_to
     assert list(elsewhere.iterdir()) == []
 
 
+@pytest.fixture
+def search_only(tmp_path: Path) -> Iterator[Path]:
+    """A folder its owner may search and write in but not read, mode 0o311, as a shared
+    drop folder can be."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads every folder, whatever its mode")
+    locked = tmp_path / "locked"
+    (locked / "work").mkdir(parents=True)
+    locked.chmod(0o311)
+    try:
+        yield locked
+    finally:
+        locked.chmod(0o700)
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_results_need_only_search_permission_on_the_folders_above_them(
+    tmp_path: Path, search_only: Path, monkeypatch: pytest.MonkeyPatch, relative: bool
+) -> None:
+    """Part B, Minor 5: --out needed read permission on every folder above it, so under a
+    folder its owner may only search an absolute --out was refused, and a relative one of
+    two parts or more raised a raw PermissionError. Search is all a path needs."""
+    tested = two_pages(tmp_path)
+    if relative:
+        monkeypatch.chdir(search_only / "work")
+        out = Path("a") / "out"
+    else:
+        out = search_only / "a" / "out"
+    folder = local._open_results(out, tested)
+    try:
+        folder.write("summary.json", b"{}")
+    finally:
+        folder.close()
+    assert (search_only / ("work" if relative else "") / "a" / "out" / "summary.json").exists()
+
+
+def test_a_parent_that_cannot_be_opened_on_the_way_up_is_an_output_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno as errors
+
+    real_open = os.open
+
+    def refusing(path: Any, *args: Any, **kwargs: Any) -> int:
+        if path == "..":
+            raise OSError(errors.EIO, "Input/output error")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refusing)
+    with pytest.raises(OutputError, match="Input/output error"):
+        local._open_results(tmp_path / "out-7140", two_pages(tmp_path))
+
+
 @pytest.mark.usefixtures("no_umask")
 def test_results_are_made_for_their_owner_alone(tmp_path: Path) -> None:
     (grace,) = select(load_personas(load_devices()), ["grace"])

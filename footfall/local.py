@@ -109,6 +109,9 @@ RUN_COST_CEILING_USD: Final = 12.0
 # the browser's part of the turns that run past the time limit, about a minute each.
 BROWSER_ALLOWANCE = 600.0
 _FOLDER_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# A folder opened only to go through it, which needs search permission and not read: O_PATH
+# on Linux, O_SEARCH on macOS, and a plain read where the system has neither.
+_SEARCH: Final = getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0) or os.O_RDONLY
 # The configuration files of a git folder, which can hold a token in a remote's address.
 _GIT_CONFIGS: Final = ("config", "config.worktree")
 _READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -1252,14 +1255,22 @@ _MOST_LEVELS: Final = 4096  # folders above one that are believed, before giving
 
 def _lies_in(fd: int, top: _Identity) -> bool:
     """Whether the open folder `fd` is the folder `top` identifies or lies inside it, as the
-    file system has it, whatever names led there."""
+    file system has it, whatever names led there. Each folder above is opened only to search
+    it. Raises OutputError when one cannot be opened."""
     current = os.dup(fd)
     try:
         for _ in range(_MOST_LEVELS):
             info = os.fstat(current)
             if (info.st_dev, info.st_ino) == top:
                 return True
-            parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=current)
+            try:
+                parent = os.open("..", _SEARCH | os.O_DIRECTORY, dir_fd=current)
+            except OSError as error:
+                why = error.strerror or type(error).__name__
+                raise OutputError(
+                    f"cannot tell whether the results would lie inside the tested checkout: a "
+                    f"folder above them cannot be opened ({why})"
+                ) from None
             os.close(current)
             current = parent
             above = os.fstat(current)
@@ -1287,7 +1298,9 @@ def _open_results(out: Path, tested: Path) -> Folder:
     top = (info.st_dev, info.st_ino)
     first = 1 if out.is_absolute() else 0
     parts = out.parts[first:]
-    current = os.open(out.anchor or ".", os.O_RDONLY | os.O_DIRECTORY)
+    # Every folder above the results is opened only to go through it, which needs search
+    # permission alone; the results folder itself is opened to be read.
+    current = os.open(out.anchor or ".", _SEARCH | os.O_DIRECTORY)
     try:
         for index, part in enumerate(parts, start=1):
             where = Path(*out.parts[: first + index])
@@ -1296,7 +1309,8 @@ def _open_results(out: Path, tested: Path) -> Folder:
                     os.mkdir(part, FOLDER_MODE, dir_fd=current)
             above_out = index < len(parts)
             follow = above_out and (part == ".." or not _lies_in(current, top))
-            flags = os.O_RDONLY | os.O_DIRECTORY | (0 if follow else os.O_NOFOLLOW)
+            access = _SEARCH if above_out else os.O_RDONLY
+            flags = access | os.O_DIRECTORY | (0 if follow else os.O_NOFOLLOW)
             try:
                 inner = os.open(part, flags, dir_fd=current)
             except OSError as error:
