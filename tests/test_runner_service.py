@@ -334,6 +334,11 @@ def test_start_browsers_runs_run_server_with_the_assets_hosts(h: Harness) -> Non
     assert "Binds" not in config["HostConfig"]
     assert "User" not in config
     assert h.proxy.allowed[h.engine.ips[name]] == (RUN, ("fonts.gstatic.com", "tiles.example.org"))
+    # Docker's name service does not answer inside gVisor: the proxy's name is in the hosts
+    # file, at its address on the run's network, for every container the run starts.
+    proxy_address = h.engine.address(PROXY, f"footfall-{RUN}")
+    for each in h.engine.configs.values():
+        assert each["HostConfig"]["ExtraHosts"] == [f"{PROXY}:{proxy_address}"]
     with pytest.raises(RunnerError, match="already"):
         h.service.start_browsers(RUN, [])
 

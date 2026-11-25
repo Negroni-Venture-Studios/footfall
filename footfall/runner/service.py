@@ -609,6 +609,7 @@ class RunnerService:
                     proxy_url=run.proxy_url,
                     env={},
                     runtime=self._runtime,
+                    proxy_name=self._proxy_container,
                 )
                 try:
                     address = self._launch_locked(run, name, config, hosts)
@@ -756,6 +757,7 @@ class RunnerService:
             proxy_url=run.proxy_url,
             env=env,
             runtime=self._runtime,
+            proxy_name=self._proxy_container,
         )
         self._launch_locked(run, name, config, hosts)
         try:
@@ -846,6 +848,7 @@ class RunnerService:
             proxy_url=run.proxy_url,
             env={"PORT": str(port)},
             runtime=self._runtime,
+            proxy_name=self._proxy_container,
         )
         return self._launch_locked(run, _container_name(run.run_id, "app", copy), config, hosts)
 

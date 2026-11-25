@@ -11,11 +11,13 @@ egress proxy confine what it can reach, and the environment allow-list keeps sec
 The function is pure: it reads neither the environment nor the filesystem.
 """
 
+import ipaddress
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal
+from urllib.parse import urlsplit
 
 Role = Literal["install", "seed", "app", "browsers"]
 
@@ -63,6 +65,7 @@ _ALLOWED_ENV: Final = frozenset({"FOOTFALL_USERNAME", "FOOTFALL_PASSWORD", "PORT
 _RUN_ID: Final = re.compile(r"r_[a-z2-7]{26}")
 _COPY: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _NETWORK_PREFIX: Final = "footfall-r_"
+_HOST_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 _PROXY_VARS: Final = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 
 
@@ -102,6 +105,17 @@ def _validate(
             raise ValueError(f"env value for {key} contains NUL or a newline")
 
 
+def _proxy_entry(name: str, proxy_url: str) -> str:
+    """The hosts file entry `name:address` for the proxy at `proxy_url`."""
+    if not _HOST_NAME.fullmatch(name):
+        raise ValueError(f"invalid proxy name: {name!r}")
+    try:
+        address = ipaddress.ip_address(urlsplit(proxy_url).hostname or "")
+    except ValueError:
+        raise ValueError(f"the proxy's address must be an IP address: {proxy_url!r}") from None
+    return f"{name}:{address}"
+
+
 def container_config(
     *,
     role: Role,
@@ -114,10 +128,14 @@ def container_config(
     proxy_url: str,
     env: Mapping[str, str],
     runtime: str = "runsc",
+    proxy_name: str | None = None,
 ) -> dict[str, Any]:
     """Return the body of Docker's `POST /containers/create` for one container.
 
-    Raises ValueError for any input outside the shapes Footfall itself generates.
+    With `proxy_name`, the container's hosts file names the proxy, at the address in
+    `proxy_url`: Docker's own name service does not answer inside gVisor, and the browsers
+    are given the proxy by its name. Raises ValueError for any input outside the shapes
+    Footfall itself generates.
     """
     _validate(
         role=role,
@@ -130,6 +148,7 @@ def container_config(
         runtime=runtime,
     )
     limits = LIMITS[role]
+    extra_hosts = None if proxy_name is None else [_proxy_entry(proxy_name, proxy_url)]
 
     tmpfs = {"/tmp": _TMPFS_OPTIONS}  # noqa: S108
     if role == "browsers":
@@ -157,6 +176,8 @@ def container_config(
     }
     if role == "browsers":
         host_config["ShmSize"] = _BROWSERS_SHM
+    if extra_hosts is not None:
+        host_config["ExtraHosts"] = extra_hosts
     if workspace is not None:
         host_config["Binds"] = [f"{workspace}:{_WORKSPACE}:rw"]
 

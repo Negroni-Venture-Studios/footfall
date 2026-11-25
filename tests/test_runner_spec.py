@@ -266,3 +266,29 @@ def test_browsers_get_shared_memory_for_chromium() -> None:
 @pytest.mark.parametrize("role", APP_ROLES)
 def test_app_roles_keep_dockers_shared_memory(role: Role) -> None:
     assert "ShmSize" not in host(role)
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_the_proxy_has_its_name_in_every_containers_hosts_file(role: Role) -> None:
+    # Docker's own name service does not answer inside gVisor, so the browsers would not
+    # find the proxy by the name footfall test gives them.
+    hc = host(role, proxy_url="http://172.18.0.2:3128", proxy_name="footfall-proxy")
+    assert hc["ExtraHosts"] == ["footfall-proxy:172.18.0.2"]
+
+
+def test_no_hosts_entry_without_a_proxy_name() -> None:
+    assert "ExtraHosts" not in host()
+
+
+@pytest.mark.parametrize(
+    ("proxy_url", "proxy_name"),
+    [
+        ("http://footfall-proxy:3128", "footfall-proxy"),  # the address must be an address
+        ("http://172.18.0.2:3128", "Footfall Proxy"),
+        ("http://172.18.0.2:3128", "proxy\nevil"),
+        ("http://172.18.0.2:3128", ""),
+    ],
+)
+def test_bad_proxy_hosts_entries_are_refused(proxy_url: str, proxy_name: str) -> None:
+    with pytest.raises(ValueError, match="proxy"):
+        make(proxy_url=proxy_url, proxy_name=proxy_name)
