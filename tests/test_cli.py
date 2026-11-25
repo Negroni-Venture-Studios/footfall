@@ -438,6 +438,7 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
         built.append(options)
         # The runs folder must be root's; here, the test's own user stands in for root.
         service = real(*args, **options, runs_owner=os.getuid())
+
         # There is no Docker here to sweep; that the runner sweeps before it serves is what
         # this records.
         def sweep() -> list[str]:
