@@ -107,16 +107,56 @@ def test_the_image_makes_the_socket_folders() -> None:
 TEST_OVERLAY = (ROOT / "deploy" / "dev" / "compose.test.yaml").read_text()
 
 
-def test_the_test_overlay_widens_nothing() -> None:
-    # The isolation tests must test the stack's own settings, so the overlay may add test
-    # plumbing but never a socket, a port, a capability, a privilege or a host network.
-    body = "\n".join(
-        line for line in TEST_OVERLAY.splitlines() if not line.lstrip().startswith("#")
+def overlay_blocks(text: str = TEST_OVERLAY) -> dict[str, str]:
+    """Each service's lines in the test overlay, comments left out, keyed by its name."""
+    body = text.split("\nservices:\n", 1)[1]
+    blocks: dict[str, list[str]] = {}
+    name = ""
+    for line in body.splitlines():
+        found = re.fullmatch(r"  ([a-z]+):", line)
+        if found:
+            name = found.group(1)
+            blocks[name] = []
+        elif name and line.strip() and not line.strip().startswith("#"):
+            blocks[name].append(line.rstrip())
+    return {key: "\n".join(lines) for key, lines in blocks.items()}
+
+
+def test_the_test_overlay_widens_only_what_r54_allows() -> None:
+    # The isolation tests must test the stack's own settings. The overlay may run the
+    # orchestrator from the test stage (R7), copy the proxy's log to a host folder, and give
+    # the runner a small disk budget (R54), and nothing else: no socket, port, capability,
+    # privilege, user or network, and no hardening changed.
+    assert overlay_blocks() == {
+        "proxy": "\n".join(
+            [
+                "    entrypoint:",
+                "      - sh",
+                "      - -c",
+                "      - 'footfall \"$$@\" 2>&1 | tee -a /var/lib/footfall-test/proxy.log'",
+                "      - sh",
+                "    volumes:",
+                "      - /var/lib/footfall/test-logs:/var/lib/footfall-test",
+            ]
+        ),
+        "runner": "\n".join(["    environment:", '      FOOTFALL_DISK_BUDGET_MIB: "128"']),
+        "orchestrator": "\n".join(
+            [
+                "    image: footfall:test",
+                "    environment:",
+                "      - FOOTFALL_ISOLATION=1",
+                "      - FOOTFALL_TEST_HOST_ADDRESSES=${FOOTFALL_TEST_HOST_ADDRESSES:-}",
+                "      - FOOTFALL_TEST_HOST_PORT=${FOOTFALL_TEST_HOST_PORT:-}",
+            ]
+        ),
+    }
+    assert "volumes:" not in TEST_OVERLAY.split("\nservices:\n", 1)[0]
+    assert not re.search(r"^\S", TEST_OVERLAY.split("\nservices:\n", 1)[1], re.MULTILINE)
+
+
+def test_the_overlay_check_sees_an_added_volume() -> None:
+    widened = TEST_OVERLAY.replace(
+        "    image: footfall:test\n", "    image: footfall:test\n    volumes:\n      - /:/host\n"
     )
-    for word in ("docker.sock", "ports:", "cap_add", "privileged", "user:", "network_mode"):
-        assert word not in body
-    for word in ("read_only", "cap_drop", "security_opt", "init:", "tmpfs"):
-        assert word not in body  # left as compose.yaml sets them
-    assert "    image: footfall:test" in body
-    assert body.count("image:") == 1  # only the orchestrator's image changes
-    assert 'FOOTFALL_DISK_BUDGET_MIB: "128"' in body
+    assert "      - /:/host" in overlay_blocks(widened)["orchestrator"]
+    assert overlay_blocks(widened) != overlay_blocks()
