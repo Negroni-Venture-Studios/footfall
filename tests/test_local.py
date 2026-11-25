@@ -1205,7 +1205,7 @@ def test_git_runs_with_a_bare_environment_and_no_input(
     monkeypatch.setattr(subprocess, "run", run)
     listing = local._git_files(folder)
     assert PurePosixPath("footfall.toml") in listing.names
-    assert len(calls) == 3  # ls-files, then rev-parse for the git folder and the common one
+    assert len(calls) == 4  # ls-files twice, then rev-parse for the git folder and the common one
     allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL"}
     for command, options in calls:
         assert not any("safe.directory" in part for part in command)
@@ -1425,3 +1425,97 @@ async def test_all_files_never_copies_the_git_folder(
     assert not any(".git" in name.split("/") for name in runner.workspace_files)
     assert "lib/.git" not in runner.workspace_files
     assert not any(name.startswith(".git") for name in runner.workspace_files)
+
+
+# ---------------------------------------------------------------- folders shaped like git folders
+
+
+class Copying(FakeRunner):
+    """Records every file the workspace holds when the runner is asked to prepare it."""
+
+    def __init__(self, address: Callable[[str], str]) -> None:
+        super().__init__(address)
+        self.copied: list[bytes] = []
+
+    async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> None:
+        self.copied.extend(p.read_bytes() for p in workspace.rglob("*") if p.is_file())
+        await super().prepare(run_id, workspace, *rest)
+
+
+@pytest.mark.parametrize("git_says", ["what it can", "nothing", "nothing it can read"])
+async def test_all_files_leaves_out_every_folder_shaped_like_a_git_folder(
+    tmp_path: Path,
+    app_server: AppServer,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+    git_says: str,
+) -> None:
+    serve_two_pages(app_server)
+    folder = two_pages(tmp_path)
+    outer = moved_git_folder(folder, "outer-meta")  # the repository's own, behind a .git file
+    nested = folder / "lib"
+    nested.mkdir()
+    moved_git_folder(nested, "meta")  # a nested repository's, which the outer git never names
+    if git_says == "nothing":
+        monkeypatch.setattr(local, "_known_git_folders", lambda folder: frozenset())
+    if git_says == "nothing it can read":
+        with (outer / "config").open("a") as config:
+            config.write("[core]\n\trepositoryformatversion = 99\n")
+    runner = Copying(lambda copy: f"127.0.0.1:{app_server.port}")
+    reports = await run_folder(folder, runner, connect[0], tmp_path, all_files=True)
+    assert [r.status for r in reports] == ["finished"]
+    assert not any(b"token-not-real" in data for data in runner.copied)
+    files = runner.workspace_files
+    assert not any(name.startswith(("lib/meta", "outer-meta")) for name in files), files
+    assert "serve.py" in files
+
+
+def outer_with_a_nested_repository(tmp_path: Path) -> Path:
+    """An outer repository with a nested one whose git folder sits beside it, outside the
+    nested folder: sub/.git names ../submeta, sub/ is ignored, and submeta/ is not."""
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    sub = folder / "sub"
+    sub.mkdir()
+    git(sub, "init", "-q")
+    (sub / ".git").rename(folder / "submeta")
+    (sub / ".git").write_text("gitdir: ../submeta\n")
+    git(sub, "config", "remote.origin.url", TOKEN_URL)
+    (folder / ".gitignore").write_text("sub/\n")
+    return folder
+
+
+async def test_an_untracked_git_folder_beside_its_worktree_is_left_out(
+    tmp_path: Path, app_server: AppServer, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    serve_two_pages(app_server)
+    folder = outer_with_a_nested_repository(tmp_path)
+    runner = Copying(lambda copy: f"127.0.0.1:{app_server.port}")
+    reports = await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert [r.status for r in reports] == ["finished"]
+    assert not any(b"token-not-real" in data for data in runner.copied)
+    assert not any(name.startswith("submeta") for name in runner.workspace_files)
+    assert "serve.py" in runner.workspace_files
+
+
+async def test_a_tracked_git_fixture_is_still_copied(
+    tmp_path: Path, app_server: AppServer, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    # A repository may commit a git folder as a test fixture; any clone would hold it.
+    serve_two_pages(app_server)
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    fixture = folder / "fixtures" / "repo"
+    (fixture / "objects").mkdir(parents=True)
+    (fixture / "HEAD").write_text("ref: refs/heads/main\n")
+    (fixture / "config").write_text("[core]\n\tbare = true\n")
+    (fixture / "objects" / "README").write_text("empty\n")
+    git(folder, "add", "fixtures")
+    (fixture / "untracked-note").write_text("not committed\n")
+    runner = Copying(lambda copy: f"127.0.0.1:{app_server.port}")
+    await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    files = runner.workspace_files
+    assert "fixtures/repo/HEAD" in files
+    assert "fixtures/repo/config" in files
+    assert "fixtures/repo/objects/README" in files
+    assert "fixtures/repo/untracked-note" not in files  # untracked, inside a git-shaped folder

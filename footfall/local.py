@@ -239,6 +239,7 @@ class _Listing:
 
     names: list[PurePosixPath]
     git_dirs: frozenset[_Identity]
+    untracked: frozenset[PurePosixPath] = frozenset()  # listed by --others, not in the index
 
 
 _GIT_ADVICE: Final = "pass --all-files to copy every file in the folder, ignored ones included"
@@ -339,9 +340,14 @@ def _git_files(folder: Path) -> _Listing:
     Raises LocalRunError when git is missing, hangs, or cannot read the folder.
     """
     git = _git()
-    listed = _run_git(git, folder, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-    names = sorted({PurePosixPath(os.fsdecode(n)) for n in listed.split(b"\0") if n})
-    return _Listing(names, _git_folders(git, folder))
+
+    def listed(*which: str) -> set[PurePosixPath]:
+        output = _run_git(git, folder, ["ls-files", "-z", *which])
+        return {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
+
+    tracked = listed("--cached")
+    untracked = listed("--others", "--exclude-standard") - tracked
+    return _Listing(sorted(tracked | untracked), _git_folders(git, folder), frozenset(untracked))
 
 
 def _known_git_folders(folder: Path) -> frozenset[_Identity]:
@@ -377,6 +383,27 @@ def _is_dot_git(part: str) -> bool:
     return kept.casefold() == ".git"
 
 
+def _kind(name: str, folder: int | None = None) -> int | None:
+    """The file type bits of `name`, in the open folder `folder` or as a path, never
+    following a link; None for a name that is not there or cannot be read."""
+    try:
+        return stat.S_IFMT(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
+    except OSError:
+        return None
+
+
+def _shaped_like_a_git_folder(at: Callable[[str], int | None]) -> bool:
+    """Whether a folder looks like a git folder: a HEAD file and an objects folder, as a
+    repository's own has, or a commondir file, as a linked worktree's has. `at` gives the
+    type of a name in the folder."""
+    has_objects = at("HEAD") == stat.S_IFREG and at("objects") == stat.S_IFDIR
+    return has_objects or at("commondir") == stat.S_IFREG
+
+
+class _InAGitFolder(Exception):
+    """An untracked name lies in a folder shaped like a git folder, and is left out."""
+
+
 def _open_folders(
     top: int,
     parts: Sequence[str],
@@ -384,12 +411,14 @@ def _open_folders(
     create: bool,
     name: PurePosixPath,
     git_dirs: frozenset[_Identity] = frozenset(),
+    untracked: bool = False,
 ) -> int:
     """Open the folder `parts` below the open folder `top`, one name at a time and never
     through a link, making each that is missing when `create` is set.
 
     Raises FileNotFoundError for a missing folder when not creating, and LocalRunError when
     any part is a link or a file, cannot be opened, or is one of the git folders `git_dirs`.
+    For an `untracked` name, raises _InAGitFolder when any part is shaped like a git folder.
     """
     current = os.dup(top)
     try:
@@ -420,6 +449,8 @@ def _open_folders(
                         f"cannot copy {_shown(name)}: {_shown(where)} is the repository's own "
                         "git folder"
                     )
+            if untracked and _shaped_like_a_git_folder(functools.partial(_kind, folder=current)):
+                raise _InAGitFolder
     except BaseException:
         os.close(current)
         raise
@@ -455,6 +486,7 @@ def _copy_files(
     out: Path,
     *,
     git_dirs: frozenset[_Identity] = frozenset(),
+    untracked: frozenset[PurePosixPath] = frozenset(),
 ) -> None:
     """Copy the named files into a new workspace, links as links, leaving the results out.
 
@@ -463,8 +495,11 @@ def _copy_files(
     swapped for a link can list, is refused. So is a name in a `.git` folder, however a
     crafted index spells it, and a name in any folder `git_dirs` identifies, whatever it is
     called, since a repository's configuration can hold a token. A folder to copy that is a
-    git folder, or lies in one, is refused whole. So is a folder of its own,
-    such as a submodule, whose files git does not list. A name that is gone is skipped.
+    git folder, or lies in one, is refused whole. So is a folder of its own, such as a
+    submodule, whose files git does not list. An `untracked` name in a folder shaped like a
+    git folder, such as a nested repository's git folder beside its worktree, is left out;
+    a tracked one is copied, since a repository may commit a git folder as a fixture, and
+    any clone would hold it. A name that is gone is skipped.
     """
     base = folder.resolve()
     results = out.resolve()
@@ -492,7 +527,7 @@ def _copy_files(
                     )
                 if left_out is not None and parts[: len(left_out)] == left_out:
                     continue
-                _copy_name(source_top, target_top, name, git_dirs)
+                _copy_name(source_top, target_top, name, git_dirs, untracked=name in untracked)
         finally:
             os.close(target_top)
     finally:
@@ -504,13 +539,19 @@ def _copy_name(
     target_top: int,
     name: PurePosixPath,
     git_dirs: frozenset[_Identity] = frozenset(),
+    *,
+    untracked: bool = False,
 ) -> None:
     """Copy one name between two open folders, as `_copy_files` describes."""
     parents, leaf = name.parts[:-1], name.parts[-1]
     try:
-        source = _open_folders(source_top, parents, create=False, name=name, git_dirs=git_dirs)
+        source = _open_folders(
+            source_top, parents, create=False, name=name, git_dirs=git_dirs, untracked=untracked
+        )
     except FileNotFoundError:
         return  # tracked, but its folder was deleted since
+    except _InAGitFolder:
+        return
     try:
         try:
             info = os.stat(leaf, dir_fd=source, follow_symlinks=False)
@@ -540,17 +581,25 @@ def _copy_folder(
     folder: Path, workspace: Path, out: Path, git_dirs: frozenset[_Identity] = frozenset()
 ) -> None:
     """Copy all of the folder into its workspace, links as links, leaving out the results,
-    any `.git`, however it is spelt, and any folder `git_dirs` identifies, whatever it is
-    called, since a repository's configuration can hold a token."""
+    any `.git`, however it is spelt, any folder `git_dirs` identifies, whatever it is
+    called, and any folder shaped like a git folder, since a repository's configuration can
+    hold a token. Without git's help, as here, a git folder can be known only by its shape:
+    a nested repository's moved git folder, or one git cannot read, is named by nothing."""
     base = folder.resolve()
     _refuse_a_git_folder(base, git_dirs)
+    if _shaped_like_a_git_folder(lambda name: _kind(str(base / name))):
+        raise LocalRunError(f"cannot copy {_shown(base)}: it is shaped like a git folder")
     results = out.resolve()
 
     def left_out(path: Path, name: str) -> bool:
         if _is_dot_git(name) or _inside(path.resolve(), results):
             return True
         info = path.lstat()
-        return stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) in git_dirs
+        if not stat.S_ISDIR(info.st_mode):
+            return False
+        if (info.st_dev, info.st_ino) in git_dirs:
+            return True
+        return _shaped_like_a_git_folder(lambda inner: _kind(str(path / inner)))
 
     def ignore(where: str, names: list[str]) -> set[str]:
         return {name for name in names if left_out(Path(where) / name, name)}
@@ -829,6 +878,7 @@ async def _go(
                 listing.names,
                 run.out,
                 git_dirs=listing.git_dirs,
+                untracked=listing.untracked,
             )
         )
     env: dict[str, str] = {}
