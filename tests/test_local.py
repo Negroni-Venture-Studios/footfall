@@ -855,11 +855,39 @@ def test_results_are_made_for_their_owner_alone(tmp_path: Path) -> None:
     results = local._prepare_results(out, [grace], two_pages(tmp_path))
     try:
         local._write_json(results.out, "summary.json", {"run": "r"}, None)
+        # Each way `footfall test` writes in a persona's folder: the report, the trace's
+        # lines, and the screenshots' folder and the screenshots in it (part B, Minor 9).
+        persona = results.personas["grace"]
+        local._write_json(persona, "report.json", {"persona": "grace"}, None)
+        persona.append("trace.jsonl", b"{}\n")
+        screenshots = persona.make("screenshots")
+        try:
+            screenshots.write("01.jpg", b"\xff\xd8\xff")
+        finally:
+            screenshots.close()
     finally:
         results.close()
-    made = (tmp_path / "new", out, out / "grace", out / "summary.json")
+    made = (
+        tmp_path / "new",
+        out,
+        out / "grace",
+        out / "summary.json",
+        out / "grace" / "report.json",
+        out / "grace" / "trace.jsonl",
+        out / "grace" / "screenshots",
+        out / "grace" / "screenshots" / "01.jpg",
+    )
     modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in made}
-    assert modes == {"new": 0o700, "out": 0o700, "grace": 0o700, "summary.json": 0o600}
+    assert modes == {
+        "new": 0o700,
+        "out": 0o700,
+        "grace": 0o700,
+        "summary.json": 0o600,
+        "report.json": 0o600,
+        "trace.jsonl": 0o600,
+        "screenshots": 0o700,
+        "01.jpg": 0o600,
+    }
 
 
 async def test_a_link_above_the_results_inside_the_tested_folder_is_refused(
