@@ -500,32 +500,81 @@ def test_a_lifetime_must_be_positive(tmp_path: Path) -> None:
         make_harness(tmp_path / "h", lifetime=0)
 
 
+@pytest.mark.parametrize("call", ["stat", "open"])
 def test_a_tree_whose_paths_are_too_long_to_reach_counts_as_too_deep(
-    h: Harness, monkeypatch: pytest.MonkeyPatch
+    h: Harness, monkeypatch: pytest.MonkeyPatch, call: str
 ) -> None:
     """On the real stack the runner's container is confined by a profile that names each file
     by its whole path, so a folder below a long enough chain of long names cannot be read at
     all (ENAMETOOLONG), well short of the measure's depth. It counts as too deep, and so over
-    the budget, as a deeper tree does, rather than as a measure that failed."""
-    import errno as errors
-
+    the budget, as a deeper tree does, rather than as a measure that failed, whether the look
+    or the open is refused."""
     h.workspace()
     h.service.prepare(RUN, h.workspaces / "app", "python3.13", None, None, [], {})
     h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
     (h.runs / RUN / "copies" / "anna" / "unreachable-5531").mkdir()
-    real_stat = os.stat
-    refused: list[str] = []
-
-    def stat_or_too_long(name: Any, *args: Any, **kwargs: Any) -> os.stat_result:
-        # Only the measure's look is refused: the removal never goes so deep (see V-01).
-        if name == "unreachable-5531" and not refused:
-            refused.append(name)
-            raise OSError(errors.ENAMETOOLONG, "File name too long", name)
-        return real_stat(name, *args, **kwargs)
-
-    monkeypatch.setattr(os, "stat", stat_or_too_long)
+    refused = refuse_once(monkeypatch, call, "unreachable-5531")
     h.service.check_runs()
     monkeypatch.undo()
+    # Only the measure's look is refused: the removal never goes so deep (see V-01).
     assert refused == ["unreachable-5531"]
     assert h.service.status(RUN) == DISK_REASON
     assert not (h.runs / RUN).exists()
+
+
+def refuse_once(
+    monkeypatch: pytest.MonkeyPatch,
+    call: str,
+    name: str,
+    *,
+    within: Path | None = None,
+    skip: int = 0,
+) -> list[str]:
+    """Make `os.stat` or `os.open` of `name` fail with ENAMETOOLONG once, after letting
+    `skip` such calls through; with `within`, only calls relative to that folder count. The
+    list returned names each call refused."""
+    import errno as errors
+
+    real = os.stat if call == "stat" else os.open
+    refused: list[str] = []
+    seen: list[str] = []
+
+    def counts(target: Any, dir_fd: int | None) -> bool:
+        if target != name or refused:
+            return False
+        if within is not None and (
+            dir_fd is None or not os.path.samestat(os.fstat(dir_fd), within.stat())
+        ):
+            return False
+        seen.append(target)
+        return len(seen) > skip
+
+    def refusing(target: Any, *args: Any, **kwargs: Any) -> Any:
+        if counts(target, kwargs.get("dir_fd")):
+            refused.append(target)
+            raise OSError(errors.ENAMETOOLONG, "File name too long", target)
+        return real(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, call, refusing)
+    return refused
+
+
+@pytest.mark.parametrize("call", ["stat", "open"])
+@pytest.mark.parametrize("look", ["the measure", "the copy"])
+def test_a_workspace_too_long_to_reach_is_refused_and_leaves_nothing(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, call: str, look: str
+) -> None:
+    """Part A, Minor 8: the same refusal met while a workspace is measured, or copied, ends
+    the prepare with a RunnerError, and nothing of the run is left."""
+    workspace = h.workspace(files={"serve.py": "print('hi')\n", "deep-8820/x.txt": "x\n"})
+    skip = 0 if look == "the measure" else 1  # the measure looks first, then the copy
+    refused = refuse_once(monkeypatch, call, "deep-8820", within=workspace, skip=skip)
+    with pytest.raises(RunnerError, match="too deep") as caught:
+        h.service.prepare(RUN, workspace, "python3.13", None, None, [], {})
+    monkeypatch.undo()
+    assert refused == ["deep-8820"]
+    if look == "the copy":
+        assert "too deep there for the runner to reach" in str(caught.value)
+    assert h.engine.live == {}
+    assert h.engine.networks == {}
+    assert list(h.runs.iterdir()) == []
