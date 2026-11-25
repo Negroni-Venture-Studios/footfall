@@ -12,10 +12,12 @@ import os
 import resource
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from footfall.runner.service import (
+    DISK_REASON,
     LIFETIME_REASON,
     SWEPT_REASON,
     RunnerError,
@@ -416,3 +418,34 @@ def test_a_run_past_its_lifetime_is_stopped(tmp_path: Path) -> None:
 def test_a_lifetime_must_be_positive(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="lifetime"):
         make_harness(tmp_path / "h", lifetime=0)
+
+
+def test_a_tree_whose_paths_are_too_long_to_reach_counts_as_too_deep(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the real stack the runner's container is confined by a profile that names each file
+    by its whole path, so a folder below a long enough chain of long names cannot be read at
+    all (ENAMETOOLONG), well short of the measure's depth. It counts as too deep, and so over
+    the budget, as a deeper tree does, rather than as a measure that failed."""
+    import errno as errors
+
+    h.workspace()
+    h.service.prepare(RUN, h.workspaces / "app", "python3.13", None, None, [], {})
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    (h.runs / RUN / "copies" / "anna" / "unreachable-5531").mkdir()
+    real_stat = os.stat
+    refused: list[str] = []
+
+    def stat_or_too_long(name: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        # Only the measure's look is refused: the removal never goes so deep (see V-01).
+        if name == "unreachable-5531" and not refused:
+            refused.append(name)
+            raise OSError(errors.ENAMETOOLONG, "File name too long", name)
+        return real_stat(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_or_too_long)
+    h.service.check_runs()
+    monkeypatch.undo()
+    assert refused == ["unreachable-5531"]
+    assert h.service.status(RUN) == DISK_REASON
+    assert not (h.runs / RUN).exists()

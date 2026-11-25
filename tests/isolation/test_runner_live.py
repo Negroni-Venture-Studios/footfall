@@ -76,7 +76,9 @@ async def test_a_seed_that_makes_a_deep_tree_is_stopped_and_its_folder_removed(
     new_run: NewRun,
 ) -> None:
     """Audit V-01: code under test chooses how deep its tree is. A chain of 2,000 folders
-    with 255-byte names is past the measure's depth, so the run is stopped, and the runner
-    removes it holding a few folders open, not one for each level: the status carries no
-    stop that could not finish, which it would if the folder had stayed."""
+    with 255-byte names is past the measure's depth, and past what the runner can reach at
+    all, since its container's confinement names each file by its whole path, so the run is
+    stopped for its disk, and the runner removes it holding a few folders open and no long
+    path: the status carries no stop that could not finish, which it would if the folder had
+    stayed."""
     await _stopped_for_disk(new_run, f"{PROBE} chain 2000")

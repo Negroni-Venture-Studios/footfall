@@ -420,13 +420,16 @@ def _walk(
     folders it has finished or not yet reached. Each folder is yielded before anything in it.
     A folder is opened by name without following a link, and must then be the folder that was
     listed, so a folder swapped for a link is never walked through, or even opened. A folder
-    more than `max_depth` below the top raises `_Deep`. With a `tally`, a name removed or a
-    folder changed while the walk reads is skipped and counted, and the walk goes on; without
-    one, a removed name raises its error and a changed folder raises `_Changed`.
+    more than `max_depth` below the top raises `_Deep`, and so does one the runner cannot
+    reach because its whole path is too long (ENAMETOOLONG), as a confinement that names
+    each file by its whole path makes it. With a `tally`, a name removed or a folder changed
+    while the walk reads is skipped and counted, and the walk goes on; without one, a
+    removed name raises its error and a changed folder raises `_Changed`.
     """
     with os.scandir(folder) as listing:
         for entry in listing:
             name = entry.name
+            where = here / name
             try:
                 info = os.stat(name, dir_fd=folder, follow_symlinks=False)
             except FileNotFoundError:
@@ -434,7 +437,10 @@ def _walk(
                     raise
                 tally.skipped += 1
                 continue
-            where = here / name
+            except OSError as error:
+                if error.errno == errno.ENAMETOOLONG:
+                    raise _Deep(where) from None
+                raise
             if stat.S_ISDIR(info.st_mode) and len(here.parts) >= max_depth:
                 raise _Deep(where)
             yield here, folder, name, info
@@ -443,6 +449,8 @@ def _walk(
             try:
                 inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
             except OSError as error:
+                if error.errno == errno.ENAMETOOLONG:
+                    raise _Deep(where) from None
                 if error.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
                     raise
                 if tally is None:
@@ -480,7 +488,8 @@ def _entries(folder: int, what: str) -> Generator[tuple[PurePath, int, str, os.s
             yield here, dirfd, name, info  # one at a time: a folder may hold millions
     except _Deep as deep:
         raise RunnerError(
-            f"{what} is more than {MAX_DEPTH} folders deep at {_show(str(deep.where))}"
+            f"{what} is more than {MAX_DEPTH} folders deep at {_show(str(deep.where))}, or "
+            "too deep there for the runner to reach"
         ) from None
     except _Changed as changed:
         where = _show(str(changed.where))
@@ -671,7 +680,10 @@ def _measure_in(parent: int, name: str, max_depth: int) -> tuple[int, int]:
         for _, _, _, entry in _walk(folder, max_depth, tally=tally):
             total += _size(entry)
     except _Deep as deep:
-        raise _TooDeep(f"more than {max_depth} folders deep at {_show(str(deep.where))}") from None
+        raise _TooDeep(
+            f"more than {max_depth} folders deep at {_show(str(deep.where))}, "
+            "or too deep there to reach"
+        ) from None
     finally:
         os.close(folder)
     return total, tally.skipped
