@@ -81,6 +81,8 @@ GOTO_TIMEOUT_MS: Final = 30_000
 LOG_TAIL_CAP: Final = 20_000
 GIT_TIMEOUT: Final = 60.0
 _FOLDER_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# The configuration files of a git folder, which can hold a token in a remote's address.
+_GIT_CONFIGS: Final = ("config", "config.worktree")
 _READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _WRITE_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 _CHUNK: Final = 1024 * 1024
@@ -236,7 +238,8 @@ type _Identity = tuple[int, int]  # (st_dev, st_ino)
 @dataclass(frozen=True)
 class _Listing:
     """What git would commit from a folder, and the identities of the repository's git
-    folder and its common folder, which differ for a linked worktree."""
+    folder and its common folder, which differ for a linked worktree, and of the
+    configuration files in them."""
 
     names: list[PurePosixPath]
     git_dirs: frozenset[_Identity]
@@ -314,7 +317,9 @@ def _git() -> str:
 
 def _git_folders(git: str, folder: Path) -> frozenset[_Identity]:
     """The identities of the repository's git folder and of its common folder, which for a
-    linked worktree is another folder and holds the configuration.
+    linked worktree is another folder and holds the configuration, and of the configuration
+    files in each, `config` and `config.worktree`. No name may lead into such a folder, and
+    no file that is one of those files, by a hard link under any name, is copied.
 
     Each path is taken exactly as git prints it, but for the newline: git keeps a trailing
     space in a .git file's path, and a folder with that name is not the one without it.
@@ -331,6 +336,13 @@ def _git_folders(git: str, folder: Path) -> frozenset[_Identity]:
                 f"cannot find the git folder of {_shown(folder)} ({why}); {_GIT_ADVICE}"
             ) from None
         identities.add((info.st_dev, info.st_ino))
+        for name in _GIT_CONFIGS:
+            try:
+                config = (path / name).lstat()
+            except OSError:
+                continue  # not there, which is usual for config.worktree
+            if stat.S_ISREG(config.st_mode):
+                identities.add((config.st_dev, config.st_ino))
     return frozenset(identities)
 
 
@@ -395,14 +407,28 @@ def _kind(name: str, folder: int | None = None) -> int | None:
 
 def _shaped_like_a_git_folder(at: Callable[[str], int | None]) -> bool:
     """Whether a folder looks like a git folder: a HEAD file and an objects folder, as a
-    repository's own has, or a commondir file, as a linked worktree's has. `at` gives the
-    type of a name in the folder."""
-    has_objects = at("HEAD") == stat.S_IFREG and at("objects") == stat.S_IFDIR
-    return has_objects or at("commondir") == stat.S_IFREG
+    repository's own has, or a commondir file, as a linked worktree's has. Any of them may
+    be a link, as HEAD is with `core.preferSymlinkRefs`. `at` gives the type of a name in
+    the folder, never following a link."""
+    file_or_link = (stat.S_IFREG, stat.S_IFLNK)
+    has_objects = at("HEAD") in file_or_link and at("objects") in (stat.S_IFDIR, stat.S_IFLNK)
+    return has_objects or at("commondir") in file_or_link
+
+
+def _warn_left_out(where: object) -> None:
+    LOG.warning(
+        "left out %s: it is shaped like a git folder, with HEAD and objects or a commondir, "
+        "and may hold a repository's configuration",
+        _shown(where),
+    )
 
 
 class _InAGitFolder(Exception):
     """An untracked name lies in a folder shaped like a git folder, and is left out."""
+
+    def __init__(self, where: str) -> None:
+        super().__init__(where)
+        self.where = where
 
 
 def _open_folders(
@@ -451,20 +477,38 @@ def _open_folders(
                         "git folder"
                     )
             if untracked and _shaped_like_a_git_folder(functools.partial(_kind, folder=current)):
-                raise _InAGitFolder
+                raise _InAGitFolder(where)
     except BaseException:
         os.close(current)
         raise
     return current
 
 
-def _copy_file(source: int, target: int, leaf: str, name: PurePosixPath) -> None:
-    """Copy one regular file between two open folders, refusing one that changes kind."""
+def _refuse_a_git_config(
+    name: object, info: os.stat_result, git_dirs: frozenset[_Identity]
+) -> None:
+    if (info.st_dev, info.st_ino) in git_dirs:
+        raise LocalRunError(
+            f"cannot copy {_shown(name)}: it is the repository's git configuration, "
+            "linked under another name, and can hold a token"
+        )
+
+
+def _copy_file(
+    source: int,
+    target: int,
+    leaf: str,
+    name: PurePosixPath,
+    git_dirs: frozenset[_Identity] = frozenset(),
+) -> None:
+    """Copy one regular file between two open folders, refusing one that changes kind, and
+    one that is a git configuration file in `git_dirs`, whatever it is called."""
     reader = os.open(leaf, _READ_FLAGS, dir_fd=source)
     try:
         info = os.fstat(reader)
         if not stat.S_ISREG(info.st_mode):
             raise LocalRunError(f"cannot copy {_shown(name)}: it changed while it was copied")
+        _refuse_a_git_config(name, info, git_dirs)
         mode = stat.S_IMODE(info.st_mode) & 0o777  # no set-id or sticky bits
         writer = os.open(leaf, _WRITE_FLAGS, mode, dir_fd=target)
         try:
@@ -498,9 +542,11 @@ def _copy_files(
     called, since a repository's configuration can hold a token. A folder to copy that is a
     git folder, or lies in one, is refused whole. So is a folder of its own, such as a
     submodule, whose files git does not list. An `untracked` name in a folder shaped like a
-    git folder, such as a nested repository's git folder beside its worktree, is left out;
-    a tracked one is copied, since a repository may commit a git folder as a fixture, and
-    any clone would hold it. A name that is gone is skipped.
+    git folder, such as a nested repository's git folder beside its worktree, is left out,
+    with one warning for each such folder; a tracked one is copied, since a repository may
+    commit a git folder as a fixture, and any clone would hold it. A file that is one of the
+    git configuration files in `git_dirs`, by a hard link under another name, is refused. A
+    name that is gone is skipped.
     """
     base = folder.resolve()
     results = out.resolve()
@@ -513,6 +559,7 @@ def _copy_files(
         if (top.st_dev, top.st_ino) in git_dirs:
             raise LocalRunError(f"cannot copy {_shown(base)}: it is the repository's git folder")
         target_top = os.open(workspace, _FOLDER_FLAGS)
+        warned: set[str] = set()
         try:
             for name in names:
                 parts = name.parts
@@ -528,7 +575,12 @@ def _copy_files(
                     )
                 if left_out is not None and parts[: len(left_out)] == left_out:
                     continue
-                _copy_name(source_top, target_top, name, git_dirs, untracked=name in untracked)
+                try:
+                    _copy_name(source_top, target_top, name, git_dirs, untracked=name in untracked)
+                except _InAGitFolder as shaped:
+                    if shaped.where not in warned:
+                        warned.add(shaped.where)
+                        _warn_left_out(shaped.where)
         finally:
             os.close(target_top)
     finally:
@@ -551,8 +603,6 @@ def _copy_name(
         )
     except FileNotFoundError:
         return  # tracked, but its folder was deleted since
-    except _InAGitFolder:
-        return
     try:
         try:
             info = os.stat(leaf, dir_fd=source, follow_symlinks=False)
@@ -571,7 +621,7 @@ def _copy_name(
             if stat.S_ISLNK(info.st_mode):
                 os.symlink(os.readlink(leaf, dir_fd=source), leaf, dir_fd=target)
             else:
-                _copy_file(source, target, leaf, name)
+                _copy_file(source, target, leaf, name, git_dirs)
         finally:
             os.close(target)
     finally:
@@ -583,9 +633,11 @@ def _copy_folder(
 ) -> None:
     """Copy all of the folder into its workspace, links as links, leaving out the results,
     any `.git`, however it is spelt, any folder `git_dirs` identifies, whatever it is
-    called, and any folder shaped like a git folder, since a repository's configuration can
-    hold a token. Without git's help, as here, a git folder can be known only by its shape:
-    a nested repository's moved git folder, or one git cannot read, is named by nothing."""
+    called, and any folder shaped like a git folder, with a warning for each, since a
+    repository's configuration can hold a token. A git configuration file in `git_dirs`,
+    linked under another name, is refused. Without git's help, as here, a git folder can be
+    known only by its shape: a nested repository's moved git folder, or one git cannot
+    read, is named by nothing."""
     base = folder.resolve()
     _refuse_a_git_folder(base, git_dirs)
     if _shaped_like_a_git_folder(lambda name: _kind(str(base / name))):
@@ -596,11 +648,16 @@ def _copy_folder(
         if _is_dot_git(name) or _inside(path.resolve(), results):
             return True
         info = path.lstat()
+        if stat.S_ISREG(info.st_mode):
+            _refuse_a_git_config(path.relative_to(base), info, git_dirs)
         if not stat.S_ISDIR(info.st_mode):
             return False
         if (info.st_dev, info.st_ino) in git_dirs:
             return True
-        return _shaped_like_a_git_folder(lambda inner: _kind(str(path / inner)))
+        if _shaped_like_a_git_folder(lambda inner: _kind(str(path / inner))):
+            _warn_left_out(path.relative_to(base))
+            return True
+        return False
 
     def ignore(where: str, names: list[str]) -> set[str]:
         return {name for name in names if left_out(Path(where) / name, name)}

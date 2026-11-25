@@ -1562,3 +1562,139 @@ async def test_outside_github_actions_nothing_is_masked(
     with pytest.raises(RunnerError):
         await run_folder(folder, runner, unreachable, tmp_path)
     assert "::add-mask::" not in capfd.readouterr().out
+
+
+# ---------------------------------------------------------------- git folders, cleanup pass
+
+
+@pytest.mark.parametrize(
+    ("head", "objects", "commondir"),
+    [
+        ("file", "folder", None),
+        ("link", "folder", None),  # git -c core.preferSymlinkRefs=true makes HEAD a link
+        ("file", "link", None),
+        ("link", "link", None),
+        (None, None, "file"),
+        (None, None, "link"),
+    ],
+)
+def test_a_git_folder_is_known_by_its_shape_whether_its_parts_are_links(
+    tmp_path: Path, head: str | None, objects: str | None, commondir: str | None
+) -> None:
+    meta = tmp_path / "meta"
+    (meta / "refs" / "heads").mkdir(parents=True)
+    (meta / "refs" / "heads" / "main").write_text("0" * 40 + "\n")
+    (meta / "store").mkdir()
+    (meta / "common.txt").write_text("../other\n")
+    for name, kind, target in (
+        ("HEAD", head, "refs/heads/main"),
+        ("objects", objects, "store"),
+        ("commondir", commondir, "common.txt"),
+    ):
+        if kind == "link":
+            (meta / name).symlink_to(target)
+        elif kind == "file":
+            (meta / name).write_text("ref: refs/heads/main\n")
+        elif kind == "folder":
+            (meta / name).mkdir()
+    assert local._shaped_like_a_git_folder(lambda name: local._kind(str(meta / name)))
+
+
+def test_an_ordinary_folder_is_not_shaped_like_a_git_folder(tmp_path: Path) -> None:
+    (tmp_path / "objects").symlink_to("nowhere")  # a dangling link to a folder is no folder
+    (tmp_path / "HEAD.md").write_text("a heading\n")
+    assert not local._shaped_like_a_git_folder(lambda name: local._kind(str(tmp_path / name)))
+
+
+def shaped_folder(folder: Path, *names: str) -> Path:
+    """A folder in the app shaped like a git folder, with the files named in it."""
+    folder.mkdir(parents=True)
+    (folder / "HEAD").write_text("ref: refs/heads/main\n")
+    (folder / "objects").mkdir()
+    for name in names:
+        (folder / name).write_text(f"{name}\n")
+    return folder
+
+
+def test_all_files_warns_once_for_each_folder_shaped_like_a_git_folder(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    shaped_folder(folder / "vendor" / "meta", "a", "b", "c")
+    shaped_folder(folder / "lib" / "cache", "d")
+    with caplog.at_level("WARNING", logger="footfall.local"):
+        local._copy_folder(folder, tmp_path / "workspace", tmp_path / "out")
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2, warnings
+    assert any("vendor/meta" in w for w in warnings) and any("lib/cache" in w for w in warnings)
+    assert all("shaped like a git folder" in w for w in warnings)
+    assert not (tmp_path / "workspace" / "vendor" / "meta").exists()
+
+
+def test_git_only_copy_warns_once_for_each_folder_it_leaves_out(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    shaped_folder(folder / "vendor" / "meta", "a", "b", "c")
+    names = [PurePosixPath("serve.py"), *(PurePosixPath(f"vendor/meta/{n}") for n in "abc")]
+    with caplog.at_level("WARNING", logger="footfall.local"):
+        local._copy_files(
+            folder,
+            tmp_path / "workspace",
+            names,
+            tmp_path / "out",
+            untracked=frozenset(names[1:]),
+        )
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1, warnings
+    assert "vendor/meta" in warnings[0] and "shaped like a git folder" in warnings[0]
+    assert (tmp_path / "workspace" / "serve.py").exists()
+    assert not (tmp_path / "workspace" / "vendor").exists()
+
+
+@pytest.mark.parametrize("config", ["config", "config.worktree"])
+def test_a_hard_link_to_the_git_configuration_is_refused(tmp_path: Path, config: str) -> None:
+    """A hostile archive, once extracted, can leave a hard link to .git/config in the
+    worktree, under any name: it is the same file, token and all, so it is never copied."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    git(folder, "config", "remote.origin.url", TOKEN_URL)
+    if config == "config.worktree":
+        (folder / ".git" / "config.worktree").write_text(f"[remote]\n\turl = {TOKEN_URL}\n")
+    os.link(folder / ".git" / config, folder / "settings.ini")
+    listing = local._git_files(folder)
+    assert PurePosixPath("settings.ini") in listing.names
+    with pytest.raises(LocalRunError, match="git configuration"):
+        local._copy_files(
+            folder,
+            tmp_path / "git-only",
+            listing.names,
+            tmp_path / "out",
+            git_dirs=listing.git_dirs,
+            untracked=listing.untracked,
+        )
+    with pytest.raises(LocalRunError, match="git configuration"):
+        local._copy_folder(
+            folder, tmp_path / "all-files", tmp_path / "out", local._known_git_folders(folder)
+        )
+
+
+def test_a_copy_of_the_configuration_that_is_not_the_same_file_is_copied(tmp_path: Path) -> None:
+    """Only the file itself is refused; a copy of its text is the app's own business."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    shutil.copy(folder / ".git" / "config", folder / "settings.ini")
+    listing = local._git_files(folder)
+    local._copy_files(
+        folder,
+        tmp_path / "workspace",
+        listing.names,
+        tmp_path / "out",
+        git_dirs=listing.git_dirs,
+        untracked=listing.untracked,
+    )
+    assert (tmp_path / "workspace" / "settings.ini").exists()
