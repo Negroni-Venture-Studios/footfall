@@ -1707,3 +1707,29 @@ def test_a_failure_to_start_the_browsers_never_carries_their_path(
     assert caught.value.__cause__ is None and caught.value.__context__ is None
     assert "OCI runtime create failed" in str(caught.value)
     assert "[the browsers' path]" in str(caught.value)
+
+
+def test_a_folder_swapped_while_measured_is_skipped_and_the_rest_still_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A swap must not end the measure early, or a run could hide its size by swapping."""
+    top = tmp_path / "top"
+    for name in ("a", "z"):
+        (top / name).mkdir(parents=True)
+        (top / name / "big.bin").write_bytes(b"\x01" * 400_000)
+    whole = _disk_usage(top)
+    real_open = os.open
+    swapped: list[str] = []
+
+    def swap_the_first_folder(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if path in ("a", "z") and not swapped:  # whichever the walk opens first
+            swapped.append(path)
+            (top / path).rename(top / f"{path}-moved")
+            (top / path).symlink_to(top / ("z" if path == "a" else "a"))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_the_first_folder)
+    measured = _disk_usage(top)
+    assert swapped
+    assert measured >= 400_000  # the other folder and its file are still counted
+    assert measured <= whole  # and nothing is counted through the link

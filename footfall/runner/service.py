@@ -299,9 +299,10 @@ def _walk(
     listing and one descriptor for each folder on the path it is on, and nothing for the
     folders it has finished or not yet reached. Each folder is yielded before anything in it.
     A folder is opened by name without following a link, and must then be the folder that was
-    listed, or `_Changed` is raised, so a folder swapped for a link is never walked through,
-    or even opened. A folder more than `max_depth` below the top raises `_Deep`. With
-    `gone_ok`, a name removed while the walk reads is skipped; otherwise the error is raised.
+    listed, so a folder swapped for a link is never walked through, or even opened. A folder
+    more than `max_depth` below the top raises `_Deep`. With `gone_ok`, a name removed or a
+    folder changed while the walk reads is skipped, and the walk goes on; without it, a
+    removed name raises its error and a changed folder raises `_Changed`.
     """
     with os.scandir(folder) as listing:
         for entry in listing:
@@ -320,18 +321,17 @@ def _walk(
                 continue
             try:
                 inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
-            except FileNotFoundError:
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+                    raise
                 if gone_ok:
                     continue
                 raise _Changed(where) from None
-            except OSError as error:
-                if error.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise _Changed(where) from None
-                raise
             try:
-                if not os.path.samestat(info, os.fstat(inner)):
+                if os.path.samestat(info, os.fstat(inner)):
+                    yield from _walk(inner, max_depth, gone_ok=gone_ok, here=where)
+                elif not gone_ok:
                     raise _Changed(where)
-                yield from _walk(inner, max_depth, gone_ok=gone_ok, here=where)
             finally:
                 os.close(inner)
 
@@ -491,8 +491,6 @@ def _disk_usage(top: Path, max_depth: int = MAX_DEPTH) -> int:
             total += _size(entry)
     except _Deep as deep:
         raise _TooDeep(f"more than {max_depth} folders deep at {_show(str(deep.where))}") from None
-    except _Changed:
-        pass  # a folder swapped for something else is not measured through
     finally:
         os.close(folder)
     return total
