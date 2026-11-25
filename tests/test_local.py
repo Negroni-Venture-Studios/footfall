@@ -2294,7 +2294,7 @@ def test_a_failed_superproject_lookup_refuses_the_copy(
     git(folder, "config", "remote.origin.url", TOKEN_URL)
     os.link(folder / ".git" / "config", folder / "settings.ini")
 
-    def fails(git: str, folder: Path) -> list[Path]:
+    def fails(git: str, folder: Path, **options: Any) -> list[Path]:
         raise LocalRunError("git cannot read the files in the folder (it failed)")
 
     monkeypatch.setattr(local, "_superproject_git_folders", fails)
@@ -2393,6 +2393,35 @@ def test_superprojects_are_followed_up_to_the_limit_and_no_further(
     found = local._superproject_git_folders("git", Path("/levels/0"))
     assert len(found) == 2 * depth  # each superproject's git folder and its common one
     assert found[-1] == Path(f"/levels/{depth}/.git")
+
+
+@pytest.mark.parametrize("failure", ["hangs", "fails"])
+def test_a_failed_superproject_lookup_under_all_files_gives_advice_that_fits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """--all-files still asks git whether the folder is in a submodule; when that fails, the
+    advice cannot be to pass --all-files, which was passed."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    git(folder, "init", "-q")
+    real_run = subprocess.run
+
+    def run(command: list[str], **options: Any) -> Any:
+        if "--show-superproject-working-tree" in command:
+            if failure == "hangs":
+                raise subprocess.TimeoutExpired(command, 60)
+            return subprocess.CompletedProcess(command, 1, b"", b"fatal: f08-marker\n")
+        return real_run(command, **options)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(LocalRunError) as caught:
+        local._known_linked(folder)
+    message = str(caught.value)
+    assert "--all-files" in message  # named, as what still asks git
+    assert "pass --all-files" not in message
+    assert "readable to git" in message
+    if failure == "fails":
+        assert "f08-marker" in message
 
 
 def test_a_folder_outside_git_is_copied_with_all_files(tmp_path: Path) -> None:

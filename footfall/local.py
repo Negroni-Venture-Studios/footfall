@@ -340,6 +340,12 @@ class _Listing:
 
 
 _GIT_ADVICE: Final = "pass --all-files to copy every file in the folder, ignored ones included"
+# Where --all-files was passed and still needs git's answer about superprojects.
+_SUPERPROJECT_ADVICE: Final = (
+    "--all-files still asks git whether the folder is in a submodule, to check that no file "
+    "is another name for a superproject's configuration; make the repository and any "
+    "superproject readable to git where Footfall runs"
+)
 # Where the hard-link check cannot run, --all-files does not help: it runs the same check.
 _LINK_ADVICE: Final = (
     "remove the files' other names, the hard links, or make the repository's git folders "
@@ -369,7 +375,9 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def _run_git(git: str, folder: Path, arguments: Sequence[str]) -> bytes:
+def _run_git(
+    git: str, folder: Path, arguments: Sequence[str], *, advice: str = _GIT_ADVICE
+) -> bytes:
     """Run git in `folder` with `_git_env`, no input and a time limit; return its output.
 
     The filesystem monitor, which a repository's configuration could point at a program, and
@@ -378,7 +386,7 @@ def _run_git(git: str, folder: Path, arguments: Sequence[str]) -> bytes:
     the footfall image trusts its mount point, /repo. git runs in a session of its own, with
     no controlling terminal, so a configuration that names /dev/tty fails at once rather than
     read the developer's terminal. Raises LocalRunError when git hangs, cannot start or
-    fails.
+    fails, ending with `advice`.
     """
     command = [git, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *arguments]
     try:
@@ -394,15 +402,15 @@ def _run_git(git: str, folder: Path, arguments: Sequence[str]) -> bytes:
         )
     except subprocess.TimeoutExpired:
         raise LocalRunError(
-            f"git took more than {GIT_TIMEOUT:g} seconds to read {_shown(folder)}; {_GIT_ADVICE}"
+            f"git took more than {GIT_TIMEOUT:g} seconds to read {_shown(folder)}; {advice}"
         ) from None
     except OSError as error:
         why = error.strerror or type(error).__name__
-        raise LocalRunError(f"git could not be started ({why}); {_GIT_ADVICE}") from None
+        raise LocalRunError(f"git could not be started ({why}); {advice}") from None
     if done.returncode != 0:
         said = done.stderr.decode("utf-8", "replace").strip().splitlines()
         why = clean_text(said[0], 200, single_line=True) if said else "no reason given"
-        raise LocalRunError(f"git cannot read the files in {_shown(folder)} ({why}); {_GIT_ADVICE}")
+        raise LocalRunError(f"git cannot read the files in {_shown(folder)} ({why}); {advice}")
     return done.stdout
 
 
@@ -415,36 +423,39 @@ def _git() -> str:
     return git
 
 
-def _git_folder_paths(git: str, folder: Path) -> list[Path]:
-    """The repository's git folder and its common folder, as git names them.
+def _git_folder_paths(git: str, folder: Path, *, advice: str = _GIT_ADVICE) -> list[Path]:
+    """The repository's git folder and its common folder, as git names them, with `advice`
+    in the error if git cannot.
 
     Each path is taken exactly as git prints it, but for the newline: git keeps a trailing
     space in a .git file's path, and a folder with that name is not the one without it.
     """
     paths = []
     for which in ("--absolute-git-dir", "--git-common-dir"):
-        where = _run_git(git, folder, ["rev-parse", "--path-format=absolute", which])
+        where = _run_git(git, folder, ["rev-parse", "--path-format=absolute", which], advice=advice)
         paths.append(Path(os.fsdecode(where.removesuffix(b"\n"))))
     return paths
 
 
-def _superproject_git_folders(git: str, folder: Path) -> list[Path]:
+def _superproject_git_folders(git: str, folder: Path, *, advice: str = _GIT_ADVICE) -> list[Path]:
     """When `folder` is in a submodule, the git folders of its superproject, and of that
     one's when it is a submodule too, out to the outermost; otherwise none. Raises
-    LocalRunError when there are more than `_MOST_SUPERPROJECTS` of them."""
+    LocalRunError when there are more than `_MOST_SUPERPROJECTS` of them, and with `advice`
+    when git cannot say."""
     found: list[Path] = []
     current = folder
     # One question more than the limit allows answers, so that the last says whether the
     # outermost allowed is the outermost there is.
     for level in range(_MOST_SUPERPROJECTS + 1):
-        where = _run_git(git, current, ["rev-parse", "--show-superproject-working-tree"])
+        asked = ["rev-parse", "--show-superproject-working-tree"]
+        where = _run_git(git, current, asked, advice=advice)
         superproject = os.fsdecode(where.removesuffix(b"\n"))
         if not superproject:
             return found
         if level == _MOST_SUPERPROJECTS:
             break
         current = Path(superproject)
-        found += _git_folder_paths(git, current)
+        found += _git_folder_paths(git, current, advice=advice)
     raise LocalRunError(
         f"{_shown(folder)} lies in submodules more than {_MOST_SUPERPROJECTS} levels deep"
     )
@@ -656,7 +667,8 @@ def _known_linked(folder: Path) -> _Linked:
         own = _git_folder_paths(git, folder)
     except LocalRunError:  # git is missing, or cannot read the repository
         return _Linked(discovered)
-    return _Linked([*own, *_superproject_git_folders(git, folder), *discovered])
+    superprojects = _superproject_git_folders(git, folder, advice=_SUPERPROJECT_ADVICE)
+    return _Linked([*own, *superprojects, *discovered])
 
 
 def _name_untracked(names: Iterable[PurePosixPath]) -> None:
