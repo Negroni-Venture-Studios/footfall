@@ -98,11 +98,11 @@ def test_allow_never_takes_an_address_from_another_run(policy: Policy) -> None:
 def test_revoke_run_revokes_every_list_of_that_run(policy: Policy) -> None:
     policy.allow(BROWSERS, RUN, ["fonts.gstatic.com"])
     policy.allow("10.90.0.10", OTHER, ["api.example.com"])
-    policy.revoke_run(RUN)
+    assert sorted(policy.revoke_run(RUN)) == [APP, BROWSERS]  # the addresses it revoked
     assert policy.decide(APP, "api.example.com", 443).run_id is None
     assert policy.decide(BROWSERS, "fonts.gstatic.com", 443).run_id is None
     assert policy.decide("10.90.0.10", "api.example.com", 443).allowed
-    policy.revoke_run(RUN)  # twice is harmless
+    assert policy.revoke_run(RUN) == []  # twice is harmless
 
 
 @pytest.mark.parametrize(

@@ -26,11 +26,12 @@ No allowed name may become a route to another site on the same server (domain fr
   then relays the rest untouched. `footfall.proxy.tls` says what this cannot stop.
 
 The proxy listens only where the runner tells it: on its own address on each run's network,
-for as long as that run lasts, so that no container on any other network can reach it. A
-connection idle for `idle_timeout` seconds in both directions is closed, and connections are
-capped in all and per client address. The proxy logs one line per decision, with the client's
-address, the run, the host, the port and the outcome. It never logs a path, a query string, a
-header value or a body.
+for as long as that run lasts, so that no container on any other network can reach it. When the
+runner revokes an address's allow list, every connection from that address is closed, open
+tunnels included, so that nothing outlasts the list that allowed it. A connection idle for
+`idle_timeout` seconds in both directions is closed, and connections are capped in all and per
+client address. The proxy logs one line per decision, with the client's address, the run, the
+host, the port and the outcome. It never logs a path, a query string, a header value or a body.
 
 Names are looked up on a pool of threads the proxy owns, not on asyncio's, which the process
 shares. A lookup's thread cannot be stopped, and one whose name server is slow or silent holds
@@ -529,6 +530,15 @@ async def _open_upstream(
 # ---------------------------------------------------------------- the server
 
 
+def _client_key(ip: str) -> str:
+    """A client's address in the form the policy keys it by, or the text itself if it is not
+    an address."""
+    try:
+        return canonical_address(ip)
+    except ValueError:
+        return ip
+
+
 def _add(counts: dict[str, int], key: str, change: int) -> None:
     """Change a count, keeping only counts above zero."""
     count = counts.get(key, 0) + change
@@ -606,6 +616,8 @@ class ProxyServer:
         self._open_upstream = open_upstream
         self._open = 0
         self._per_client: dict[str, int] = {}
+        # The task serving each connection, with its client's address in canonical form.
+        self._serving: dict[asyncio.Task[None], str] = {}
 
     @property
     def policy(self) -> Policy:
@@ -699,6 +711,15 @@ class ProxyServer:
         else:
             del self._per_client[client]
 
+    def drop(self, ip: str) -> int:
+        """Close every connection from the client at `ip`, as its allow list is revoked, and
+        return how many there were. Each closes as its task is cancelled."""
+        key = _client_key(ip)
+        tasks = [task for task, client in self._serving.items() if client == key]
+        for task in tasks:
+            task.cancel()
+        return len(tasks)
+
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
         client = str(peer[0]) if isinstance(peer, tuple) and peer else ""
@@ -708,6 +729,9 @@ class ProxyServer:
             writer.write(_response(503, "too many connections"))
             writer.close()
             return
+        task = asyncio.current_task()
+        if task is not None:
+            self._serving[task] = _client_key(client)
         try:
             await self._serve(client, reader, writer)
         except (OSError, TimeoutError, asyncio.IncompleteReadError):
@@ -717,12 +741,13 @@ class ProxyServer:
             logger.exception("the proxy failed unexpectedly serving %s", client)
         finally:
             try:
-                task = asyncio.current_task()
                 if task is None or not task.cancelling():
                     await _linger(reader, writer)
             finally:
                 writer.close()
                 self._release(client)
+                if task is not None:
+                    self._serving.pop(task, None)
 
     async def _serve(
         self, client: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter

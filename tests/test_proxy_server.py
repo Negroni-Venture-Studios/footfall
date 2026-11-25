@@ -270,6 +270,22 @@ async def test_connect_allowed_relays_bytes(live: Live) -> None:
     assert live.policy.reached(RUN) == [ALLOWED]
 
 
+async def test_dropping_a_client_closes_its_open_tunnels(live: Live) -> None:
+    async with tunnel(live.port, f"{ALLOWED}:443") as t:
+        t.writer.write(real_client_hello(ALLOWED))
+        await t.writer.drain()
+        async with asyncio.timeout(TIMEOUT):
+            await t.reader.readexactly(len(SERVER_HELLO))
+        assert live.proxy.drop("10.89.0.99") == 0  # another client's connections are its own
+        assert live.proxy.connections == 1
+        assert live.proxy.drop(f"::ffff:{CLIENT}") == 1  # the same address, mapped
+        assert await read_to_end(t.reader) == b""
+    await live.upstream.wait_for(1)  # the upstream side was closed too
+    async with asyncio.timeout(TIMEOUT):
+        while live.proxy.connections:
+            await asyncio.sleep(0.01)
+
+
 async def test_connect_name_is_matched_without_case(live: Live) -> None:
     first = hello(sni(b"API.Example.COM"))
     async with tunnel(live.port, "Api.Example.com:443") as t:

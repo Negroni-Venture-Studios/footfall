@@ -21,7 +21,8 @@ on a platform that cannot say, before it reads the request.
 
 `listen` names the proxy's own address on a run's network, once the runner has connected the
 proxy to it, and the proxy accepts connections there on its port until `revoke_run` closes
-every listener the run holds, after revoking its allow lists.
+every listener the run holds, after revoking its allow lists. `revoke` and `revoke_run` also
+close every connection from the addresses they revoke, open tunnels included.
 
 `ProxyControlClient` is the runner's side. It is synchronous, as the runner's `ProxyControl` is.
 It raises OSError when the proxy cannot be reached or does not answer properly, and
@@ -137,15 +138,18 @@ async def _call(proxy: ProxyServer, op: str, fields: dict[str, Any]) -> object:
             return None
         case "revoke":
             policy.revoke(fields["ip"])
-            logger.info("revoked %s", fields["ip"])
+            dropped = proxy.drop(fields["ip"])
+            logger.info("revoked %s and closed %d connections", fields["ip"], dropped)
             return None
         case "revoke_run":
-            policy.revoke_run(fields["run_id"])
+            revoked = policy.revoke_run(fields["run_id"])
             closed = await proxy.close_run(fields["run_id"])
+            dropped = sum(proxy.drop(ip) for ip in revoked)
             logger.info(
-                "revoked every allow list of run %s and closed %d listeners",
+                "revoked every allow list of run %s and closed %d listeners and %d connections",
                 fields["run_id"],
                 closed,
+                dropped,
             )
             return None
         case "listen":

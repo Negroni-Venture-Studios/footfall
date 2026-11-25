@@ -104,12 +104,14 @@ class Policy:
         with self._lock:
             self._lists.pop(key, None)
 
-    def revoke_run(self, run_id: str) -> None:
-        """Take away every allow list that belongs to a run."""
+    def revoke_run(self, run_id: str) -> list[str]:
+        """Take away every allow list that belongs to a run, and return their addresses."""
         check_run_id(run_id)
         with self._lock:
-            for key in [key for key, (owner, _) in self._lists.items() if owner == run_id]:
+            keys = [key for key, (owner, _) in self._lists.items() if owner == run_id]
+            for key in keys:
                 del self._lists[key]
+        return keys
 
     def decide(self, ip: str, host: str, port: int) -> Decision:
         """Whether the client at `ip` may reach `host` on `port`.

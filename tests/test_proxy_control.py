@@ -201,6 +201,49 @@ async def test_revoke_run_closes_the_runs_listeners(live: Live) -> None:
     assert await connects(live.port)
 
 
+@contextlib.asynccontextmanager
+async def idle_connection(live: Live) -> AsyncIterator[asyncio.StreamReader]:
+    """A connection from 127.0.0.1 to the proxy, open and served, that has sent nothing yet."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", live.port)
+    try:
+        async with asyncio.timeout(5):
+            while live.proxy.connections < 1:
+                await asyncio.sleep(0.01)
+        yield reader
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+
+async def closed_by_proxy(reader: asyncio.StreamReader) -> bool:
+    try:
+        async with asyncio.timeout(5):
+            return await reader.read() == b""
+    except ConnectionError:
+        return True
+
+
+async def test_revoke_closes_the_clients_connections(live: Live) -> None:
+    await call(live.client.listen, "127.0.0.1", RUN)
+    await call(live.client.allow, "127.0.0.1", RUN, ["api.example.com"])
+    async with idle_connection(live) as reader:
+        await call(live.client.revoke, APP)  # another address
+        assert live.proxy.connections == 1
+        await call(live.client.revoke, "127.0.0.1")
+        assert await closed_by_proxy(reader)
+
+
+async def test_revoke_run_closes_its_clients_connections(live: Live) -> None:
+    await call(live.client.listen, "127.0.0.1", RUN)
+    await call(live.client.allow, "127.0.0.1", RUN, ["api.example.com"])
+    async with idle_connection(live) as reader:
+        await call(live.client.revoke_run, OTHER)
+        assert live.proxy.connections == 1
+        await call(live.client.revoke_run, RUN)
+        assert await closed_by_proxy(reader)
+
+
 @pytest.mark.parametrize(
     ("ip", "message"),
     [
