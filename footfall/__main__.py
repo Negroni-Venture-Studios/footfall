@@ -21,9 +21,11 @@ Settings come from the environment:
 | `FOOTFALL_RUNTIME` | `runsc` |
 | `FOOTFALL_PROXY_CONTAINER` | `footfall-proxy` |
 | `FOOTFALL_ORCHESTRATOR_CONTAINER` | `footfall-orchestrator` |
+| `FOOTFALL_DISK_BUDGET_MIB` | `8192` |
 
 `FOOTFALL_RUNTIME=runc` starts containers without gVisor, for development on a machine that
-lacks it, and every command then prints a warning.
+lacks it, and every command then prints a warning. `FOOTFALL_DISK_BUDGET_MIB` is the most
+disk, in MiB, that the runner lets one run use, counting every copy of its app.
 """
 
 import argparse
@@ -69,6 +71,8 @@ RUNTIME_IMAGES: Final = {"python3.13": "footfall-python3.13:dev", "node22": "foo
 BROWSERS_IMAGE: Final = "footfall-browsers:dev"
 DEFAULT_OUT: Final = Path("footfall-results")
 _CONTAINER_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
+_MIB: Final = 1024**2
+_MOST_MIB: Final = 16 * 1024**2  # 16 TiB, far beyond any disk a run could have
 _LOG_TAIL_CAP: Final = 20_000
 _STOPPED: Final = 130  # the exit code when a command is stopped by a signal
 
@@ -81,6 +85,7 @@ _DEFAULTS: Final = {
     "FOOTFALL_RUNTIME": "runsc",
     "FOOTFALL_PROXY_CONTAINER": "footfall-proxy",
     "FOOTFALL_ORCHESTRATOR_CONTAINER": "footfall-orchestrator",
+    "FOOTFALL_DISK_BUDGET_MIB": "8192",
 }
 
 
@@ -99,6 +104,7 @@ class Settings:
     runtime: str
     proxy_container: str
     orchestrator_container: str
+    disk_budget: int  # bytes
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -120,6 +126,14 @@ class Settings:
                 )
             return value
 
+        def mebibytes(name: str) -> int:
+            value = get(name)
+            if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= _MOST_MIB:
+                raise SettingsError(
+                    f"{name} must be a whole number of MiB from 1 to {_MOST_MIB}, not {value!r}"
+                )
+            return int(value) * _MIB
+
         runtime = get("FOOTFALL_RUNTIME")
         if runtime not in RUNTIMES:
             raise SettingsError(f"FOOTFALL_RUNTIME must be runsc or runc, not {runtime!r}")
@@ -131,6 +145,7 @@ class Settings:
             runtime=runtime,
             proxy_container=container("FOOTFALL_PROXY_CONTAINER"),
             orchestrator_container=container("FOOTFALL_ORCHESTRATOR_CONTAINER"),
+            disk_budget=mebibytes("FOOTFALL_DISK_BUDGET_MIB"),
         )
 
 
@@ -154,6 +169,7 @@ async def run_runner(settings: Settings) -> None:
         orchestrator_container=settings.orchestrator_container,
         proxy_port=PROXY_PORT,
         runtime=settings.runtime,
+        disk_budget=settings.disk_budget,
     )
     group = os.getegid()
     logging.getLogger(__name__).info(

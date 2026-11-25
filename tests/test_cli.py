@@ -70,6 +70,7 @@ def test_settings_have_the_documented_defaults() -> None:
         runtime="runsc",
         proxy_container="footfall-proxy",
         orchestrator_container="footfall-orchestrator",
+        disk_budget=8 * 1024**3,
     )
 
 
@@ -83,6 +84,7 @@ def test_settings_come_from_the_environment() -> None:
             "FOOTFALL_RUNTIME": "runc",
             "FOOTFALL_PROXY_CONTAINER": "dev-proxy",
             "FOOTFALL_ORCHESTRATOR_CONTAINER": "dev-orchestrator",
+            "FOOTFALL_DISK_BUDGET_MIB": "96",
         }
     )
     assert settings == Settings(
@@ -93,6 +95,7 @@ def test_settings_come_from_the_environment() -> None:
         runtime="runc",
         proxy_container="dev-proxy",
         orchestrator_container="dev-orchestrator",
+        disk_budget=96 * 1024**2,
     )
 
 
@@ -103,6 +106,11 @@ def test_settings_come_from_the_environment() -> None:
         ("FOOTFALL_PROXY_CONTAINER", "proxy:8080"),
         ("FOOTFALL_ORCHESTRATOR_CONTAINER", "-orchestrator"),
         ("FOOTFALL_WORKSPACES", "relative/path"),
+        ("FOOTFALL_DISK_BUDGET_MIB", "0"),
+        ("FOOTFALL_DISK_BUDGET_MIB", "-5"),
+        ("FOOTFALL_DISK_BUDGET_MIB", "1.5"),
+        ("FOOTFALL_DISK_BUDGET_MIB", "lots"),
+        ("FOOTFALL_DISK_BUDGET_MIB", "99999999999"),
     ],
 )
 def test_bad_settings_are_refused(
@@ -319,6 +327,7 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
                 "FOOTFALL_RUNTIME": "runc",
                 "FOOTFALL_PROXY_CONTAINER": "dev-proxy",
                 "FOOTFALL_ORCHESTRATOR_CONTAINER": "dev-orchestrator",
+                "FOOTFALL_DISK_BUDGET_MIB": "77",
             }
         )
         socket_path = folder / "runner.sock"
@@ -354,6 +363,7 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
     assert options["proxy_container"] == "dev-proxy"
     assert options["orchestrator_container"] == "dev-orchestrator"
     assert options["proxy_port"] == 3128
+    assert options["disk_budget"] == 77 * 1024**2
     assert options["browsers_image"] == "footfall-browsers:dev"
     assert options["images"] == {
         "python3.13": "footfall-python3.13:dev",
