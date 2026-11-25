@@ -600,6 +600,58 @@ async def test_a_redirect_chain_off_the_app_brings_the_browser_back(
     assert step.events == ['the app redirected the browser to "evil.test"']
 
 
+FOREIGN = "<title>Foreign</title><button style='font-size:40px'>Elsewhere only</button>"
+
+
+def leaving_capture(app_server: AppServer, times: int) -> Callable[..., Awaitable[Screen]]:
+    """A capture before which, `times` times, the app sends the browser to another host: just
+    after Footfall checked that it was on the app, by a redirect hop the guard never routes."""
+    left: list[str] = []
+
+    async def leaving(page: Page, *, timeout: float) -> Screen:
+        if len(left) < times:
+            left.append(page.url)
+            await page.goto(app_server.origin + "/away")
+        return await capture(page, timeout=timeout)
+
+    return leaving
+
+
+async def test_a_screen_read_after_the_page_left_the_app_is_never_shown(
+    session: MakeSession,
+    app_server: AppServer,
+    other_server: AppServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other_server.page("/foreign", FOREIGN)
+    app_server.redirect("/away", "http://evil.test/foreign")
+    s = await session()
+    monkeypatch.setattr(tools, "capture", leaving_capture(app_server, 1))
+    outcome = await s.executor.run("look", {})
+    assert outcome.screen is not None
+    assert outcome.screen.title == "Buttons"
+    assert "Foreign" not in outcome.text and "Elsewhere only" not in outcome.text
+    assert "The browser left the app, so Footfall brought it back to /buttons." in outcome.text
+    assert s.page.url == app_server.origin + "/buttons"
+    assert other_server.paths() == ["/foreign"]  # it did go there
+    assert sorted(p.name for p in s.shots.iterdir()) == ["01.jpg", "02.jpg"]
+
+
+async def test_a_page_that_leaves_the_app_each_time_it_is_read_ends_the_persona(
+    session: MakeSession,
+    app_server: AppServer,
+    other_server: AppServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other_server.page("/foreign", FOREIGN)
+    app_server.redirect("/away", "http://evil.test/foreign")
+    s = await session()
+    monkeypatch.setattr(tools, "capture", leaving_capture(app_server, 2))
+    with pytest.raises(CaptureError, match="left the app each time"):
+        await s.executor.run("look", {})
+    assert sorted(p.name for p in s.shots.iterdir()) == ["01.jpg"]
+
+
 # ------------------------------------------------------------------ results and records
 
 

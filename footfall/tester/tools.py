@@ -830,10 +830,34 @@ class Executor:
         return notes
 
     async def _look(self) -> tuple[Screen, str, list[str]]:
+        """Capture the screen, once more if the page moved on while it was being read, or
+        left the app, and raise `CaptureError` if it left the app again.
+
+        Checking that the browser is on the app and reading the screen are not one step: a
+        page can be sent to another host between them, by a redirect hop the guard never
+        routes, and what was read is then that host's page, which the model must never be
+        shown. So the address is checked again after the read, and a screen read off the
+        app is thrown away unsaved. Returns the screen, its screenshot id, and any notes
+        from bringing the browser back to the app before a second read.
+        """
+        screen, notes = await self._read()
+        if not self._guard.on_app(self._page.url):
+            LOG.debug("the page left the app while it was read, so it is read again")
+            notes += await self._settle_on_app()
+            screen, again = await self._read()
+            notes += again
+            if not self._guard.on_app(self._page.url):
+                raise CaptureError("the page left the app each time its screen was read")
+        shot = self._save(screen.jpeg)
+        self._screen, self._shot = screen, shot
+        self._home, self._home_path = self._page.url, screen.path
+        return screen, shot, notes
+
+    async def _read(self) -> tuple[Screen, list[str]]:
         """Capture the screen, once more if the page moved on while it was being read.
 
-        Returns the screen, its screenshot id, and any notes from bringing the browser back
-        to the app before the second read.
+        Returns the screen and any notes from bringing the browser back to the app before
+        the second read.
         """
         before = self._page.url
         notes: list[str] = []
@@ -854,11 +878,7 @@ class Executor:
             # Where the navigation ended may be off the app; the model only ever sees the app.
             notes = await self._settle_on_app()
             screen = await capture(self._page, timeout=CAPTURE_TIMEOUT)
-        shot = self._save(screen.jpeg)
-        self._screen, self._shot = screen, shot
-        if self._guard.on_app(self._page.url):
-            self._home, self._home_path = self._page.url, screen.path
-        return screen, shot, notes
+        return screen, notes
 
     def _save(self, jpeg: bytes) -> str:
         shot = screenshot_id(len(self._shots) + 1)
