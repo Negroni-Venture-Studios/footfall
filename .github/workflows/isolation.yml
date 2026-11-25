@@ -112,7 +112,8 @@ jobs:
         run: |
           $COMPOSE exec -T orchestrator $PYTEST tests/isolation \
             --ignore=tests/isolation/test_end_to_end.py \
-            --ignore=tests/isolation/test_docker_host.py
+            --ignore=tests/isolation/test_docker_host.py \
+            --ignore=tests/isolation/test_runner_host.py
       - name: footfall test end to end, with each container's memory measured
         if: success() || failure()
         working-directory: deploy/dev
@@ -132,7 +133,7 @@ jobs:
           path: ${{ runner.temp }}/memory.json
           if-no-files-found: warn
           retention-days: 90
-      - name: On the host, how Docker answers, and that no run left anything behind
+      - name: On the host, links in a run's folder, where the proxy listens, how Docker answers, and that no run left anything behind
         if: success() || failure()
         env:
           FOOTFALL_ISOLATION: "1"
@@ -141,7 +142,7 @@ jobs:
         run: |
           sudo cp -r /var/lib/footfall/test-results "$FOOTFALL_TEST_RESULTS" || mkdir -p "$FOOTFALL_TEST_RESULTS"
           sudo chown -R "$(id -u):$(id -g)" "$FOOTFALL_TEST_RESULTS"
-          uv run $PYTEST tests/isolation/test_docker_host.py
+          uv run $PYTEST tests/isolation/test_runner_host.py tests/isolation/test_docker_host.py
       - name: The stack's logs
         if: always()
         working-directory: deploy/dev
