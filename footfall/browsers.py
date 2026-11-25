@@ -210,14 +210,26 @@ async def _on_app(
 ) -> ElementHandle:
     """The element `locator` finds, bound to the document it is in, which must be the app's
     page in the main frame. Filling or pressing a handle acts on that document alone, and
-    raises once the page has moved on to another."""
+    raises once the page has moved on to another.
+
+    Where the element is comes from the browser, through Playwright's record of the frame's
+    address, never from page JavaScript, which a page can redefine to name the app.
+    """
     handle = await locator.element_handle(timeout=timeout_ms)
-    frame = await handle.owner_frame()
-    origin = await handle.evaluate("element => element.ownerDocument.location.origin")
-    if frame is not page.main_frame or _origin(str(origin)) != _origin(app_origin):
-        await handle.dispose()
-        raise _LeftTheApp
+    try:
+        frame = await handle.owner_frame()
+        if frame is not page.main_frame or _origin(frame.url) != _origin(app_origin):
+            raise _LeftTheApp
+    except BaseException:
+        with contextlib.suppress(PlaywrightError):
+            await handle.dispose()
+        raise
     return handle
+
+
+def _still_on_app(page: Page, app_origin: str) -> None:
+    if _origin(page.main_frame.url) != _origin(app_origin):
+        raise _LeftTheApp
 
 
 async def sign_in(
@@ -229,11 +241,13 @@ async def sign_in(
     by its name, fills the fields and presses the button. A redirect hop is not routed, and
     a page can send the browser elsewhere at any moment, so a page that has left the app
     must never be given the account. Each element is therefore taken as a handle on its own
-    document, which must be the app's, in the main frame; a handle cannot fill or press
-    anything once its page has moved on. Raises SignInError if any step fails, if any
-    element is not on the app, if pressing the button leaves the app, or if the page is
-    still the sign-in page once the app has answered. No error carries a browser message,
-    since one can quote the page or what was typed.
+    document, which must be in the main frame while that frame is on the app, as the browser
+    reports it; the page is checked again before each field is filled and before the button
+    is pressed, and a handle cannot fill or press anything once its page has moved on.
+    Raises SignInError if any step fails, if any element is not on the app, if pressing the
+    button leaves the app, or if the page is still the sign-in page once the app has
+    answered. No error carries a browser message, since one can quote the page or what was
+    typed.
     """
     timeout_ms = SIGN_IN_TIMEOUT * 1000
     target = urljoin(app_origin + "/", login.page)
@@ -254,10 +268,13 @@ async def sign_in(
         button = page.get_by_role("button", name=login.submit, exact=True)
         handles.append(await _on_app(page, button, app_origin, timeout_ms))
         step = f"fill the field labelled {quote(login.username_label, 80)}"
+        _still_on_app(page, app_origin)
         await handles[0].fill(username, timeout=timeout_ms)
         step = f"fill the field labelled {quote(login.password_label, 80)}"
+        _still_on_app(page, app_origin)
         await handles[1].fill(password, timeout=timeout_ms)
         step = f"press the button {quote(login.submit, 80)}"
+        _still_on_app(page, app_origin)
         async with page.expect_navigation(timeout=timeout_ms):
             await handles[2].click(timeout=timeout_ms)
     except _LeftTheApp:

@@ -475,3 +475,63 @@ async def test_a_version_mismatch_fails_at_once_and_names_both_versions() -> Non
     assert "v1.65" in message and "v1.66" in message
     assert "version" in message
     assert "c2VjcmV0" not in message
+
+
+async def test_sign_in_believes_the_browser_not_the_page_about_where_it_is(
+    loopback_browser: Browser,
+    playwright: Playwright,
+    app_server: AppServer,
+    other_server: AppServer,
+    contexts: list[BrowserContext],
+) -> None:
+    # The page Footfall is sent to claims, through the DOM, to be the app.
+    app_server.page("/", PAGE)
+    app_server.page(
+        "/login",
+        "<!doctype html><title>Sign in</title><p>Loading"
+        f'<script>setTimeout(() => {{ location.href = "{other_server.origin}/login"; }}, 200)'
+        "</script>",
+    )
+    # The real document in every respect but its location, so that the element still has a
+    # frame, while page JavaScript asking for its document's origin is told the app's.
+    spoof = (
+        "<script>(() => {"
+        "const real = Object.getOwnPropertyDescriptor(Node.prototype, 'ownerDocument').get;"
+        "Object.defineProperty(Node.prototype, 'ownerDocument', {get() {"
+        "const doc = real.call(this); if (!doc) return doc;"
+        "return new Proxy(doc, {get(target, key) {"
+        f"if (key === 'location') return {{origin: '{app_server.origin}'}};"
+        "const value = Reflect.get(target, key);"
+        "return typeof value === 'function' ? value.bind(target) : value; }}); }});"
+        "})();</script>"
+    )
+    other_server.page("/login", spoof + login_page("/session"))
+    context = await persona_context(loopback_browser, playwright, app_server, contexts)
+    page = await context.new_page()
+    await page.goto(app_server.origin + "/")
+    with pytest.raises(SignInError, match="left the app"):
+        await sign_in(page, LOGIN, USERNAME, PASSWORD, app_server.origin)
+    assert not any(hit.path.startswith("/session") for hit in other_server.hits)
+    assert await page.locator("#u").input_value() == ""
+
+
+async def test_a_handle_is_let_go_when_its_frame_cannot_be_read() -> None:
+    disposed: list[bool] = []
+
+    class Handle:
+        async def owner_frame(self) -> None:
+            raise PlaywrightError("Target closed")
+
+        async def dispose(self) -> None:
+            disposed.append(True)
+
+    class Locator:
+        async def element_handle(self, timeout: float) -> Handle:
+            return Handle()
+
+    class Page:
+        main_frame = object()
+
+    with pytest.raises(PlaywrightError):
+        await browsers._on_app(Page(), Locator(), "http://10.89.0.11:8080", 1000)  # type: ignore[arg-type]
+    assert disposed == [True]
