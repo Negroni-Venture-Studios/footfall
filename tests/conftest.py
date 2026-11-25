@@ -1,5 +1,6 @@
 """Shared fixtures."""
 
+import os
 import socket
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
@@ -90,3 +91,40 @@ async def api() -> AsyncIterator[Api]:
         yield fake
     finally:
         await fake.close()
+
+
+class MaskOutput:
+    """Stands in for a GitHub Actions job's output: a pipe that `footfall.actions` writes its
+    mask commands to, as it writes them to the pipe a job gives a step."""
+
+    def __init__(self) -> None:
+        self.reader, self.writer = os.pipe()
+        os.set_blocking(self.reader, False)
+
+    def read(self) -> str:
+        data = b""
+        while True:
+            try:
+                chunk = os.read(self.reader, 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            data += chunk
+        return data.decode()
+
+    def close(self) -> None:
+        os.close(self.reader)
+        os.close(self.writer)
+
+
+@pytest.fixture
+def mask_output(monkeypatch: pytest.MonkeyPatch) -> Iterator[MaskOutput]:
+    """Mask commands go to a pipe of the test's own, as in a job, and GITHUB_ACTIONS is set."""
+    output = MaskOutput()
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr("footfall.actions._STREAMS", (output.writer,))
+    try:
+        yield output
+    finally:
+        output.close()

@@ -19,6 +19,7 @@ import pytest
 from footfall.runner.client import RunnerClient
 from footfall.runner.server import MAX_REQUEST, serve
 from footfall.runner.service import DISK_REASON, RunnerError
+from tests.conftest import MaskOutput
 from tests.runner_fakes import Harness, make_harness
 
 RUN = "r_abcdefghijklmnopqrstuvwxyz"
@@ -74,10 +75,7 @@ async def exchange(path: Path, data: bytes) -> dict[str, Any]:
     return reply
 
 
-async def test_round_trip_prepare(
-    live: Live, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+async def test_round_trip_prepare(live: Live, mask_output: MaskOutput) -> None:
     h, client = live.harness, live.client
     workspace = h.workspace()
     await client.prepare(
@@ -103,7 +101,7 @@ async def test_round_trip_prepare(
     address = h.engine.ips[f"footfall-{RUN}-browsers-browsers"]
     assert endpoint == f"ws://{address}:3000{browsers['Cmd'][-1]}"
     # The orchestrator's output is what a GitHub Actions job reads, so it masks the path there.
-    assert f"::add-mask::{browsers['Cmd'][-1].lstrip('/')}\n" in capfd.readouterr().out
+    assert f"\n::add-mask::{browsers['Cmd'][-1].lstrip('/')}\n" in mask_output.read()
     assert len(browsers["Cmd"][-1]) == 33
     assert browsers["Cmd"][:2] == ["node", "/opt/footfall/gate.js"]
     h.engine.output["app"] = "listening on 8000\n"

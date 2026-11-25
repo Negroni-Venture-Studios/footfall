@@ -46,6 +46,7 @@ from footfall.tester.report import Finding, PersonaReport, clean_text, strip_inv
 from footfall.tester.screen import CaptureError, capture
 from footfall.tester.tools import Executor
 from tests.app_server import AppServer
+from tests.conftest import MaskOutput
 
 ROOT = Path(__file__).resolve().parent.parent
 DEMO = ROOT / "demo-app"
@@ -1525,16 +1526,15 @@ async def test_a_tracked_git_fixture_is_still_copied(
 
 
 async def test_in_github_actions_the_password_is_masked_before_it_is_used(
-    tmp_path: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, mask_output: MaskOutput
 ) -> None:
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     folder = two_pages(tmp_path, LOGIN_MANIFEST)
     printed: list[str] = []
 
     class SeedFails(FakeRunner):
         async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> None:
             # The first use of the password: by now the mask must be in the log already.
-            printed.append(capfd.readouterr().out)
+            printed.append(mask_output.read())
             self.envs.append(dict(rest[-1]))
             raise RunnerError("seed failed with exit code 1")
 
@@ -1549,7 +1549,7 @@ async def test_in_github_actions_the_password_is_masked_before_it_is_used(
 
 
 async def test_outside_github_actions_nothing_is_masked(
-    tmp_path: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, mask_output: MaskOutput, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     folder = two_pages(tmp_path, LOGIN_MANIFEST)
@@ -1561,7 +1561,7 @@ async def test_outside_github_actions_nothing_is_masked(
 
     with pytest.raises(RunnerError):
         await run_folder(folder, runner, unreachable, tmp_path)
-    assert "::add-mask::" not in capfd.readouterr().out
+    assert mask_output.read() == ""
 
 
 # ---------------------------------------------------------------- git folders, cleanup pass
