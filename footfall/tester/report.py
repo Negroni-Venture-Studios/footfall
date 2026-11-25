@@ -200,6 +200,7 @@ def _finding(
     source: str,
     device: str,
     screenshots: set[str],
+    redact: Callable[[str], str],
 ) -> Finding:
     where = f"finding {index + 1}: "
     if not isinstance(item, Mapping):
@@ -215,7 +216,8 @@ def _finding(
     for shot in shots:
         if shot not in screenshots:
             raise ToolError(
-                f"{where}`screenshots` names {clean_text(shot, 40)!r}, which was never taken"
+                f"{where}`screenshots` names {clean_text(redact(shot), 40)!r}, which was "
+                "never taken"
             )
     shots = list(dict.fromkeys(shots))[:MAX_SCREENSHOTS]
     return Finding(
@@ -265,9 +267,17 @@ def _map_finding(item: object, change: Callable[[str], str]) -> object:
 
 
 def parse_finish(
-    data: Mapping[str, Any], *, source: str, device: str, screenshots: set[str]
+    data: Mapping[str, Any],
+    *,
+    source: str,
+    device: str,
+    screenshots: set[str],
+    redact: Callable[[str], str] = lambda text: text,
 ) -> tuple[str, int, str, list[Finding]]:
-    """Check a `finish` input and return the summary, score, goal reached and findings."""
+    """Check a `finish` input and return the summary, score, goal reached and findings.
+
+    An error that quotes the model's text quotes it through `redact` before it is cut, so
+    that no cut leaves part of a secret for a later redaction to miss."""
     summary = _text(data, "summary", CAPS["summary"], "", required=True)
     score = _get(data, "score", "")
     if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 10:
@@ -280,7 +290,7 @@ def parse_finish(
         raise ToolError("`findings` must be a list")
     # Every finding is checked, including any that will be dropped.
     found = [
-        _finding(item, i, source=source, device=device, screenshots=screenshots)
+        _finding(item, i, source=source, device=device, screenshots=screenshots, redact=redact)
         for i, item in enumerate(raw)
     ]
     dropped = len(found) - CAPS["findings"]

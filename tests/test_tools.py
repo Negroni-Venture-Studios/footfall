@@ -8,7 +8,8 @@ import stat
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from playwright.async_api import Browser, BrowserContext, Page
@@ -1543,3 +1544,63 @@ async def test_a_password_thrown_while_focus_is_read_never_reaches_the_log(
     for place in [caplog.text, again.text, str(s.trace.steps()), *messages]:
         for run in runs:
             assert run not in place, (run, place[:200])
+
+
+# ---------------------------------------------------------------- errors that echo the model
+
+
+SECRET_32 = "Pw9-kQ2_xZ7vRm4LtB8nC3sY6hJ1dF5g"  # gitleaks:allow  # a 32-character password
+
+
+class _NoGuard:
+    origin = "http://10.89.0.11:8080"
+
+    def drain(self) -> list[Any]:
+        return []
+
+
+def finding_with(**fields: Any) -> dict[str, Any]:
+    """The example report, its one finding given `fields` as well."""
+    (finding,) = FINISH_EXAMPLE["findings"]
+    return {**FINISH_EXAMPLE, "findings": [{**finding, **fields}]}
+
+
+def no_browser_executor(tmp_path: Path) -> tuple[Executor, Trace]:
+    """An executor with no browser behind it, past its first look, for the steps that fail
+    on their input before the page is touched."""
+    trace = Trace(tmp_path / "trace.jsonl")
+    executor = Executor(
+        cast(Page, object()),
+        cast(Guard, _NoGuard()),
+        trace,
+        tmp_path / "shots",
+        touch=False,
+        redact=frozenset({SECRET_32}),
+    )
+    executor._screen = cast(Screen, SimpleNamespace(path="/"))
+    executor._shot = "01"
+    executor._shots.append("01")
+    return executor, trace
+
+
+@pytest.mark.parametrize(
+    ("name", "tool_input"),
+    [
+        ("look", {f"123456789{SECRET_32}": 1}),
+        ("finish", {**FINISH_EXAMPLE, f"123456789{SECRET_32}": 1}),
+        ("finish", finding_with(**{f"123456789{SECRET_32}": 1})),
+        ("finish", finding_with(screenshots=[f"123456789{SECRET_32}"])),
+    ],
+)
+async def test_an_error_that_echoes_the_model_is_redacted_before_it_is_cut(
+    tmp_path: Path, name: str, tool_input: dict[str, Any]
+) -> None:
+    """Part B, Minor 7: an error that quotes a field name or a screenshot id the model wrote
+    was cut to 40 characters before the trace redacted it, so nine characters of padding
+    before a 32-character password left 30 of its characters in trace.jsonl."""
+    executor, trace = no_browser_executor(tmp_path)
+    outcome = await executor.run(name, tool_input)
+    assert outcome.error is True
+    written = trace.path.read_text(encoding="utf-8")
+    assert "[password]" in written
+    assert SECRET_32[:20] not in written

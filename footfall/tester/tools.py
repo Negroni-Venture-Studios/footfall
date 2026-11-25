@@ -21,7 +21,7 @@ import os
 import re
 import sys
 import unicodedata
-from collections.abc import Awaitable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -315,14 +315,23 @@ def _show(number: int) -> str:
     return str(number) if -_LARGE < number < _LARGE else "a very large number"
 
 
+def _cut_key(key: str) -> str:
+    return clean_text(key, _KEY_CAP, single_line=True)
+
+
 def _check_fields(
-    data: Mapping[str, Any], names: tuple[str, ...], *, nullable: tuple[str, ...] = ()
+    data: Mapping[str, Any],
+    names: tuple[str, ...],
+    *,
+    nullable: tuple[str, ...] = (),
+    shown: Callable[[str], str] = _cut_key,
 ) -> None:
+    """Refuse a field the tool does not have, named as `shown` shows it, and a missing one.
+    `shown` must redact before it cuts, as the executor's does, since the name is the
+    model's own text."""
     for key in data:
         if key not in names:
-            raise ToolError(
-                f"unexpected field `{clean_text(str(key), _KEY_CAP, single_line=True)}`"
-            )
+            raise ToolError(f"unexpected field `{shown(str(key))}`")
     for key in names:
         if key not in data and key not in nullable:
             raise ToolError(f"missing field `{key}`")
@@ -418,8 +427,8 @@ def _event_lines(events: list[GuardEvent]) -> list[str]:
     return [EVENTS_HEADING, *(f"- {_event_text(e)}" for e in events)]
 
 
-def _check_finish(data: Mapping[str, Any]) -> None:
-    _check_fields(data, _FINISH_FIELDS)
+def _check_finish(data: Mapping[str, Any], shown: Callable[[str], str] = _cut_key) -> None:
+    _check_fields(data, _FINISH_FIELDS, shown=shown)
     findings = data["findings"]
     if not isinstance(findings, list):
         return  # parse_finish says what is wrong
@@ -428,8 +437,7 @@ def _check_finish(data: Mapping[str, Any]) -> None:
         if isinstance(item, Mapping):
             for key in item:
                 if key not in allowed:
-                    name = clean_text(str(key), _KEY_CAP, single_line=True)
-                    raise ToolError(f"finding {index}: unexpected field `{name}`")
+                    raise ToolError(f"finding {index}: unexpected field `{shown(str(key))}`")
 
 
 def _failure(error: BaseException) -> str:
@@ -716,7 +724,7 @@ class Executor:
 
     async def _perform(self, name: str, data: Mapping[str, Any]) -> _Action:
         if name == "look":
-            _check_fields(data, ())
+            _check_fields(data, (), shown=self._key)
             return _Action()
         if name == "tap":
             return await self._tap(data)
@@ -727,18 +735,24 @@ class Executor:
         if name == "go":
             return await self._go(data)
         if name == "finish":
-            _check_finish(data)
+            _check_finish(data, self._key)
             # Checked as the loop will read it, so that free text made only of characters
             # that show nothing is refused here, where the model can try again.
             visible = map_report_text(data, strip_invisible) if self.secrets else data
-            parse_finish(visible, source="", device="", screenshots=self.screenshot_ids)
+            parse_finish(
+                visible,
+                source="",
+                device="",
+                screenshots=self.screenshot_ids,
+                redact=self._redact,
+            )
             return _Action(finish=dict(data))
         # The name is the model's own text, so none of it is echoed into the trace.
         raise ToolError("there is no tool by that name")
 
     async def _tap(self, data: Mapping[str, Any]) -> _Action:
         names = ("element", "x", "y")
-        _check_fields(data, names, nullable=names)
+        _check_fields(data, names, nullable=names, shown=self._key)
         element, x, y = (_whole(data.get(n), n) for n in names)
         if element is not None and x is None and y is None:
             target = self._element(element)
@@ -768,7 +782,7 @@ class Executor:
         return action
 
     async def _type(self, data: Mapping[str, Any]) -> _Action:
-        _check_fields(data, ("text",))
+        _check_fields(data, ("text",), shown=self._key)
         text = data["text"]
         if not isinstance(text, str):
             raise ToolError("`text` must be a string")
@@ -795,7 +809,7 @@ class Executor:
         return action
 
     async def _scroll(self, data: Mapping[str, Any]) -> _Action:
-        _check_fields(data, ("direction",))
+        _check_fields(data, ("direction",), shown=self._key)
         direction = data["direction"]
         if not isinstance(direction, str) or direction not in _DIRECTIONS:
             raise ToolError("`direction` must be one of up, down, left or right")
@@ -815,7 +829,7 @@ class Executor:
             await self._page.evaluate("([x, y]) => window.scrollBy(x, y)", [dx, dy])
 
     async def _go(self, data: Mapping[str, Any]) -> _Action:
-        _check_fields(data, ("to",))
+        _check_fields(data, ("to",), shown=self._key)
         to = data["to"]
         page = self._page
         if to == "back":
@@ -978,6 +992,10 @@ class Executor:
 
     def _fit(self, text: str, cap: int, *, single_line: bool = False) -> str:
         return self._redactor.fit(text, cap, single_line=single_line)
+
+    def _key(self, key: str) -> str:
+        """A field name the model wrote, as an error shows it: redacted, then cut."""
+        return self._fit(key, _KEY_CAP, single_line=True)
 
     def _record(self, name: str, data: object) -> dict[str, Any]:
         """A tool input as the trace keeps it: the fields the tool has, each string cleaned,
