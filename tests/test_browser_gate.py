@@ -8,7 +8,9 @@ answers everything else with an empty 404.
 
 import asyncio
 import contextlib
+import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -32,15 +34,44 @@ NOT_FOUND = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r
 # Every child process a test starts carries this in its command line, so that a test can
 # find any that is left behind.
 MARKER = f"footfall-gate-test-{os.getpid()}"
-KEEP_RUNNING = [NODE, "-e", "setInterval(() => {}, 1 << 30)", MARKER]
 
 
-def keep_running(marker: str) -> list[str]:
-    return [NODE, "-e", "setInterval(() => {}, 1 << 30)", marker]
+def child(marker: str, script: str) -> list[str]:
+    """A node child whose command line names `marker` first, in a comment at the head of its
+    script, where no cut of a long command line can reach it."""
+    return [NODE, "-e", f"/* {marker} */ {script}"]
 
 
-def ignores_term(marker: str) -> list[str]:
-    return [NODE, "-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1 << 30)", marker]
+KEEP_RUNNING = child(MARKER, "setInterval(() => {}, 1 << 30)")
+
+
+def keep_running(marker: str, ready: Path) -> list[str]:
+    """A child that runs until it is signalled, and writes `ready` once it is running."""
+    script = (
+        f"require('fs').writeFileSync({json.dumps(str(ready))}, ''); "
+        "setInterval(() => {}, 1 << 30)"
+    )
+    return child(marker, script)
+
+
+def ignores_term(marker: str, ready: Path) -> list[str]:
+    """A child that ignores SIGTERM, as a slow run-server would, and writes `ready` once its
+    handler is in place."""
+    script = (
+        "process.on('SIGTERM', () => {}); "
+        f"require('fs').writeFileSync({json.dumps(str(ready))}, ''); "
+        "setInterval(() => {}, 1 << 30)"
+    )
+    return child(marker, script)
+
+
+def ready_soon(ready: Path, within: float = 5) -> bool:
+    deadline = time.monotonic() + within
+    while not ready.exists():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
 
 
 PS = shutil.which("ps") or "ps"
@@ -50,10 +81,16 @@ def running(marker: str) -> list[str]:
     """The command lines of every process still running that carry `marker`.
 
     `-A` is POSIX for every process. procps reads `-axo` as processes with a terminal,
-    which leaves out everything a CI runner starts.
+    which leaves out everything a CI runner starts. procps also cuts each command line at
+    the screen width, 80 columns when the output is not a terminal, which on CI is less
+    than the path to node; `-ww` means no limit, there and on macOS.
+
+    The gate and its keeper carry the child's command line, marker included, in their own,
+    so lines naming gate.js are left out: only the child itself counts.
     """
-    listed = subprocess.run([PS, "-A", "-o", "command="], capture_output=True, check=True)
-    return [line for line in listed.stdout.decode().splitlines() if marker in line]
+    listed = subprocess.run([PS, "-A", "-ww", "-o", "command="], capture_output=True, check=True)
+    lines = listed.stdout.decode().splitlines()
+    return [line for line in lines if marker in line and "gate.js" not in line]
 
 
 def appears(marker: str, within: float) -> bool:
@@ -302,10 +339,12 @@ async def test_held_heads_from_one_address_cannot_crowd_out_the_run(
             writer.close()
 
 
-def test_a_stopped_gate_leaves_no_child_behind() -> None:
+def test_a_stopped_gate_leaves_no_child_behind(tmp_path: Path) -> None:
     marker = f"{MARKER}-stopped"
-    gate = Gate(free_port(), keep_running(marker))
+    ready = tmp_path / "ready"
+    gate = Gate(free_port(), keep_running(marker, ready))
     try:
+        assert ready_soon(ready)
         assert appears(marker, within=5)
         started = time.monotonic()
         gate.process.terminate()
@@ -316,26 +355,31 @@ def test_a_stopped_gate_leaves_no_child_behind() -> None:
         gate.stop()
 
 
-def test_a_child_that_ignores_sigterm_is_killed_within_a_bound() -> None:
+def test_a_child_that_ignores_sigterm_is_killed_within_a_bound(tmp_path: Path) -> None:
     # run-server may take its time to close its browsers, longer on some machines than on
     # others; the gate waits a few seconds, then kills its child's whole group, and exits.
     marker = f"{MARKER}-stubborn"
-    gate = Gate(free_port(), ignores_term(marker))
+    ready = tmp_path / "ready"
+    gate = Gate(free_port(), ignores_term(marker, ready))
     try:
+        assert ready_soon(ready)  # the child ignores SIGTERM from here on
         assert appears(marker, within=5)
         started = time.monotonic()
         gate.process.terminate()
         gate.process.wait(timeout=10)
-        assert time.monotonic() - started < 7
+        took = time.monotonic() - started
+        assert 2.5 <= took < 7  # the grace period, then SIGKILL
         assert gone(marker, within=2)
     finally:
         gate.stop()
 
 
-def test_a_killed_gate_takes_its_child_with_it() -> None:
+def test_a_killed_gate_takes_its_child_with_it(tmp_path: Path) -> None:
     marker = f"{MARKER}-orphan"
-    gate = Gate(free_port(), keep_running(marker))
+    ready = tmp_path / "ready"
+    gate = Gate(free_port(), keep_running(marker, ready))
     try:
+        assert ready_soon(ready)
         assert appears(marker, within=5)
         gate.process.kill()
         gate.process.wait(timeout=5)
@@ -344,9 +388,28 @@ def test_a_killed_gate_takes_its_child_with_it() -> None:
         gate.stop()
 
 
+def test_the_keeper_listens_for_its_stop_before_it_starts_the_child() -> None:
+    # A SIGTERM between starting the child and listening for the signal would kill the keeper
+    # and leave the child, in a group of its own, running. The window is a few microseconds
+    # in one synchronous tick, too small for a timing test to hit, so the order is read from
+    # the source.
+    source = GATE.read_text()
+    keep = source[source.index("function keep(") : source.index("function main(")]
+    spawned = keep.index("childProcess.spawn(")
+    for handler in (
+        'process.on("SIGTERM"',
+        'process.on("SIGINT"',
+        'process.stdin.on("end"',
+        'process.stdin.on("error"',
+    ):
+        assert keep.index(handler) < spawned, handler
+    # Stopped before there is a child, the keeper exits at once.
+    assert re.search(r"if \(child === null\) process\.exit\(", keep)
+
+
 def test_the_gate_exits_when_run_server_does() -> None:
     marker = f"{MARKER}-exits"
-    gate = Gate(free_port(), [NODE, "-e", "setTimeout(() => process.exit(3), 300)", marker])
+    gate = Gate(free_port(), child(marker, "setTimeout(() => process.exit(3), 300)"))
     try:
         assert gate.process.wait(timeout=10) == 3
     finally:

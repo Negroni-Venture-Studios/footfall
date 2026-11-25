@@ -180,32 +180,36 @@ function killGroup(child, signal) {
 }
 
 // The keeper: run the command in a group of its own, and stop the whole group when told to,
-// when the gate's pipe closes, or when the command exits.
+// when the gate's pipe closes, or when the command exits. It listens for all three before it
+// starts the command, so that no signal can end it in between and leave the command running;
+// stopped before there is a command, it simply exits.
 function keep(command) {
-  const child = childProcess.spawn(command[0], command.slice(1), {
-    stdio: ["ignore", "ignore", "inherit"],
-    detached: true,
-  });
+  let child = null;
   let stopping = false;
   const stop = () => {
     if (stopping) return;
     stopping = true;
+    if (child === null) process.exit(1);
     killGroup(child, "SIGTERM");
     setTimeout(() => {
       killGroup(child, "SIGKILL");
       process.exit(1);
     }, STOP_GRACE_MS);
   };
-  child.on("error", () => process.exit(1));
-  child.on("exit", (code) => {
-    killGroup(child, "SIGKILL"); // anything the command left in its group
-    process.exit(code === null ? 1 : code);
-  });
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
   process.stdin.on("end", stop);
   process.stdin.on("error", stop);
   process.stdin.resume();
+  child = childProcess.spawn(command[0], command.slice(1), {
+    stdio: ["ignore", "ignore", "inherit"],
+    detached: true,
+  });
+  child.on("error", () => process.exit(1));
+  child.on("exit", (code) => {
+    killGroup(child, "SIGKILL"); // anything the command left in its group
+    process.exit(code === null ? 1 : code);
+  });
 }
 
 function main() {
