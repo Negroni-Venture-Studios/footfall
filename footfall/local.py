@@ -884,10 +884,12 @@ def _copy_folder(
     """Copy all of the folder into its workspace, links as links, leaving out the results,
     any `.git`, however it is spelt, any folder `git_dirs` identifies, whatever it is
     called, and any folder shaped like a git folder, with a warning for each, since a
-    repository's configuration can hold a token. A git configuration file in `git_dirs`,
-    linked under another name, is refused. Without git's help, as here, a git folder can be
-    known only by its shape: a nested repository's moved git folder, or one git cannot
-    read, is named by nothing."""
+    repository's configuration can hold a token. A file with another name that is a file
+    of the repository's git folders, as `linked` finds them, is refused. Which folders are
+    left out is decided without git's help, so there a git folder is known only by its
+    name or its shape: a nested repository's moved git folder, or one git cannot read, is
+    named by nothing. The hard-link check does not depend on git, since `linked` finds the
+    git folders as git would when git cannot."""
     base = folder.resolve()
     _refuse_a_git_folder(base, git_dirs)
     if _shaped_like_a_git_folder(lambda name: _kind(str(base / name))):

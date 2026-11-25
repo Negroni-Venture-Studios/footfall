@@ -530,10 +530,12 @@ def _measure(top: Path, max_depth: int) -> tuple[int, int]:
 def _measure_settled(top: Path, max_depth: int) -> tuple[int, int]:
     """A measure, taken again at once if it skipped something. A file or folder replaced
     once, as a dev server replaces a cache folder while it starts, is found by the second;
-    a run that keeps changing its files makes both skip."""
+    a run that keeps changing its files makes both skip, and then the larger of the two is
+    the usage, since each missed what it skipped."""
     usage, skipped = _measure(top, max_depth)
     if skipped:
-        usage, skipped = _measure(top, max_depth)
+        again, skipped = _measure(top, max_depth)
+        usage = max(usage, again) if skipped else again
     return usage, skipped
 
 

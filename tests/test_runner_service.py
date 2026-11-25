@@ -1915,3 +1915,19 @@ def test_a_failed_clean_up_after_the_browsers_fail_never_logs_their_path(
     assert "remove failed" in logged  # the clean-up's failure was logged
     assert path not in logged
     assert path not in str(caught.value)
+
+
+def test_when_both_measures_skip_the_larger_is_held_to_the_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A renamer can make the second measure smaller than the first; the larger one counts."""
+    h = make_harness(tmp_path, disk_budget=MIB)
+    prepare(h)
+    sizes = [2 * MIB, PAGE]
+
+    def measure(top: Path, max_depth: int) -> tuple[int, int]:
+        return (sizes.pop(0) if sizes else PAGE), 1
+
+    monkeypatch.setattr("footfall.runner.service._measure", measure)
+    h.service.check_runs()
+    assert h.service.status(RUN) == DISK_REASON
