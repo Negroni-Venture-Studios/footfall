@@ -65,6 +65,7 @@ jobs:
       - name: Make the folders the stack mounts
         run: |
           sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/footfall /var/lib/footfall/workspaces
+          sudo install -d -o root -g root -m 0700 /var/lib/footfall-runs
           sudo install -d -o 10001 -g 10001 -m 0755 /var/lib/footfall/test-logs
       - name: Listen on every address of the host
         # An app container must not reach the host. This gives the tests a port that

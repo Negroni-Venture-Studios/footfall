@@ -7,6 +7,7 @@ that a seed can go over it in seconds rather than by writing gigabytes.
 import os
 import secrets
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +31,15 @@ async def test_the_runner_socket_is_root_and_the_orchestrators_group(
     assert os.getgid() == ORCHESTRATOR_GROUP
     assert os.getuid() != 0
     assert await runner.status(new_run_id()) is None  # the orchestrator can use it
+
+
+def test_the_orchestrator_cannot_reach_the_runs_folder() -> None:
+    """The root runner writes below the runs folder and names its folders to Docker, so the
+    orchestrator, which is not root, must have no way to rename anything there (audit F-02).
+    It does not mount the folder at all, and its own state folder holds no runs folder."""
+    assert not Path("/var/lib/footfall-runs").exists()
+    assert not Path("/var/lib/footfall/runs").exists()
+    assert Path("/var/lib/footfall/workspaces").is_dir()  # the control: what it does mount
 
 
 async def test_the_seed_writes_into_the_folder_each_app_copy_starts_from(

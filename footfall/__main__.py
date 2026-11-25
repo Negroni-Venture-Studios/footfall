@@ -17,7 +17,7 @@ Settings come from the environment:
 | `FOOTFALL_RUNNER_SOCKET` | `/run/footfall/runner.sock` |
 | `FOOTFALL_PROXY_CONTROL` | `/run/footfall-proxy/proxy.sock` |
 | `FOOTFALL_WORKSPACES` | `/var/lib/footfall/workspaces` |
-| `FOOTFALL_RUNS` | `/var/lib/footfall/runs` |
+| `FOOTFALL_RUNS` | `/var/lib/footfall-runs` |
 | `FOOTFALL_RUNTIME` | `runsc` |
 | `FOOTFALL_PROXY_CONTAINER` | `footfall-proxy` |
 | `FOOTFALL_ORCHESTRATOR_CONTAINER` | `footfall-orchestrator` |
@@ -26,6 +26,8 @@ Settings come from the environment:
 `FOOTFALL_RUNTIME=runc` starts containers without gVisor, for development on a machine that
 lacks it, and every command then prints a warning. `FOOTFALL_DISK_BUDGET_MIB` is the most
 disk, in MiB, that the runner lets one run use, counting every copy of its app.
+`FOOTFALL_RUNS` must belong to root and be writable by root alone, as must every folder above
+it, or the runner will not start.
 """
 
 import argparse
@@ -89,7 +91,7 @@ _DEFAULTS: Final = {
     # A folder of its own, which only the proxy and the runner mount.
     "FOOTFALL_PROXY_CONTROL": "/run/footfall-proxy/proxy.sock",
     "FOOTFALL_WORKSPACES": "/var/lib/footfall/workspaces",
-    "FOOTFALL_RUNS": "/var/lib/footfall/runs",
+    "FOOTFALL_RUNS": "/var/lib/footfall-runs",
     "FOOTFALL_RUNTIME": "runsc",
     "FOOTFALL_PROXY_CONTAINER": "footfall-proxy",
     "FOOTFALL_ORCHESTRATOR_CONTAINER": "footfall-orchestrator",

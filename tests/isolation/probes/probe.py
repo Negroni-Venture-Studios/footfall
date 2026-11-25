@@ -197,6 +197,7 @@ def check_sandbox(_: Sequence[str]) -> dict[str, Any]:
                 "/run/footfall/runner.sock",
                 "/run/footfall-proxy/proxy.sock",
                 "/var/lib/footfall",
+                "/var/lib/footfall-runs",
                 "/repo",
             )
         },

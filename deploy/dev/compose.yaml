@@ -3,6 +3,7 @@
 # images/README.md describes, then, from this folder:
 #
 #   sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/footfall /var/lib/footfall/workspaces
+#   sudo install -d -o root -g root -m 0700 /var/lib/footfall-runs
 #   FOOTFALL_REPO=/path/to/a/repository docker compose up -d
 #   docker compose exec orchestrator footfall test /repo/<the app's folder>
 #
@@ -11,6 +12,11 @@
 # .git, so that footfall test copies only the files git would commit, and an
 # ignored .env stays behind. The results land in
 # /var/lib/footfall/footfall-results on the host.
+#
+# Each run's files are in /var/lib/footfall-runs, which must be root's alone:
+# the runner, which is root, writes there and names its folders to Docker, so
+# no other user may rename anything in it or above it. The runner refuses to
+# start otherwise, and nothing else mounts it.
 #
 # On a Mac, Docker Desktop has no gVisor. FOOTFALL_RUNTIME=runc starts the
 # containers under test without it, and every command then warns that it has.
@@ -38,7 +44,8 @@ services:
       # Only the proxy and the runner mount its control socket.
       - proxy-control:/run/footfall-proxy
     # Docker's default bridge, from which it reaches the hosts each run is
-    # allowed. The runner connects it to each run's network.
+    # allowed. The runner connects it to each run's network and tells it its
+    # address there, and that is the only place it listens.
     network_mode: bridge
     read_only: true
     tmpfs:
@@ -64,12 +71,17 @@ services:
       FOOTFALL_RUNTIME: ${FOOTFALL_RUNTIME:-runsc}
       FOOTFALL_PROXY_CONTAINER: footfall-proxy
       FOOTFALL_ORCHESTRATOR_CONTAINER: footfall-orchestrator
+      FOOTFALL_RUNS: /var/lib/footfall-runs
     volumes:
       # Nothing else in Footfall mounts the Docker socket.
       - /var/run/docker.sock:/var/run/docker.sock
       # Docker reads a container's bind sources on the host, so the runs
-      # folder has the same path in here as on the host.
-      - /var/lib/footfall:/var/lib/footfall
+      # folder has the same path in here as on the host. Only the runner
+      # mounts it.
+      - /var/lib/footfall-runs:/var/lib/footfall-runs
+      # The orchestrator's copies of the folders it tests, which the runner
+      # only reads.
+      - /var/lib/footfall/workspaces:/var/lib/footfall/workspaces:ro
       - runner-socket:/run/footfall
       - proxy-control:/run/footfall-proxy
     # It needs no network: it reaches Docker and the proxy by Unix socket.

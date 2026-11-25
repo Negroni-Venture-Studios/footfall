@@ -125,6 +125,7 @@ def test_no_socket_of_docker_or_footfall_is_there(sandbox: dict[str, Any]) -> No
         "/run/footfall/runner.sock": False,
         "/run/footfall-proxy/proxy.sock": False,
         "/var/lib/footfall": False,
+        "/var/lib/footfall-runs": False,
         "/repo": False,
     }
 

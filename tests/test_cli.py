@@ -67,7 +67,7 @@ def test_settings_have_the_documented_defaults() -> None:
         # In a folder of its own, which only the proxy and the runner mount.
         proxy_control=Path("/run/footfall-proxy/proxy.sock"),
         workspaces=Path("/var/lib/footfall/workspaces"),
-        runs=Path("/var/lib/footfall/runs"),
+        runs=Path("/var/lib/footfall-runs"),
         runtime="runsc",
         proxy_container="footfall-proxy",
         orchestrator_container="footfall-orchestrator",

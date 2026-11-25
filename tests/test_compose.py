@@ -71,8 +71,50 @@ def test_the_runner_is_root_with_three_capabilities_and_no_network() -> None:
     assert added is not None
     assert re.findall(r"- ([A-Z_]+)", added.group(1)) == ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
     assert "    network_mode: none" in block
-    # Docker reads bind sources on the host, so the runs folder keeps its path.
-    assert "      - /var/lib/footfall:/var/lib/footfall" in block
+
+
+def listed(block: str, key: str) -> list[str]:
+    """The items of a service's list `key`, such as its volumes, comments left out."""
+    found = re.search(rf"^    {key}:\n((?:      - .*\n?)+)", block, re.MULTILINE)
+    return [] if found is None else re.findall(r"^      - (.*)$", found.group(1), re.MULTILINE)
+
+
+def test_each_service_mounts_exactly_what_it_needs() -> None:
+    """The mounts are the separation between the services: the runs folder, which the root
+    runner writes and names to Docker, is the runner's alone, and the proxy's control socket,
+    which can allow any host, is never the orchestrator's (audit F-02, N-01)."""
+    assert listed(BLOCKS["proxy"], "volumes") == ["proxy-control:/run/footfall-proxy"]
+    assert listed(BLOCKS["runner"], "volumes") == [
+        "/var/run/docker.sock:/var/run/docker.sock",
+        # Docker reads bind sources on the host, so the runs folder keeps its path.
+        "/var/lib/footfall-runs:/var/lib/footfall-runs",
+        "/var/lib/footfall/workspaces:/var/lib/footfall/workspaces:ro",
+        "runner-socket:/run/footfall",
+        "proxy-control:/run/footfall-proxy",
+    ]
+    assert listed(BLOCKS["orchestrator"], "volumes") == [
+        "/var/lib/footfall:/var/lib/footfall",
+        "runner-socket:/run/footfall",
+        "${FOOTFALL_REPO:-../..}:/repo:ro",
+    ]
+    assert "FOOTFALL_RUNS: /var/lib/footfall-runs" in BLOCKS["runner"]
+    assert "sudo install -d -o root -g root -m 0700 /var/lib/footfall-runs" in COMPOSE
+
+
+def test_only_the_runner_adds_a_capability() -> None:
+    assert listed(BLOCKS["runner"], "cap_add") == ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    for name in ("proxy", "orchestrator"):
+        assert listed(BLOCKS[name], "cap_add") == []
+        assert listed(BLOCKS[name], "cap_drop") == ["ALL"]
+    assert listed(BLOCKS["runner"], "cap_drop") == ["ALL"]
+
+
+def test_the_list_reader_sees_an_added_mount() -> None:
+    widened = BLOCKS["orchestrator"].replace(
+        "      - runner-socket:/run/footfall",
+        "      - runner-socket:/run/footfall\n      - /var/run:/var/run",
+    )
+    assert "/var/run:/var/run" in listed(widened, "volumes")
 
 
 def test_the_key_reaches_only_the_orchestrator() -> None:
