@@ -1,8 +1,9 @@
 """Browser contexts made for a persona, signing in, and connecting to the run's browsers."""
 
+import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from dataclasses import replace
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -704,3 +705,98 @@ async def test_open_context_grants_the_location_only_where_it_can_be_used(
     assert browser.options["geolocation"] == {"latitude": -33.8688, "longitude": 151.2093}
     expected = [(["geolocation"], origin)] if granted else []
     assert browser.context.granted == expected
+
+
+# ---------------------------------------------------------------- clean-up past the hard limit
+
+
+async def never() -> None:
+    """A browser container that has stopped answering: the call never returns."""
+    await asyncio.Event().wait()
+
+
+async def ends_within(seconds: float, work: Coroutine[Any, Any, Any]) -> BaseException | None:
+    """Run `work` under a hard limit of 0.2 s, as a persona's, and say what it raised; fail
+    unless it has ended, clean-up included, within `seconds`."""
+
+    async def limited() -> None:
+        async with asyncio.timeout(0.2):
+            await work
+
+    task = asyncio.create_task(limited())
+    done, _ = await asyncio.wait({task}, timeout=seconds)
+    if not done:
+        task.cancel()
+        pytest.fail(f"the clean-up was still waiting {seconds:g} s after the hard limit")
+    return task.exception()
+
+
+@pytest.fixture
+def short_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(browsers, "CLOSE_TIMEOUT", 0.2)
+
+
+async def test_a_context_that_never_closes_does_not_hold_open_contexts_clean_up(
+    short_close: None,
+) -> None:
+    """Part B, Minor 2: once the hard limit has cancelled open_context, its clean-up must
+    not wait without end on a context whose grant and close never return."""
+    browser = _RecordingBrowser()
+    browser.context.grant_permissions = lambda *a, **k: never()  # type: ignore[method-assign]
+    browser.context.close = never  # type: ignore[method-assign]
+    descriptors: dict[str, Any] = {PIXEL.playwright: {}}
+    opening = open_context(
+        cast(Browser, browser), PERSONA, PIXEL, descriptors, "http://127.0.0.1:8080", "http://p:1"
+    )
+    assert isinstance(await ends_within(3, opening), TimeoutError)
+
+
+async def test_a_handle_that_never_lets_go_does_not_hold_on_apps_clean_up(
+    short_close: None,
+) -> None:
+    class Handle:
+        async def owner_frame(self) -> None:
+            await never()
+
+        dispose = staticmethod(never)
+
+    class Locator:
+        async def element_handle(self, timeout: float) -> Handle:
+            return Handle()
+
+    class Page:
+        main_frame = object()
+
+    taking = browsers._on_app(Page(), Locator(), APP, 1000)  # type: ignore[arg-type]
+    assert isinstance(await ends_within(3, taking), TimeoutError)
+
+
+class _Stuck(_Handle):
+    """A handle on the app whose fill and dispose never return."""
+
+    async def owner_frame(self) -> _Frame:
+        return self.page.main_frame
+
+    async def fill(self, value: str, timeout: float) -> None:
+        await never()
+
+    async def dispose(self) -> None:
+        await never()
+
+
+class _StuckPage(_FakePage):
+    def get_by_label(self, label: str, exact: bool) -> _Locator:
+        return cast(_Locator, _StuckLocator(self, label))
+
+    def get_by_role(self, role: str, name: str, exact: bool) -> _Locator:
+        return cast(_Locator, _StuckLocator(self, role))
+
+
+class _StuckLocator(_Locator):
+    async def element_handle(self, timeout: float) -> _Handle:
+        return _Stuck(self.page, self.role)
+
+
+async def test_handles_that_never_let_go_do_not_hold_sign_ins_clean_up(short_close: None) -> None:
+    signing = sign_in(_StuckPage(), LOGIN, USERNAME, PASSWORD, APP)  # type: ignore[arg-type]
+    assert isinstance(await ends_within(3, signing), TimeoutError)

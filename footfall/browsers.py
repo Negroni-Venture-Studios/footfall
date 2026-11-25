@@ -17,7 +17,7 @@ import ipaddress
 import json
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Final, Literal
 from urllib.parse import urljoin, urlsplit
 
@@ -52,6 +52,9 @@ LAUNCH_HEADER: Final = "x-playwright-launch-options"
 CONNECT_TIMEOUT_MS: Final = 60_000
 CONNECT_WAIT: Final = 60.0  # seconds to keep trying while the browser container starts
 CONNECT_RETRY: Final = 0.5
+# Seconds a clean-up step, closing a context or letting a handle go, may take before it is
+# given up on. Read when used, so that a test can shorten it.
+CLOSE_TIMEOUT = 10.0
 # Read when used, so that a test can shorten it.
 SIGN_IN_TIMEOUT = 15.0  # seconds for each step of signing in
 
@@ -193,7 +196,7 @@ async def open_context(
             scale = repr(float(persona.text_scale))
             await context.add_init_script(_TEXT_SCALE_JS.replace("__SCALE__", scale))
     except BaseException:
-        await context.close()
+        await _let_go(context.close)
         raise
     return context
 
@@ -243,10 +246,23 @@ async def _on_app(
         if frame is not page.main_frame or _origin(frame.url) != _origin(app_origin):
             raise _LeftTheApp
     except BaseException:
-        with contextlib.suppress(PlaywrightError):
-            await handle.dispose()
+        await _let_go(handle.dispose)
         raise
     return handle
+
+
+async def _let_go(*steps: Callable[[], Awaitable[object]]) -> None:
+    """Take clean-up steps in turn, within `CLOSE_TIMEOUT` seconds in all, going on past a
+    step Playwright refuses and giving up on the rest once the time is up.
+
+    Clean-up often runs because a persona's hard limit has cancelled it, and the browser
+    container may have stopped answering, so no step may wait for it without end.
+    """
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(CLOSE_TIMEOUT):
+            for step in steps:
+                with contextlib.suppress(PlaywrightError):
+                    await step()
 
 
 def _still_on_app(page: Page, app_origin: str) -> None:
@@ -304,9 +320,7 @@ async def sign_in(
     except PlaywrightError:
         failure = SignInError(f"could not sign in: could not {step}")
     finally:
-        for handle in handles:
-            with contextlib.suppress(PlaywrightError):
-                await handle.dispose()
+        await _let_go(*(handle.dispose for handle in handles))
     if failure is None:
         if _origin(page.url) != _origin(app_origin):
             failure = SignInError(
