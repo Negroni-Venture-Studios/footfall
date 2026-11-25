@@ -5,8 +5,9 @@
 // run-server launches a browser for any client that reaches it, and it gives its secret
 // path to anyone who asks `GET /json`. So the container's port is this gate's. It passes on
 // only a WebSocket upgrade whose request target is exactly the run's path, compared in
-// constant time, to run-server on 127.0.0.1, byte for byte. Every other request gets an
-// empty 404. run-server checks the path as well.
+// constant time, to run-server on 127.0.0.1, byte for byte but for its Host header, which
+// names loopback, as run-server requires. Every other request gets an empty 404.
+// run-server checks the path as well.
 //
 // The gate starts run-server through a keeper, a second copy of this script, which runs it
 // in a process group of its own. The keeper stops that whole group, run-server and anything
@@ -125,6 +126,18 @@ function admit(client) {
   }
 }
 
+// The head the gate sends on, with every Host header replaced by one naming loopback.
+// run-server listens on loopback alone and, against DNS rebinding, refuses with 403 any
+// request whose Host is not loopback, which the orchestrator's, naming the container's
+// address, never is. The path has been checked by then, so nothing else changes.
+function towardsUpstream(buffered, upstream) {
+  const end = buffered.indexOf("\r\n\r\n");
+  const lines = buffered.subarray(0, end).toString("latin1").split("\r\n");
+  const kept = lines.filter((line, index) => index === 0 || !/^host[ \t]*:/i.test(line));
+  kept.splice(1, 0, `Host: 127.0.0.1:${upstream}`);
+  return Buffer.concat([Buffer.from(kept.join("\r\n"), "latin1"), buffered.subarray(end)]);
+}
+
 function forward(client, first, config) {
   const deadline = Date.now() + UPSTREAM_WAIT_MS;
   const attempt = () => {
@@ -166,7 +179,7 @@ function serve(client, config) {
       refuse(client);
       return;
     }
-    forward(client, buffered, config);
+    forward(client, towardsUpstream(buffered, config.upstream), config);
   };
   client.on("data", onData);
 }

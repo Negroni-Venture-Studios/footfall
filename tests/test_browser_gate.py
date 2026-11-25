@@ -264,8 +264,26 @@ async def test_the_right_path_is_forwarded_byte_for_byte(gate: Gate, upstream: U
     sent = upgrade(PATH) + b"\x81\x85early frame bytes"
     answer = await exchange(gate.port, sent, wait=1.0)
     assert answer == upstream.reply
-    assert bytes(upstream.received) == sent
+    # Byte for byte but the Host header: run-server listens on loopback and, against DNS
+    # rebinding, refuses with 403 a request whose Host is not loopback, which the
+    # orchestrator's, naming the container's address, never is (found in the isolation
+    # workflow).
+    expected = sent.replace(b"Host: 10.89.0.12:3000", f"Host: 127.0.0.1:{upstream.port}".encode())
+    assert bytes(upstream.received) == expected
     assert upstream.connections == 1
+
+
+async def test_every_host_header_is_replaced_by_one_for_loopback(
+    gate: Gate, upstream: Upstream
+) -> None:
+    sent = upgrade(PATH).replace(
+        b"Host: 10.89.0.12:3000\r\n", b"host:evil.test\r\nHOST: 10.0.0.1\r\n"
+    )
+    await exchange(gate.port, sent, wait=1.0)
+    head = bytes(upstream.received).split(b"\r\n\r\n")[0].split(b"\r\n")
+    hosts = [line for line in head if line.lower().startswith(b"host")]
+    assert hosts == [f"Host: 127.0.0.1:{upstream.port}".encode()]
+    assert head[0] == f"GET {PATH} HTTP/1.1".encode()
 
 
 async def test_the_gate_waits_for_run_server_to_start() -> None:
@@ -277,7 +295,10 @@ async def test_the_gate_waits_for_run_server_to_start() -> None:
         record, server = await start_upstream(port)
         try:
             assert await exchanged == record.reply
-            assert bytes(record.received) == upgrade(PATH)
+            loopback = f"Host: 127.0.0.1:{port}".encode()
+            assert bytes(record.received) == upgrade(PATH).replace(
+                b"Host: 10.89.0.12:3000", loopback
+            )
         finally:
             server.close()
     finally:
