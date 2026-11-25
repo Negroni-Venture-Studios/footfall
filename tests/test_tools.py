@@ -961,6 +961,30 @@ async def test_the_trace_redacts_before_it_cuts(session: MakeSession) -> None:
     assert all(SECRET[i : i + 4] not in raw for i in range(len(SECRET) - 3))
 
 
+SPACED = "Kp7 q-vN3x-Rz4w"  # a password with a space in it
+
+
+@pytest.mark.parametrize("gap", ["\n", "  ", "\t \n"])
+async def test_the_trace_never_makes_a_password_whole_after_redacting(
+    session: MakeSession, gap: str
+) -> None:
+    # Made one line after redaction, the password's space given as a new line or a run of
+    # spaces would become the password, which redaction had not seen.
+    s = await session(redact=frozenset({SPACED}))
+    split = SPACED.replace(" ", gap)
+    finding = {**FINISH_EXAMPLE["findings"][0], "title": f"Typed {split}", "actual": split}
+    report = {**FINISH_EXAMPLE, "summary": f"I typed {split}.", "findings": [finding]}
+    outcome = await s.executor.run("finish", report)
+    assert outcome.finish is not None
+    (step,) = s.trace.steps()
+    (recorded,) = step.input["findings"]
+    assert recorded["title"] == "Typed [password]"  # made one line, then redacted
+    assert recorded["actual"] == split  # kept as it was, so never the password
+    raw = s.trace.path.read_text(encoding="utf-8")
+    assert SPACED not in raw
+    assert all(SPACED not in text for text in strings(step.input))
+
+
 @pytest.mark.parametrize(
     ("name", "tool_input", "message"),
     [

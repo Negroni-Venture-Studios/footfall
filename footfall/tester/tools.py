@@ -32,6 +32,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from footfall.tester.guard import Guard, GuardEvent
 from footfall.tester.report import (
     CAPS,
+    ELLIPSIS,
     MAX_SCREENSHOTS,
     PAGE_CAP,
     ToolError,
@@ -906,11 +907,12 @@ class Executor:
         return text
 
     def _fit(self, text: str, cap: int, *, single_line: bool = False) -> str:
-        """`text` cleaned, then redacted, then cut to `cap`, as the report's free text is, so
-        that a password split by a character that shows nothing is found, and no cut leaves
-        part of one."""
-        redacted = self._redact(clean_text(text, _UNCAPPED))
-        return clean_text(redacted, cap, single_line=single_line)
+        """`text` cleaned and made one line where the field is, then redacted, then cut to
+        `cap`. Every change to the text comes before redaction, so that none can make a
+        password whole after it, as joining a line it was split over would; and the cut comes
+        after, so that none leaves part of one."""
+        redacted = self._redact(clean_text(text, _UNCAPPED, single_line=single_line))
+        return redacted if len(redacted) <= cap else redacted[: cap - 1] + ELLIPSIS
 
     def _record(self, name: str, data: object) -> dict[str, Any]:
         """A tool input as the trace keeps it: the fields the tool has, each string cleaned,
@@ -1023,7 +1025,7 @@ class Executor:
             Step(
                 number=draft.number,
                 tool=scrub(draft.tool),
-                input=draft.input,  # redacted as it was recorded, before it was cut
+                input=scrub(draft.input),  # redacted as it was recorded; this is a backstop
                 target_role=scrub(target.role),
                 target_name=scrub(target.name),
                 x=target.x,

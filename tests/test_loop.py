@@ -980,6 +980,29 @@ async def test_the_trace_strips_invisible_characters_before_redacting(world: Mak
     no_run_of(SECRET, w.trace.path.read_text(encoding="utf-8"), str(steps))
 
 
+async def test_the_report_never_makes_a_password_whole_after_redacting(world: MakeWorld) -> None:
+    spaced = "Kp7 q-vN3x-Rz4w"
+    w = await world(redact=frozenset({spaced}))
+    for gap in ("\n", "  "):
+        split = spaced.replace(" ", gap)
+        found = {
+            "title": f"Typed {split}",
+            "severity": "minor",
+            "page": "/",
+            "steps": [f"Type {split}"],
+            "expected": "e",
+            "actual": "a",
+            "screenshots": [],
+        }
+        model = FakeModel([finish(summary=f"I typed {split}.", findings=[found])])
+        report = await run(w, model)
+        (finding,) = report.findings
+        assert finding.title == "Typed [password]"
+        assert finding.steps == ("Type [password]",)
+        assert spaced not in json.dumps(report.to_json(), ensure_ascii=False)
+    assert spaced not in w.trace.path.read_text(encoding="utf-8")
+
+
 class Hung:
     """A model whose call never comes back."""
 
