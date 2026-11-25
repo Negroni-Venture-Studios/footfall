@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 import pytest
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
@@ -24,7 +25,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from footfall.browsers import CONNECT_TIMEOUT_MS, LAUNCH_HEADER, connect_run_server, open_context
 from footfall.personas import load_devices, load_personas
-from footfall.tester.guard import Guard
+from footfall.tester.guard import Guard, GuardEvent
 from footfall.tester.tools import Executor
 from footfall.tester.trace import Trace
 from tests.isolation.live import HELLO, HIT, LiveRun, ProxyLog, address_of, lines
@@ -78,6 +79,11 @@ async def _text(page: Page) -> str:
         return await page.content()
     except PlaywrightError:
         return ""
+
+
+def _hosts(event: GuardEvent) -> list[str]:
+    """The hosts a guard event names, each exactly as the guard quoted it."""
+    return [urlsplit("//" + name).hostname or "" for name in re.findall(r'"([^"]*)"', event.detail)]
 
 
 async def _goto(page: Page, url: str) -> int | None:
@@ -222,7 +228,7 @@ async def test_a_page_cannot_reach_run_server_on_loopback(
         page = await context.new_page()
         await _goto(page, RUN_SERVER)
         direct = "wsEndpointPath" in await _text(page)
-        await _goto(page, browsers.app + "/redirect?to=" + RUN_SERVER)
+        await _goto(page, browsers.app + "/redirect?to=run-server")
         redirected = "wsEndpointPath" in await _text(page)
         await _goto(page, browsers.app + "/frame?src=" + RUN_SERVER)
         await asyncio.sleep(2)
@@ -262,7 +268,7 @@ async def test_an_asset_off_the_list_is_aborted_and_recorded(
         events = guard.drain()
     finally:
         await browser.close()
-    blocked = [e for e in events if e.kind == "blocked_request" and "example.com" in e.detail]
+    blocked = [e for e in events if e.kind == "blocked_request" and _hosts(e) == ["example.com"]]
     assert blocked, events
     assert proxy_log.decisions(browsers.address, "example.com") == []  # it never left
 
@@ -302,9 +308,9 @@ async def test_a_redirect_hop_off_the_list_is_refused_by_the_proxy(
         await Guard(browsers.app, frozenset(ASSETS)).install(context)
         page = await context.new_page()
         # The control: a hop to a host on the list goes through.
-        listed = await _goto(page, browsers.app + "/redirect?to=https://example.com/")
+        listed = await _goto(page, browsers.app + "/redirect?to=listed")
         landed = page.url
-        unlisted = await _goto(page, browsers.app + "/redirect?to=https://pypi.org/simple/")
+        unlisted = await _goto(page, browsers.app + "/redirect?to=unlisted")
     finally:
         await browser.close()
     assert listed == 200
@@ -334,6 +340,6 @@ async def test_an_unload_beacon_and_a_keepalive_fetch_are_refused_by_the_proxy(
     finally:
         await browser.close()
     # The guard never saw them: the proxy is the wall.
-    assert [e for e in events if beacon in e.detail or keepalive in e.detail] == []
+    assert [e for e in events if {beacon, keepalive} & set(_hosts(e))] == []
     for host in (beacon, keepalive):
         assert [d for d in proxy_log.decisions(browsers.address, host) if "allowed" in d] == []

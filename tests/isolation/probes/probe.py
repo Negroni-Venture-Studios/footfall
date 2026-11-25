@@ -323,6 +323,7 @@ def fetch(url: str) -> dict[str, Any]:
                 if result["proxy_status"] != 200:
                     return result
                 context = ssl.create_default_context()
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
                 with context.wrap_socket(stream, server_hostname=host) as secure:
                     path = parts.path or "/"
                     secure.sendall(
@@ -444,6 +445,13 @@ def check_sparse(arguments: Sequence[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------- servers
 
 
+# Where `/redirect?to=<name>` sends the browser: a host on the browser's list, one off it,
+# and Playwright's run-server on the browser container's own loopback.
+REDIRECTS: Final = {
+    "listed": "https://example.com/",
+    "unlisted": "https://pypi.org/simple/",
+    "run-server": "http://127.0.0.1:3001/json",
+}
 _PAGES: Final[dict[str, str]] = {
     "/": "<!doctype html><title>Probe</title><h1>Probe</h1>",
     # Sends a beacon and a keepalive fetch as the page goes, when no route handler sees them.
@@ -478,7 +486,8 @@ class _Pages(http.server.BaseHTTPRequestHandler):
         say(HIT, {"method": self.command, "path": self.path, "host": self.headers.get("Host")})
         parts = urllib.parse.urlsplit(self.path)
         if parts.path == "/redirect":
-            target = urllib.parse.parse_qs(parts.query).get("to", ["/"])[0]
+            # A fixed set of places, so that nothing in a request reaches a header.
+            target = REDIRECTS.get(urllib.parse.parse_qs(parts.query).get("to", [""])[0], "/")
             self.send_response(302)
             self.send_header("Location", target)
             self.send_header("Content-Length", "0")
