@@ -236,6 +236,23 @@ def test_a_runs_folder_that_is_not_its_owners_is_refused_for_itself() -> None:
         runs.rmdir()
 
 
+def test_a_runs_folder_that_cannot_be_made_stops_the_runner_with_a_setup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Part A, Minor 3: a runs folder the runner cannot make, on a read-only disk say, is a
+    setup error that says why, not an OSError with a traceback."""
+    import errno as errors
+
+    (tmp_path / "workspaces").mkdir()
+
+    def read_only(*args: Any, **kwargs: Any) -> None:
+        raise OSError(errors.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(os, "mkdir", read_only)
+    with pytest.raises(RunnerSetupError, match="cannot be made: Read-only file system"):
+        service(tmp_path / "workspaces", tmp_path / "runs-6612", os.getuid())
+
+
 @pytest.mark.parametrize("where", ["the folder", "a folder above it"])
 def test_a_link_on_the_way_to_the_runs_folder_is_refused(tmp_path: Path, where: str) -> None:
     """The path is resolved once, from the setting; a link found when it is opened, one name

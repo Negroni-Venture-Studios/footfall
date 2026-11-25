@@ -367,8 +367,7 @@ def _open_path(path: Path, owner: int | None = None, *, create: bool = False) ->
             except FileNotFoundError:
                 if not create or where / name != path:
                     raise RunnerSetupError(f"{where / name} does not exist") from None
-                os.mkdir(name, 0o700, dir_fd=folder)
-                inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+                inner = _make_folder(folder, name, where / name)
             except OSError as error:
                 if error.errno not in (errno.ELOOP, errno.ENOTDIR):
                     raise RunnerSetupError(f"{where / name} cannot be opened: {error}") from None
@@ -386,6 +385,18 @@ def _open_path(path: Path, owner: int | None = None, *, create: bool = False) ->
         os.close(folder)
         raise
     return folder
+
+
+def _make_folder(parent: int, name: str, shown: Path) -> int:
+    """Make the folder `name` in the open folder `parent`, mode 0700, and open it, never
+    through a link. Raises RunnerSetupError, saying why, when either fails."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent)
+        return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
+    except OSError as error:
+        raise RunnerSetupError(
+            f"{shown} cannot be made: {error.strerror or type(error).__name__}"
+        ) from None
 
 
 class _Changed(Exception):
