@@ -9,6 +9,7 @@ repository, even through a symlink.
 
 import re
 import tomllib
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,10 +43,17 @@ MAX_NAME_LENGTH = 200
 MIN_PORT, MAX_PORT = 1024, 65535
 MAX_READY_TIMEOUT = 600
 MAX_ACTIONS_CEILING = 120
+MAX_LIST_LENGTH = 64
 
 _BRIEF_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _PERSONA_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")  # becomes a copy name later
-_BAD_PATH_CHARACTER = re.compile(r"[\s\\]")
+_BAD_PATH_CHARACTER = re.compile(r"[\s\\#]")
+# Characters a path may not hold besides those: controls, surrogates, invisible format
+# characters (such as U+200B, U+202E and U+FEFF), private-use and unassigned code points.
+_NOT_IN_PATHS = frozenset({"Cc", "Cs", "Cf", "Co", "Cn"})
+# Path segments a browser reads as "this folder" or "the one above", spelt out or encoded.
+_DOT_SEGMENTS = frozenset({".", "..", "%2e", ".%2e", "%2e.", "%2e%2e"})
+_LARGE = 10**12
 _LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t]*\r?\n)+")
 
 
@@ -110,9 +118,15 @@ class Brief:
 
 
 def _show(value: object) -> str:
-    """How a value appears in a message: TOML's spelling for booleans, else its repr."""
+    """How a value appears in a message: TOML's spelling for booleans, else its repr.
+
+    An integer too long to read is named without its digits; past 4300 digits, which
+    a hexadecimal or octal number in TOML can reach, Python cannot even print it.
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, int) and not -_LARGE < value < _LARGE:
+        return "a very large number"
     return repr(value)
 
 
@@ -162,7 +176,7 @@ class _Reader:
             self.problem(key, f"must be a whole number, not {_show(value)}")
             return None
         if not low <= value <= high:
-            self.problem(key, f"must be between {low} and {high}, not {value}")
+            self.problem(key, f"must be between {low} and {high}, not {_show(value)}")
             return None
         return value
 
@@ -184,15 +198,23 @@ class _Reader:
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             self.problem(key, "must be a list of text")
             return None
+        if len(value) > MAX_LIST_LENGTH:
+            self.problem(key, f"must list at most {MAX_LIST_LENGTH} entries, not {len(value)}")
+            return None
         return [(f"{self.field(key)}[{index}]", item) for index, item in enumerate(value)]
 
     def hosts(self, key: str) -> tuple[str, ...]:
         names: list[str] = []
-        for _, item in self.text_list(key) or []:
+        for field, item in self.text_list(key) or []:
             try:
-                names.append(validate_host_name(item))
+                name = validate_host_name(item)
             except HostError:
                 self.problem(key, f"{item!r} is not a valid host name")
+                continue
+            if name in names:
+                self.problems.append(f"{field}: {item!r} is listed more than once")
+            else:
+                names.append(name)
         return tuple(names)
 
     def finish(self) -> None:
@@ -204,8 +226,16 @@ class _Reader:
 def _path_problem(value: str) -> str | None:
     if not value.startswith("/") or value.startswith("//"):
         return f"must be a path on the app that starts with a single /, not {value!r}"
-    if _BAD_PATH_CHARACTER.search(value):
-        return f"must not contain a backslash or whitespace, not {value!r}"
+    if _BAD_PATH_CHARACTER.search(value) or any(
+        unicodedata.category(ch) in _NOT_IN_PATHS for ch in value
+    ):
+        return (
+            "must not contain a backslash, whitespace, a # or a control or invisible "
+            f"character, not {value!r}"
+        )
+    path = value.split("?", 1)[0]
+    if any(segment.lower() in _DOT_SEGMENTS for segment in path.split("/")):
+        return f"must not contain a . or .. segment, not {value!r}"
     return None
 
 
@@ -327,13 +357,18 @@ def _parse_toml(text: str, subject: str) -> dict[str, Any]:
     """Parse TOML from an untrusted file, turning every parser failure into a problem.
 
     Beyond `TOMLDecodeError`, the parser raises `ValueError` for integers over Python's
-    digit limit and `RecursionError` for very deep nesting.
+    digit limit, whose message advises changing a Python setting, and `RecursionError`
+    for very deep nesting.
     """
     try:
         return tomllib.loads(text)
-    except (ValueError, RecursionError) as error:
-        detail = "too deeply nested" if isinstance(error, RecursionError) else str(error)
+    except tomllib.TOMLDecodeError as error:
+        raise ManifestError([f"{subject} not valid TOML ({error})"]) from error
+    except ValueError as error:
+        detail = "a number in it has too many digits"
         raise ManifestError([f"{subject} not valid TOML ({detail})"]) from error
+    except RecursionError as error:
+        raise ManifestError([f"{subject} not valid TOML (too deeply nested)"]) from error
 
 
 def parse_manifest(text: str) -> Manifest:
@@ -390,7 +425,7 @@ def _read_repo_file(repo: Path, path: Path, label: str, limit: int, missing: str
     if len(data) > limit:
         raise ManifestError([f"{label}: larger than the {limit} byte limit"])
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8-sig")  # without a byte order mark, which editors may add
     except UnicodeDecodeError as error:
         raise ManifestError([f"{label}: is not valid UTF-8"]) from error
 

@@ -72,8 +72,8 @@ personas = ["sven", "grace"]
 
 
 def test_every_problem_is_reported_at_once() -> None:
-    text = MINIMAL.replace("python3.13", "ruby3").replace("8080\n", "80\n", 1)
-    text = text.replace("port = 8080", "port = 80") + 'egress = ["10.0.0.1"]\n'
+    text = MINIMAL.replace("python3.13", "ruby3").replace("port = 8080", "port = 80")
+    text += 'egress = ["10.0.0.1"]\n'
     assert problems_of(text) == [
         "app.runtime: must be one of python3.13, node22, not 'ruby3'",
         "app.port: must be between 1024 and 65535, not 80",
@@ -105,10 +105,37 @@ def test_port_must_be_an_integer() -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["login", "//evil.example/x", "/a\\b", "/a b", "/a\tb", "/a\nb", "", "http://x/"]
+    "path",
+    [
+        "login",
+        "//evil.example/x",
+        "/a\\b",
+        "/a b",
+        "/a\tb",
+        "/a\nb",
+        "",
+        "http://x/",
+        "/a\0b",
+        "/a\x7fb",
+        "/a\x85b",
+        "/a\u200bb",
+        "/a\u202eb",
+        "/a\ufeffb",
+        "/a#b",
+        "/#",
+        "/..",
+        "/a/../b",
+        "/a/./b",
+        "/a/%2e%2E/b",
+        "/a/.%2e",
+        "/a/%2E",
+        "/../?x=1",
+    ],
 )
 def test_paths_must_be_app_paths(path: str) -> None:
-    escaped = path.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+    escaped = "".join(
+        f"\\u{ord(ch):04x}" if ch == "\\" or not ch.isprintable() else ch for ch in path
+    )
     ready = MINIMAL.replace("port = 8080", f'port = 8080\nready = "{escaped}"')
     assert len(problems_of(ready)) == 1
     assert problems_of(ready)[0].startswith("app.ready: ")
@@ -379,16 +406,23 @@ def test_brief_missing_oversized_and_undecodable(tmp_path: Path) -> None:
 
 def test_huge_integer_is_a_problem() -> None:
     problems = problems_of(MINIMAL.replace("port = 8080", "port = " + "9" * 5000))
-    assert len(problems) == 1
-    assert problems[0].startswith("footfall.toml: not valid TOML")
+    assert problems == ["footfall.toml: not valid TOML (a number in it has too many digits)"]
+
+
+@pytest.mark.parametrize("number", ["0x" + "f" * 5000, "0o" + "7" * 20000, "1" * 4000])
+def test_huge_integer_out_of_range_is_named_without_its_digits(number: str) -> None:
+    """Python cannot print an integer of over 4300 digits, which hex and octal can give."""
+    problems = problems_of(MINIMAL.replace("port = 8080", f"port = {number}"))
+    assert problems == ["app.port: must be between 1024 and 65535, not a very large number"]
 
 
 def test_huge_integer_in_front_matter_is_a_problem(tmp_path: Path) -> None:
     repo, manifest = make_repo(tmp_path, "+++\nmax_actions = " + "9" * 5000 + "\n+++\nBody\n")
     with pytest.raises(ManifestError) as caught:
         load_brief(repo, manifest)
-    assert len(caught.value.problems) == 1
-    assert caught.value.problems[0].startswith("default.md: front matter is not valid TOML")
+    assert caught.value.problems == [
+        "default.md: front matter is not valid TOML (a number in it has too many digits)"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -450,3 +484,48 @@ def test_duplicate_personas_are_refused() -> None:
     assert problems_of(MINIMAL + '[test]\npersonas = ["sven", "grace", "sven"]\n') == [
         "test.personas[2]: 'sven' is listed more than once"
     ]
+
+
+@pytest.mark.parametrize("path", ["/a..b", "/.well-known/x", "/a/...", "/search?q=../x", "/a.b/"])
+def test_paths_may_hold_dots_that_are_no_dot_segment(path: str) -> None:
+    manifest = parse_manifest(MINIMAL.replace("port = 8080", f'port = 8080\nready = "{path}"'))
+    assert manifest.app.ready == path
+
+
+@pytest.mark.parametrize(
+    ("table", "key", "item", "field"),
+    [
+        ("app", "egress", "h{}.example.com", "app.egress"),
+        ("browser", "assets", "h{}.example.com", "browser.assets"),
+        ("test", "pages", "/p{}", "test.pages"),
+        ("test", "personas", "p{}", "test.personas"),
+    ],
+)
+def test_lists_are_capped(table: str, key: str, item: str, field: str) -> None:
+    def manifest_with(count: int) -> str:
+        entries = ", ".join(f'"{item.format(index)}"' for index in range(count))
+        if table == "app":
+            return MINIMAL + f"{key} = [{entries}]\n"
+        return MINIMAL + f"[{table}]\n{key} = [{entries}]\n"
+
+    parse_manifest(manifest_with(64))
+    assert problems_of(manifest_with(65)) == [f"{field}: must list at most 64 entries, not 65"]
+
+
+@pytest.mark.parametrize(("table", "key"), [("app", "egress"), ("browser", "assets")])
+def test_duplicate_hosts_are_refused(table: str, key: str) -> None:
+    entries = '["example.com", "tiles.example.org", "Example.COM"]'
+    text = MINIMAL + (
+        f"{key} = {entries}\n" if table == "app" else f"[{table}]\n{key} = {entries}\n"
+    )
+    assert problems_of(text) == [f"{table}.{key}[2]: 'Example.COM' is listed more than once"]
+
+
+def test_a_byte_order_mark_is_ignored(tmp_path: Path) -> None:
+    repo, _ = make_repo(tmp_path, '\ufeff+++\nstart = "signed-out"\nmax_actions = 7\n+++\nBody\n')
+    text = (repo / "footfall.toml").read_text()
+    (repo / "footfall.toml").write_text("\ufeff" + text)
+    manifest = load_manifest(repo)
+    brief = load_brief(repo, manifest)
+    assert brief.max_actions == 7
+    assert brief.text == "Body\n"
