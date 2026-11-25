@@ -5,11 +5,13 @@ would, and the proxy's own log says what it decided. These tests reach pypi.org 
 example.com, and only through the proxy.
 """
 
+import asyncio
 import json
 
 import pytest
 
-from tests.isolation.live import PROBE, LiveRun, NewRun, ProxyLog, allowed, fact
+from footfall.proxy.policy import INVALID_HOST
+from tests.isolation.live import PROBE, LiveRun, NewRun, ProxyLog, allowed, fact, refused
 
 pytestmark = pytest.mark.isolation
 
@@ -51,6 +53,13 @@ async def test_addresses_and_the_metadata_service_are_refused(
     assert result[urls[1]]["proxy_status"] == 403, result
     client = _host(run.copies["addresses"])
     assert [line for line in proxy_log.decisions(client) if allowed(line)] == []
+    # Refused because an address is not a host name, not by chance (audit N-09).
+    for _ in range(60):
+        invalid = [d for d in proxy_log.decisions(client) if refused(d, INVALID_HOST)]
+        if len(invalid) >= len(urls):
+            break
+        await asyncio.sleep(0.5)
+    assert len(invalid) >= len(urls), proxy_log.decisions(client)
 
 
 async def test_registries_are_reachable_during_install_and_refused_after(

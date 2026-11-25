@@ -59,6 +59,21 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip)
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Iterator[None]:
+    """Under FOOTFALL_ISOLATION=1 a skipped isolation test fails: it would prove nothing while
+    its step passed (audit N-09). The workflow runs each test where it can run."""
+    outcome = yield
+    report = outcome.get_result()  # type: ignore[attr-defined]
+    if (
+        os.environ.get("FOOTFALL_ISOLATION") == "1"
+        and report.skipped
+        and item.path.is_relative_to(HERE)
+    ):
+        report.outcome = "failed"
+        report.longrepr = f"an isolation test may not be skipped here: {report.longrepr}"
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replaces the suite's loopback-only guard: these tests reach the containers on Docker's

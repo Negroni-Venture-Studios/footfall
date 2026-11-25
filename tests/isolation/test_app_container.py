@@ -86,9 +86,9 @@ def test_the_app_runs_as_its_own_user_with_no_capabilities(sandbox: dict[str, An
     assert (sandbox["uid"], sandbox["euid"], sandbox["gid"]) == (APP_UID, APP_UID, APP_UID)
     assert set(sandbox["groups"]) <= {APP_UID}
     status = sandbox["status"]
+    # Each set must be there to be read: a missing one proves nothing (audit N-09).
     for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
-        assert status.get(name, NO_CAPABILITIES) == NO_CAPABILITIES, (name, status)
-    assert status["CapEff"] == NO_CAPABILITIES
+        assert status.get(name) == NO_CAPABILITIES, (name, status)
     assert status["NoNewPrivs"] == "1"
 
 

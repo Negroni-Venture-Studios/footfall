@@ -17,6 +17,7 @@ import pytest
 
 from footfall.local import new_run_id
 from footfall.runner.engine import DockerEngine
+from footfall.runner.spec import LIMITS
 
 pytestmark = pytest.mark.isolation
 
@@ -43,6 +44,9 @@ async def main(op, run_id):
             return {"ok": True}
         if op == "start":
             return {"address": await client.start_app(run_id, "anna", "sleep 300", 8000, [])}
+        if op == "browsers":
+            await client.start_browsers(run_id, [])  # its endpoint holds a secret: never shown
+            return {"ok": True}
         await client.stop(run_id)
         shutil.rmtree(WORKSPACES / run_id, ignore_errors=True)
         return {"ok": True}
@@ -162,3 +166,67 @@ def test_the_proxy_listens_only_at_a_live_runs_address(engine: DockerEngine) -> 
     assert while_live == [on_run]
     assert on_bridge == "ConnectionRefusedError"
     assert after == []
+
+
+def _inspect(engine: DockerEngine, what: str) -> dict[str, Any]:
+    answer = json.loads(engine._request("GET", what)[1])
+    assert isinstance(answer, dict)
+    return answer
+
+
+def test_the_daemon_holds_what_the_spec_gives_containers_the_runner_started(
+    engine: DockerEngine,
+) -> None:
+    """Audit N-09: the probes see a container from inside, where gVisor may stop something
+    before a limit does, so the daemon's own record of an app container and a browser
+    container that the runner started is read too, for each setting runner/spec.py fixes."""
+    run_id = new_run_id()
+    network = f"footfall-{run_id}"
+    held: dict[str, Any] = {}
+    try:
+        assert drive("prepare", run_id) == {"ok": True}
+        assert "address" in drive("start", run_id)
+        assert drive("browsers", run_id) == {"ok": True}
+        for role, name in (
+            ("app", f"footfall-{run_id}-app-anna"),
+            ("browsers", f"footfall-{run_id}-browsers-browsers"),
+        ):
+            inspected = _inspect(engine, f"/containers/{name}/json")
+            host = inspected["HostConfig"]
+            limits = LIMITS[role]  # type: ignore[index]
+            held[role] = {
+                key: host.get(key)
+                for key in (
+                    "Runtime",
+                    "Memory",
+                    "MemorySwap",
+                    "NanoCpus",
+                    "PidsLimit",
+                    "CapAdd",
+                    "CapDrop",
+                    "SecurityOpt",
+                    "ReadonlyRootfs",
+                    "Privileged",
+                    "NetworkMode",
+                )
+            }
+            held[role]["mounts"] = [
+                (mount["Type"], mount["Destination"], mount["RW"])
+                for mount in inspected.get("Mounts") or []
+            ]
+            assert host["Runtime"] == "runsc"
+            assert (host["Memory"], host["MemorySwap"]) == (limits.memory_bytes,) * 2
+            assert (host["NanoCpus"], host["PidsLimit"]) == (limits.nano_cpus, limits.pids)
+            assert (host["CapDrop"], host.get("CapAdd") or []) == (["ALL"], [])
+            assert host["SecurityOpt"] == ["no-new-privileges:true"]
+            assert (host["ReadonlyRootfs"], host["Privileged"]) == (True, False)
+            assert host["NetworkMode"] == network
+            assert list(inspected["NetworkSettings"]["Networks"]) == [network]
+        assert held["app"]["mounts"] == [("bind", "/workspace", True)]
+        assert held["browsers"]["mounts"] == []
+        networked = _inspect(engine, f"/networks/{network}")
+        held["network"] = {"Internal": networked["Internal"]}
+        assert networked["Internal"] is True
+    finally:
+        drive("stop", run_id)
+    record("what the daemon holds for containers the runner started", held)
