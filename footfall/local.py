@@ -40,7 +40,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Final, NoReturn, Protocol, TextIO
 from urllib.parse import quote as url_quote
 
-from playwright.async_api import Browser, async_playwright
+from playwright.async_api import Browser, BrowserContext, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 from footfall.actions import mask
@@ -55,6 +55,7 @@ from footfall.manifest import (
 )
 from footfall.personas import Device, Persona, PersonaError, load_devices, load_personas, select
 from footfall.runner.service import RunnerError
+from footfall.tester import loop as tester_loop
 from footfall.tester.guard import Guard
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import model_from_spec
@@ -87,6 +88,14 @@ READY_TRY: Final = 2.0  # seconds one try may take
 GOTO_TIMEOUT_MS: Final = 30_000
 LOG_TAIL_CAP: Final = 20_000
 GIT_TIMEOUT: Final = 60.0
+# Playwright's client keeps no timer for the timeouts it passes to the browser, so every wait
+# on the run's browser container is bounded here too. Read when used, so that a test can
+# shorten them.
+CLOSE_TIMEOUT = 10.0  # seconds for a persona's context to close, after which it is abandoned
+# Seconds a persona may take beyond what its model calls may: setting up its context and
+# signing in, which take at most about two and a quarter minutes by their own timeouts, and
+# the browser's part of the turns that run past the time limit, about a minute each.
+BROWSER_ALLOWANCE = 600.0
 _FOLDER_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # The configuration files of a git folder, which can hold a token in a remote's address.
 _GIT_CONFIGS: Final = ("config", "config.worktree")
@@ -952,52 +961,79 @@ class _Run:
         self.password = account[1] if account else None
         self.redact = frozenset({self.password}) if self.password else frozenset[str]()
 
+    def limit(self) -> float:
+        """The most seconds one persona may take, from setting up its context to its report:
+        the time limit, as far past it as the loop lets model calls run, and
+        `BROWSER_ALLOWANCE`. With the default budget it is 3,060 s."""
+        budget = self.budget
+        return (
+            budget.max_seconds
+            + tester_loop.MIN_TURN
+            + budget.grace_turns * tester_loop.TURN_FLOOR
+            + BROWSER_ALLOWANCE
+        )
+
     async def persona(self, persona: Persona, browser: Browser, address: str) -> PersonaReport:
-        """Set up and run one persona, and write its report. Never raises but to be cancelled."""
+        """Set up and run one persona, and write its report. Never raises but to be cancelled.
+
+        The persona as a whole, set-up and sign-in included, must end within `limit()`
+        seconds, or it is stopped and failed, so that a browser container that stops
+        answering cannot hold it, and the run, open without end.
+        """
         device = self.devices[persona.device]
         started = time.monotonic()
         folder = self.out / persona.id
         app_origin = f"http://{address}"
         context = None
+        limit = self.limit()
+        deadline = asyncio.timeout(limit)
         try:
-            context = await open_context(
-                browser, persona, device, self.descriptors, app_origin, self.proxy_url
-            )
-            guard = Guard(app_origin, frozenset(self.manifest.browser.assets))
-            await guard.install(context)
-            page = await context.new_page()
-            await page.goto(app_origin + "/", timeout=GOTO_TIMEOUT_MS)
-            login = self.manifest.login
-            if self.brief.start == "signed-in" and login is not None and self.account:
-                await sign_in(page, login, *self.account, app_origin)
-            executor = Executor(
-                page,
-                guard,
-                Trace(folder / "trace.jsonl"),
-                folder / "screenshots",
-                touch=bool(self.descriptors[device.playwright].get("has_touch")),
-                redact=self.redact,
-            )
-            report = await run_persona(
-                persona=persona,
-                device=device,
-                executor=executor,
-                model=model_from_spec(self.model_spec),
-                brief=self.brief,
-                focus=self.focus,
-                app_name=self.manifest.name,
-                budget=self.budget,
-                account=self.account,
-            )
+            async with deadline:
+                context = await open_context(
+                    browser, persona, device, self.descriptors, app_origin, self.proxy_url
+                )
+                guard = Guard(app_origin, frozenset(self.manifest.browser.assets))
+                await guard.install(context)
+                page = await context.new_page()
+                await page.goto(app_origin + "/", timeout=GOTO_TIMEOUT_MS)
+                login = self.manifest.login
+                if self.brief.start == "signed-in" and login is not None and self.account:
+                    await sign_in(page, login, *self.account, app_origin)
+                executor = Executor(
+                    page,
+                    guard,
+                    Trace(folder / "trace.jsonl"),
+                    folder / "screenshots",
+                    touch=bool(self.descriptors[device.playwright].get("has_touch")),
+                    redact=self.redact,
+                )
+                report = await run_persona(
+                    persona=persona,
+                    device=device,
+                    executor=executor,
+                    model=model_from_spec(self.model_spec),
+                    brief=self.brief,
+                    focus=self.focus,
+                    app_name=self.manifest.name,
+                    budget=self.budget,
+                    account=self.account,
+                )
         except SignInError as error:
             report = _failed(persona, device, str(error), started)
+        except TimeoutError:
+            reason = "TimeoutError"
+            if deadline.expired():
+                reason = (
+                    f"the persona ran past its hard limit of {limit:g} s, so Footfall stopped "
+                    "it; its actions and cost are not counted"
+                )
+            report = _failed(persona, device, reason, started)
         except Exception as error:  # noqa: BLE001  # any failure ends this persona, not the run
             # The class alone: a message may quote the page, or what was typed into it.
             report = _failed(persona, device, type(error).__name__, started)
         finally:
             if context is not None:
-                with contextlib.suppress(PlaywrightError):
-                    await context.close()
+                await _close(context, browser)
         path = folder / "report.json"
         try:
             _write_json(path, report.to_json(), self.password)
@@ -1029,6 +1065,30 @@ class _Run:
             ],
             "cost_usd": sum(r.cost_usd for r in reports),
         }
+
+
+async def _close(context: BrowserContext, browser: Browser) -> None:
+    """Close a persona's context within `CLOSE_TIMEOUT`.
+
+    A context that does not close in time means the browser container has stopped
+    answering, so the connection to it is closed, which happens on Footfall's side and ends
+    every call still waiting on it, those of the other personas on that browser included:
+    a container that does not answer one persona will not answer the others.
+    """
+    try:
+        async with asyncio.timeout(CLOSE_TIMEOUT):
+            await context.close()
+    except PlaywrightError:
+        return
+    except TimeoutError:
+        LOG.warning(
+            "a context did not close within %g s, so the connection to the run's browser "
+            "was closed",
+            CLOSE_TIMEOUT,
+        )
+        with contextlib.suppress(PlaywrightError, TimeoutError):
+            async with asyncio.timeout(CLOSE_TIMEOUT):
+                await browser.close()
 
 
 def _clean_tail(text: str, password: str | None) -> str:

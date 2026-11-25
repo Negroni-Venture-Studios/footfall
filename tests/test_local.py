@@ -40,6 +40,7 @@ from footfall.local import (
 )
 from footfall.manifest import ManifestError
 from footfall.runner.service import RunnerError
+from footfall.tester import loop as tester_loop
 from footfall.tester import tools
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import ModelTurn
@@ -199,6 +200,7 @@ async def run_folder(
     model: str = FINISHES,
     brief: str = "default",
     all_files: bool = True,
+    budget: Budget | None = None,
 ) -> list[Any]:
     return await test_folder(
         folder,
@@ -208,7 +210,7 @@ async def run_folder(
         model_spec=model,
         out=tmp_path / "out",
         runner=runner,
-        budget=Budget(max_actions=8, max_seconds=120),
+        budget=budget or Budget(max_actions=8, max_seconds=120),
         connect_browser=connect_browser,
         workspaces=tmp_path / "workspaces",
         all_files=all_files,
@@ -492,6 +494,71 @@ async def test_a_persona_that_fails_leaves_the_others_running(
     assert runner.ops()[-1] == "stop"
     printed = capsys.readouterr().out
     assert re.split(r"\s{2,}", printed.splitlines()[2]) == ["kenji", "failed", "0", "0", "$0.00"]
+
+
+async def forever(*arguments: Any, **options: Any) -> Any:
+    """Stands in for a call to a browser container that keeps its connection and never answers."""
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("part", ["open_context", "run_persona"])
+async def test_a_persona_that_never_ends_is_stopped_at_its_hard_limit(
+    tmp_path: Path,
+    app_server: AppServer,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+    part: str,
+) -> None:
+    serve_two_pages(app_server)
+    monkeypatch.setattr(local, part, forever)
+    monkeypatch.setattr(tester_loop, "MIN_TURN", 0.1)
+    monkeypatch.setattr(local, "BROWSER_ALLOWANCE", 0.4)
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    budget = Budget(max_seconds=0.5, grace_turns=0)  # a hard limit of 0.5 + 0.1 + 0.4 s
+    started = time.monotonic()
+    async with asyncio.timeout(15):  # a bound for this test, should the run keep none
+        (report,) = await run_folder(
+            two_pages(tmp_path), runner, connect[0], tmp_path, budget=budget
+        )
+    assert time.monotonic() - started < 10
+    assert report.status == "failed"
+    assert report.reason == (
+        "the persona ran past its hard limit of 1 s, so Footfall stopped it; "
+        "its actions and cost are not counted"
+    )
+    written = json.loads((tmp_path / "out" / "grace" / "report.json").read_text())
+    assert written["status"] == "failed"
+    assert runner.ops()[-1] == "stop"
+
+
+async def test_a_context_that_never_closes_closes_the_connection_to_the_browsers(
+    tmp_path: Path,
+    app_server: AppServer,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serve_two_pages(app_server)
+    real_open = open_context
+    browsers: list[Browser] = []
+
+    async def never_closes(browser: Browser, *rest: Any) -> Any:
+        context = await real_open(browser, *rest)
+        browsers.append(browser)
+        monkeypatch.setattr(context, "close", forever)
+        return context
+
+    monkeypatch.setattr(local, "open_context", never_closes)
+    monkeypatch.setattr(local, "CLOSE_TIMEOUT", 0.5)
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    started = time.monotonic()
+    async with asyncio.timeout(15):  # a bound for this test, should the close keep none
+        (report,) = await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
+    assert time.monotonic() - started < 10
+    assert report.status == "finished"
+    assert (tmp_path / "out" / "grace" / "report.json").exists()
+    (browser,) = browsers
+    assert not browser.is_connected()
+    assert runner.ops()[-1] == "stop"
 
 
 async def test_a_page_that_stops_answering_ends_only_its_persona(

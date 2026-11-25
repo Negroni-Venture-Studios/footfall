@@ -310,13 +310,20 @@ async def capture(
         )
 
     try:
-        jpeg = await page.screenshot(
-            type="jpeg",
-            quality=JPEG_QUALITY,
-            scale="css",
-            full_page=False,
-            timeout=timeout * 1000,
-        )
+        # Playwright's client only passes `timeout` on to the browser, and keeps no timer of
+        # its own, so a browser container that stops answering is given up on here.
+        async with asyncio.timeout(timeout):
+            jpeg = await page.screenshot(
+                type="jpeg",
+                quality=JPEG_QUALITY,
+                scale="css",
+                full_page=False,
+                timeout=timeout * 1000,
+            )
+    except TimeoutError:
+        raise CaptureError(
+            f"the page did not answer within {timeout:g} s while its screenshot was taken"
+        ) from None
     except PlaywrightError as error:
         LOG.debug("the screenshot could not be taken: %s", type(error).__name__)
         raise CaptureError(f"the screenshot could not be taken ({type(error).__name__})") from error

@@ -3,6 +3,7 @@
 The pages are fixtures loaded with `set_content`, so nothing here touches the network.
 """
 
+import asyncio
 import html
 import logging
 import re
@@ -450,6 +451,23 @@ async def test_a_screenshot_that_is_not_a_screens_jpeg_is_refused(
     page = cast(Page, ShotPage(answer))
     with pytest.raises(CaptureError, match=message):
         await capture(page, evaluate=snapshot_of(good()))
+
+
+class SilentPage(ShotPage):
+    """Stands in for a browser container that keeps the connection open and never answers."""
+
+    async def screenshot(self, **options: Any) -> object:
+        await asyncio.Event().wait()
+        raise AssertionError("the screenshot should have been given up on")
+
+
+async def test_a_screenshot_that_never_comes_is_given_up_on() -> None:
+    # Playwright's client keeps no timer of its own for the timeout it is given.
+    started = time.monotonic()
+    async with asyncio.timeout(10):  # a bound for this test, should capture keep none
+        with pytest.raises(CaptureError, match=r"did not answer within 0\.3 s while its screen"):
+            await capture(cast(Page, SilentPage(b"")), evaluate=snapshot_of(good()), timeout=0.3)
+    assert time.monotonic() - started < 3
 
 
 async def test_a_screenshot_as_large_as_the_cap_is_taken() -> None:
