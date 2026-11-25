@@ -50,7 +50,7 @@ import sys
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TextIO
 
 from footfall.actions import MaskError, no_legacy_commands
 from footfall.browsers import BrowserConnectError
@@ -346,6 +346,22 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
 # ---------------------------------------------------------------- the command line
 
 
+class _InertFormatter(logging.Formatter):
+    """Formats a log line with the characters that show nothing stripped and every `##[`
+    broken. A line can name a file or a folder of the tested branch's choosing, and in a
+    GitHub Actions job the runner reads `##[` anywhere in a line of a step's output as a
+    command, so a log line is made as inert as the app's own output."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return no_legacy_commands(strip_invisible(super().format(record)))
+
+
+def _stderr_handler(stream: TextIO) -> logging.Handler:
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(_InertFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    return handler
+
+
 def _cost_ceiling(text: str) -> float:
     try:
         return dollars(text, "--cost-ceiling")
@@ -432,11 +448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SettingsError as error:
         print(f"footfall: {error}", file=sys.stderr)
         return 2
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    logging.basicConfig(level=logging.INFO, handlers=[_stderr_handler(sys.stderr)])
     try:
         if args.command == "test":
             return _test(args, settings)

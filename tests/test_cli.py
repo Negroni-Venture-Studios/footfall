@@ -2,13 +2,15 @@
 
 import asyncio
 import contextlib
+import io
+import logging
 import os
 import re
 import signal
 import socket
 import stat
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -378,6 +380,36 @@ def test_the_apps_last_output_cannot_give_a_github_actions_job_a_command(
     assert "##[" not in IGNORABLE.sub("", printed)
     for line in lines:  # still all there to read
         assert "tail-marker-" + line.rsplit("tail-marker-", 1)[1] in printed
+
+
+def test_a_log_line_cannot_give_a_github_actions_job_a_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Part B, Minor 3: a log line can name a folder of the tested branch's choosing, such as
+    a git-shaped folder left out of the copy, so the handler on standard error strips what
+    shows nothing and breaks every `##[`, as the app's output is treated."""
+    from footfall import local
+
+    installed: list[logging.Handler] = []
+    monkeypatch.setattr(
+        logging, "basicConfig", lambda **options: installed.extend(options["handlers"])
+    )
+    monkeypatch.setattr(cli, "test_folder", Recorder())
+    assert main(["test", "app", "--model", "fake:s.json"]) == 0
+    (handler,) = installed
+    stream = io.StringIO()
+    assert isinstance(handler, logging.StreamHandler)
+    handler.setStream(stream)
+    logger = logging.getLogger("footfall.local")
+    logger.addHandler(handler)
+    try:
+        local._warn_left_out(PurePosixPath("x##[error]y\u200b#\u180b#[warning]z"))
+    finally:
+        logger.removeHandler(handler)
+    said = stream.getvalue()
+    assert "left out" in said
+    assert "x## [error]y## [warning]z" in said
+    assert "##[" not in IGNORABLE.sub("", said)
 
 
 def test_a_missing_folder_fails_cleanly(
