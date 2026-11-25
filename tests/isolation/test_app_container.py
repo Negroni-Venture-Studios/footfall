@@ -74,9 +74,11 @@ def test_the_app_has_no_ipv6_address_but_loopback(sandbox: dict[str, Any]) -> No
     assert ipv6["links"], ipv6
     addresses = {name: source for name, source in ipv6["links"].items() if ":" in source}
     assert addresses == {}, ipv6
-    if isinstance(ipv6["if_inet6"], list):
-        listed = [line.split()[0] for line in ipv6["if_inet6"] if line.strip()]
-        assert set(listed) <= {LOOPBACK_ONLY}, ipv6
+    # The kernel's own list of addresses is its own control: it must be readable and list
+    # ::1, which the socket above shows is there, so an empty or missing list cannot pass.
+    assert isinstance(ipv6["if_inet6"], list), ipv6
+    listed = [line.split()[0] for line in ipv6["if_inet6"] if line.strip()]
+    assert listed == [LOOPBACK_ONLY], ipv6
 
 
 def test_the_app_runs_as_its_own_user_with_no_capabilities(sandbox: dict[str, Any]) -> None:
