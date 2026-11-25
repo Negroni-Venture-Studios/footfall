@@ -83,18 +83,24 @@ _TRANSLATED = tuple(
 )
 _GLOBAL_UNICAST = ipaddress.ip_network("2000::/3")
 # Special-purpose ranges that `is_global` passes but where no public host lives: the
-# deprecated 6to4 relay anycast (RFC 7526), the Port Control Protocol anycast addresses
-# (RFC 7723), the TURN anycast addresses (RFC 8155) and ORCHIDv2 identifiers (RFC 7343),
-# which are not routable.
+# deprecated 6to4 relay anycast, the Port Control Protocol, TURN, AS112 and AMT anycast
+# ranges, and ORCHIDv2 identifiers, which are not routable. An allow list should never
+# reach a special-purpose anycast address.
 _NOT_PUBLIC = tuple(
     ipaddress.ip_network(network)
     for network in (
-        "192.88.99.0/24",
-        "192.0.0.9/32",
-        "192.0.0.10/32",
-        "2001:1::1/128",
-        "2001:1::2/128",
-        "2001:20::/28",
+        "192.88.99.0/24",  # 6to4 relay anycast, RFC 7526
+        "192.0.0.9/32",  # Port Control Protocol anycast, RFC 7723
+        "192.0.0.10/32",  # TURN anycast, RFC 8155
+        "192.31.196.0/24",  # AS112-v4, RFC 7535
+        "192.52.193.0/24",  # AMT, RFC 7450
+        "192.175.48.0/24",  # Direct Delegation AS112 Service, RFC 7534
+        "2001:1::1/128",  # Port Control Protocol anycast, RFC 7723
+        "2001:1::2/128",  # TURN anycast, RFC 8155
+        "2001:3::/32",  # AMT, RFC 7450
+        "2001:4:112::/48",  # AS112-v6, RFC 7535
+        "2001:20::/28",  # ORCHIDv2, RFC 7343
+        "2620:4f:8000::/48",  # Direct Delegation AS112 Service, RFC 7534
     )
 )
 

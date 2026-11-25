@@ -112,10 +112,35 @@ def test_invalid_names(name: str) -> None:
         ("::ffff:192.0.0.10", False),
         ("2001:20::1", False),  # ORCHIDv2
         ("2001:2f:ffff:ffff::1", False),
+        # AS112 (RFC 7534, RFC 7535) and AMT (RFC 7450) anycast: the first and last address.
+        ("192.31.196.0", False),  # AS112-v4
+        ("192.31.196.255", False),
+        ("192.52.193.0", False),  # AMT
+        ("192.52.193.255", False),
+        ("192.175.48.0", False),  # Direct Delegation AS112 Service
+        ("192.175.48.255", False),
+        ("::ffff:192.175.48.1", False),
+        ("2001:3::", False),  # AMT
+        ("2001:3:ffff:ffff:ffff:ffff:ffff:ffff", False),
+        ("2001:4:112::", False),  # AS112-v6
+        ("2001:4:112:ffff:ffff:ffff:ffff:ffff", False),
+        ("2620:4f:8000::", False),  # Direct Delegation AS112 Service
+        ("2620:4f:8000:ffff:ffff:ffff:ffff:ffff", False),
         # Their neighbours stay public.
         ("192.88.98.255", True),
         ("192.88.100.1", True),
         ("2001:30::1", True),
+        ("192.31.195.255", True),
+        ("192.31.197.0", True),
+        ("192.52.192.255", True),
+        ("192.52.194.0", True),
+        ("192.175.47.255", True),
+        ("192.175.49.0", True),
+        ("2620:4f:7fff:ffff:ffff:ffff:ffff:ffff", True),
+        ("2620:4f:8001::", True),
+        # 2001:3::/32 and 2001:4:112::/48 lie in the IETF's 2001::/23, whose other addresses
+        # are not global, so the nearest public neighbour is past it.
+        ("2001:200::1", True),
     ],
 )
 def test_public_addresses(address: str, public: bool) -> None:
