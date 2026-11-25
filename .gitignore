@@ -20,6 +20,7 @@ sbom.json
 *.env
 !deploy/footfall.env.example
 data/
+# Footfall's own package data, the personas and devices it ships, is not instance data.
 !footfall/data/
 *.sqlite3
 *.sqlite3-*

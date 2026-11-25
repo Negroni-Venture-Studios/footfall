@@ -131,9 +131,22 @@ def test_default_paths_exist() -> None:
 
 
 def test_good_custom_file_loads(tmp_path: Path) -> None:
-    personas = _load(tmp_path, _persona_block(geolocation=None))
-    assert personas["ada"].geolocation is None
+    personas = _load(tmp_path, _persona_block(geolocation=None, locale="zh-Hant-TW"))
+    ada = personas["ada"]
+    assert ada.geolocation is None
+    assert (ada.locale, ada.timezone, ada.device) == ("zh-Hant-TW", "Europe/London", "Phone")
+
+
+def test_shipped_devices_are_devices() -> None:
     assert isinstance(load_devices()["iPhone SE"], Device)
+
+
+def test_a_profile_that_promises_large_text_has_it() -> None:
+    """The profile is what the model reads, so it must not claim a text size the browser lacks."""
+    personas = load_personas(load_devices()).values()
+    large = [p for p in personas if re.search(r"\blarge(st)? text|text at its largest", p.profile)]
+    assert {p.id for p in large} == {"sven", "grace", "anna"}
+    assert all(p.text_scale > 1.0 for p in large)
 
 
 @pytest.mark.parametrize(
@@ -145,6 +158,16 @@ def test_good_custom_file_loads(tmp_path: Path) -> None:
         ({"color_scheme": "sepia"}, "color_scheme"),
         ({"id": "Bad_Id"}, "Bad_Id"),
         ({"profile": None}, "profile"),
+        ({"profile": ""}, "profile"),
+        ({"profile": "   "}, "profile"),
+        ({"locale": "english"}, "locale"),
+        ({"locale": "en_GB"}, "locale"),
+        ({"locale": "en-gb"}, "locale"),
+        ({"timezone": "Europe/Londn"}, "timezone"),
+        ({"timezone": "europe/london"}, "timezone"),
+        ({"timezone": "../../etc/passwd"}, "timezone"),
+        ({"timezone": "/usr/share/zoneinfo/UTC"}, "timezone"),
+        ({"timezone": "posixrules"}, "timezone"),
         ({"surprise": 1}, "surprise"),
         ({"geolocation": [1]}, "geolocation"),
     ],

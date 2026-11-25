@@ -7,8 +7,10 @@ of range raises a `PersonaError` that names the file, the entry and the problem.
 
 import re
 import tomllib
+import zoneinfo
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal, get_args
 
@@ -33,6 +35,9 @@ ColorScheme = Literal["light", "dark"]
 
 MIN_TEXT_SCALE, MAX_TEXT_SCALE = 0.5, 3.0
 _PERSONA_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")  # becomes a copy name later
+# A BCP 47 language tag of the kind browsers take: a language, then perhaps a script and a
+# region, such as en-GB, zh-Hant-TW or es-419.
+_LOCALE = re.compile(r"[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?")
 
 
 class PersonaError(ValueError):
@@ -110,6 +115,29 @@ def _text(path: Path, label: str, entry: dict[str, Any], field: str) -> str:
     return value
 
 
+def _locale(path: Path, label: str, entry: dict[str, Any]) -> str:
+    value = _text(path, label, entry, "locale")
+    if not _LOCALE.fullmatch(value):
+        raise PersonaError(
+            f"{path}: {label}: locale must be a language tag such as en-GB, not {value!r}"
+        )
+    return value
+
+
+@cache
+def _time_zones() -> frozenset[str]:
+    return frozenset(zoneinfo.available_timezones())
+
+
+def _timezone(path: Path, label: str, entry: dict[str, Any]) -> str:
+    value = _text(path, label, entry, "timezone")
+    if value not in _time_zones():
+        raise PersonaError(
+            f"{path}: {label}: timezone must be a time zone such as Europe/London, not {value!r}"
+        )
+    return value
+
+
 def load_devices(path: Path = DEVICES) -> dict[str, Device]:
     """Read the device list, keyed by device name, in file order."""
     devices: dict[str, Device] = {}
@@ -181,8 +209,8 @@ def load_personas(devices: Mapping[str, Device], path: Path = PERSONAS) -> dict[
             profile=_text(path, label, entry, "profile"),
             goal=_text(path, label, entry, "goal"),
             device=device,
-            locale=_text(path, label, entry, "locale"),
-            timezone=_text(path, label, entry, "timezone"),
+            locale=_locale(path, label, entry),
+            timezone=_timezone(path, label, entry),
             color_scheme=_choice(path, label, entry, "color_scheme", ColorScheme),
             reduced_motion=_flag(path, label, entry, "reduced_motion"),
             text_scale=float(scale),

@@ -3,6 +3,7 @@
 # (MIT): https://github.com/pierridotite/mobile-agent-testers
 # `geolocation` is [latitude, longitude]; `allow_location = false` means the persona
 # refuses the location prompt. `text_scale` scales the root font size (0.5 to 3.0).
+# `locale` is a language tag such as en-GB, and `timezone` a time zone such as Europe/London.
 
 [[persona]]
 id = "sven"
@@ -32,7 +33,7 @@ allow_location = true
 
 [[persona]]
 id = "jonas"
-profile = "Engineer, 45, uses a tablet with large text and tries to break whatever he meets."
+profile = "Engineer, 45, uses a tablet and tries to break whatever he meets."
 goal = "Complete the main task, then try to break it with odd inputs."
 device = "iPad"
 locale = "de-DE"
