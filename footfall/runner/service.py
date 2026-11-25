@@ -1238,8 +1238,15 @@ class RunnerService:
             self._stop_for_locked(run, DISK_REASON)
             raise RunnerError(f"{DISK_REASON}: {deep}") from None
         except (OSError, RecursionError) as error:
+            # What went wrong is the runner's to know: a name in it is the run's own.
+            logger.error(
+                "could not measure the disk use of run %s: %s: %s",
+                run.run_id,
+                type(error).__name__,
+                error,
+            )
             self._stop_for_locked(run, MEASURE_REASON)
-            raise RunnerError(MEASURE_REASON) from error
+            raise RunnerError(f"{MEASURE_REASON}: {type(error).__name__}") from error
         if usage + extra > self._disk_budget:
             self._stop_for_locked(run, DISK_REASON)
             raise RunnerError(DISK_REASON)
