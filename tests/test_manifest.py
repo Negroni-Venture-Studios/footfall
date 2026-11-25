@@ -327,6 +327,23 @@ def test_brief_front_matter(tmp_path: Path) -> None:
     assert brief.text == "Try it.\n"
 
 
+@pytest.mark.parametrize("length", [8_000, 8_001])
+def test_a_brief_over_8000_characters_is_refused(tmp_path: Path, length: int) -> None:
+    """Ruling R73: the brief goes into every persona's system prompt, so its length is
+    capped; a brief over the cap is refused, saying how long it is and what the cap is.
+    Characters are counted, not bytes, so a brief in another script is held to the same."""
+    body = ("é" * (length - 1)) + "\n"
+    repo, manifest = make_repo(tmp_path, "+++\nmax_actions = 5\n+++\n" + body)
+    if length == 8_000:
+        assert len(load_brief(repo, manifest).text) == 8_000
+        return
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest)
+    assert caught.value.problems == [
+        "default.md: is 8,001 characters long, and a brief may be at most 8,000"
+    ]
+
+
 def test_front_matter_must_be_at_the_very_top(tmp_path: Path) -> None:
     text = "\n+++\nmax_actions = 5\n+++\nBody\n"
     repo, manifest = make_repo(tmp_path, text)

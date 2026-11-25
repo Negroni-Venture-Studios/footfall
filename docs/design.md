@@ -165,7 +165,7 @@ personas = ["sven", "grace", "jonas", "layla", "noah"]
 | `browser.assets` | Hosts the pages may load besides the app itself. None by default |
 | `login` | Optional. How to sign in to the app: the sign-in page, the labels of its two fields, and its button |
 | `test.pages` | The pages the scripted checks load. The start page by default |
-| `test.briefs` | A folder of briefs. Each says what the app is for, what each persona should try, which pages and states matter, and what is out of scope |
+| `test.briefs` | A folder of briefs. Each says what the app is for, what each persona should try, which pages and states matter, and what is out of scope, in at most 8,000 characters, since it goes into every persona's prompt |
 | `test.personas` | The personas used unless the caller names others |
 
 For an app with its own sign-in, Footfall makes a throwaway username and password for each run and passes them to `seed` as `FOOTFALL_USERNAME` and `FOOTFALL_PASSWORD`, and the seed step creates that account. Every container also has `FOOTFALL=1` set, so an app can turn on a way in meant only for testing, such as skipping an emailed code. Footfall signs each persona in before it starts, unless the brief asks for signing in to be tested, and signs in before the scripted checks load their pages.

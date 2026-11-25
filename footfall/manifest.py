@@ -42,6 +42,9 @@ RUNTIMES = ("python3.13", "node22")
 MANIFEST_FILE = "footfall.toml"
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_BRIEF_BYTES = 256 * 1024
+# The most characters a brief may hold, front matter apart. It goes into every persona's
+# system prompt, so the tested repository may not fill that prompt with it.
+MAX_BRIEF_CHARACTERS = 8_000
 MAX_COMMAND_LENGTH = 2000
 MAX_LABEL_LENGTH = 200
 MAX_FOLDER_LENGTH = 200
@@ -572,15 +575,15 @@ def load_brief(repo: Path, manifest: Manifest, name: str = "default") -> Brief:
         reader.problem("start", f"must be signed-in or signed-out, not {raw_start!r}")
     max_actions = reader.integer("max_actions", 1, MAX_ACTIONS_CEILING)
     reader.finish()
+    text = _LEADING_BLANK_LINES.sub("", body)
+    if len(text) > MAX_BRIEF_CHARACTERS:
+        problems.append(
+            f"is {len(text):,} characters long, and a brief may be at most {MAX_BRIEF_CHARACTERS:,}"
+        )
     if problems:
         raise ManifestError([f"{label}: {problem}" for problem in problems])
 
-    return Brief(
-        name=name,
-        text=_LEADING_BLANK_LINES.sub("", body),
-        start=start,
-        max_actions=max_actions,
-    )
+    return Brief(name=name, text=text, start=start, max_actions=max_actions)
 
 
 def require_listed(manifest: Manifest, brief: Brief, listed: Collection[PurePosixPath]) -> None:
