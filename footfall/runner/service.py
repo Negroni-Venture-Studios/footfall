@@ -8,6 +8,10 @@ files, folders and symbolic links, at most `MAX_DEPTH` folders deep.
 
 The runs folder must be root's alone, and every folder above it root's or the runner's, so
 that no other user can rename or replace a name in it; the runner refuses to start otherwise.
+That check covers the folder as it is mounted and the folders above it as the runner's own
+container shows them, its image's own. Docker finds a mount's path through the host's folders
+above it, which the runner never sees, so those must be root's alone too: the deployment makes
+them so, and the isolation workflow checks them on its host.
 It holds the runs folder and the workspaces folder open, and reaches everything below them from
 those descriptors, one name at a time and never through a link. Every copy is one pass by file
 descriptor on both sides: each folder is read relative to its parent, each entry is made, given
@@ -346,6 +350,10 @@ def _open_path(path: Path, owner: int | None = None, *, create: bool = False) ->
     nobody else, unless it is sticky, as /tmp is, so that nobody else can rename or replace
     what lies below it; and `path` itself must belong to `owner` and be writable by nobody
     else. With `create`, a missing last folder is made, mode 0700. Raises RunnerSetupError.
+
+    The folders checked are those this process sees. Inside the runner's container that is the
+    mounted folder itself and its image's own folders above it, not the host's, which Docker
+    goes through to find a mount and which the deployment must keep root's.
     """
     if not path.is_absolute():
         raise RunnerSetupError(f"{path} is not an absolute path")
@@ -1440,9 +1448,10 @@ class RunnerService:
 
         Docker takes a path, not a descriptor, so the path is opened again from / one name at a
         time and must reach the runs folder the runner opened at start; below that, the folder
-        is opened from the runner's own descriptor without going through a link. Since the runs
-        folder and every folder above it are root's alone, nothing can change what the path
-        names between this check and Docker's mount.
+        is opened from the runner's own descriptor without going through a link. The runs folder
+        is root's alone, and so, as the deployment keeps them, are the host's folders above it,
+        which Docker goes through and the runner cannot see; so nothing can change what the
+        path names between this check and Docker's mount.
         """
         try:
             check = _open_path(self._runs_root)

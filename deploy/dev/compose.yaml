@@ -16,7 +16,10 @@
 # Each run's files are in /var/lib/footfall-runs, which must be root's alone:
 # the runner, which is root, writes there and names its folders to Docker, so
 # no other user may rename anything in it or above it. The runner refuses to
-# start otherwise, and nothing else mounts it.
+# start otherwise, and nothing else mounts it. It sees the folders above it
+# only as its own container shows them, so on the host /var/lib and /var,
+# which Docker goes through to find it, must be root's alone too, as they are
+# on a stock Ubuntu.
 #
 # On a Mac, Docker Desktop has no gVisor. FOOTFALL_RUNTIME=runc starts the
 # containers under test without it, and every command then warns that it has.

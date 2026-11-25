@@ -10,7 +10,9 @@ import json
 import os
 import secrets
 import socket
+import stat
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -122,6 +124,28 @@ def test_a_link_planted_below_a_runs_folder_is_refused(engine: DockerEngine) -> 
         in_container(RUNNER, "rm", "-rf", outside)
     gone = in_container(RUNNER, "sh", "-c", f"ls -A {RUNS} | wc -l")
     assert gone.stdout.strip() == "0"  # the link went with its run, and nothing it named
+
+
+def test_the_runs_folder_and_every_folder_above_it_on_the_host_are_roots_alone() -> None:
+    """Part A, Minor 1: the runner checks the runs folder as it is mounted and the folders
+    above it as its own container shows them, its image's. Docker finds the mount through
+    the host's folders above it, which the runner never sees, so here, on the host, the
+    folder and each folder above it must be root's, no link, and writable by root alone."""
+    if not ON_HOST:
+        pytest.skip("runs on the CI host, where the runs folder is")
+    held: dict[str, dict[str, Any]] = {}
+    for folder in (Path(RUNS), *Path(RUNS).parents):
+        info = folder.lstat()
+        held[str(folder)] = {
+            "owner": info.st_uid,
+            "mode": f"{stat.S_IMODE(info.st_mode):o}",
+            "folder": stat.S_ISDIR(info.st_mode),
+        }
+    record("the runs folder and the folders above it, on the host", held)
+    for name, seen in held.items():
+        assert seen["folder"], f"{name} is not a folder, or is a link"
+        assert seen["owner"] == 0, f"{name} is not root's"
+        assert int(seen["mode"], 8) & 0o022 == 0, f"{name} is writable by others"
 
 
 def _listeners(container: str, port: int) -> list[str]:

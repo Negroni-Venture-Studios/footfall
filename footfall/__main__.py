@@ -31,7 +31,9 @@ lacks it, and every command then prints a warning. `FOOTFALL_DISK_BUDGET_MIB` is
 disk, in MiB, that the runner lets one run use, counting every copy of its app.
 `FOOTFALL_RUN_LIFETIME_MINUTES` is the longest a run may last before the runner stops it,
 whether or not its caller is still there. `FOOTFALL_RUNS` must belong to root and be writable
-by root alone, as must every folder above it, or the runner will not start.
+by root alone, as must every folder above it, or the runner will not start. The runner sees
+the folders above it only as its own container shows them, so on the host, where Docker finds
+the folder, each folder above it must be root's alone too.
 """
 
 import argparse
