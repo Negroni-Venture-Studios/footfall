@@ -858,6 +858,11 @@ async def test_http_large_response_is_relayed() -> None:
         (("X-Folded: a", " b"), 400),
         (("X-Control: a\x00b",), 400),
         (("X-Control: a\x7fb",), 400),
+        # C1 control bytes, which a server that reads the head as Latin-1 may take for a line
+        # break (0x85 is NEL) or a terminal control.
+        (("X-Control: a\x80b",), 400),
+        (("X-Control: a\x85b",), 400),
+        (("X-Control: a\x9fb",), 400),
     ],
 )
 async def test_ambiguous_or_malformed_headers_refused(
@@ -867,6 +872,15 @@ async def test_ambiguous_or_malformed_headers_refused(
     reply = await exchange(live.port, request)
     assert status(reply) == code
     assert live.connects == []
+
+
+async def test_other_high_bytes_in_a_header_value_are_forwarded(live: Live) -> None:
+    # Bytes from 0xA0 up are obs-text, which HTTP still allows in a value.
+    assert (
+        await exchange(live.port, get(f"http://{ALLOWED}/", "X-Text: \xa0caf\xe9\xff")) == RESPONSE
+    )
+    await live.upstream.wait_for(1)
+    assert b"\r\nX-Text: \xa0caf\xe9\xff\r\n" in live.upstream.received[0]
 
 
 @pytest.mark.parametrize(

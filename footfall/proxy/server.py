@@ -105,7 +105,9 @@ _TARGET: Final = re.compile(r"[\x21-\x7e]+")
 _HOST_CHARACTERS: Final = re.compile(r"[A-Za-z0-9.-]+")
 _PORT: Final = re.compile(r"[0-9]{1,5}")
 _LENGTH: Final = re.compile(r"[0-9]{1,15}")
-_CONTROL: Final = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+# Control characters in a header value, the head being read as Latin-1: C0 but tab, DEL, and the
+# C1 bytes 0x80 to 0x9F, which a server reading Latin-1 may take for a line break (0x85 is NEL).
+_CONTROL: Final = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
 _TOO_LARGE: Final = f"request headers are larger than {MAX_HEAD // 1024} KiB"
 # Never passed upstream: hop-by-hop headers, the client's Host, Content-Length, which the
 # proxy writes itself from the length it checked, and the headers some servers and the proxies
