@@ -154,39 +154,54 @@ async def test_chromium_sends_no_encrypted_client_hello(browsers: Browsers) -> N
     # By address: Docker's name service does not answer inside gVisor.
     address, _ = await run.serve("hello", "hello", 8443)
     target = f"https://{address}/"
+    failed: dict[str, list[str]] = {}
 
     async def hellos() -> list[dict[str, Any]]:
         return lines(await run.logs("hello"), HELLO)
 
-    full = await browsers.connect("chromium")  # as the orchestrator launches it
-    try:
-        page = await (await full.new_context(ignore_https_errors=True)).new_page()
+    async def visit(browser: Browser, name: str) -> list[dict[str, Any]]:
+        """The ClientHellos the probe saw when this browser went to it."""
+        before = len(await hellos())
+        failed[name] = []
+        # The browser container's environment names the egress proxy, which Chromium uses
+        # when a context gives none, and which refuses an address. So the probe and the app
+        # are bypassed, as footfall test bypasses the app.
+        bypass = ",".join(urlsplit(url).hostname or "" for url in (target, browsers.app))
+        context = await browser.new_context(
+            ignore_https_errors=True, proxy={"server": PROXY_URL, "bypass": bypass}
+        )
+        page = await context.new_page()
+        page.on("requestfailed", lambda r: failed[name].append(f"{r.url}: {r.failure}"))
         # From the app's own page, on the run's private network like the probe.
         await _goto(page, browsers.app + "/")
-        await _goto(page, target)
-        await run.wait_for("hello", HELLO, timeout=30)
+        try:
+            await page.goto(target, timeout=30_000)
+        except PlaywrightError as error:
+            failed[name].append(str(error).splitlines()[0])
+        with contextlib.suppress(TimeoutError):
+            await run.wait_for("hello", HELLO, count=before + 1, timeout=20)
         await asyncio.sleep(2)
+        return (await hellos())[before:]
+
+    full = await browsers.connect("chromium")  # as the orchestrator launches it
+    try:
+        from_full = await visit(full, "full")
     finally:
         await full.close()
-    from_full = await hellos()
-
     # The control: Playwright's headless shell reads no policies and sends ECH, so the
     # probe must see it there, or its silence about full Chromium proves nothing.
     shell = await browsers.playwright.chromium.connect(
         browsers.endpoint, timeout=CONNECT_TIMEOUT_MS, headers={LAUNCH_HEADER: json.dumps({})}
     )
     try:
-        page = await (await shell.new_context(ignore_https_errors=True)).new_page()
-        await _goto(page, browsers.app + "/")
-        await _goto(page, target)
-        await run.wait_for("hello", HELLO, count=len(from_full) + 1, timeout=30)
+        from_shell = await visit(shell, "shell")
     finally:
         await shell.close()
-    from_shell = (await hellos())[len(from_full) :]
-
-    assert from_full and all("extensions" in h for h in from_full), from_full
-    assert [h for h in from_full if HIDDEN_NAMES & set(h["extensions"])] == [], from_full
-    assert any(ECH in h.get("extensions", []) for h in from_shell), from_shell
+    accepted = [hit for hit in lines(await run.logs("hello"), HIT) if "accepted" in hit]
+    seen = (from_full, from_shell, failed, f"{len(accepted)} connections accepted")
+    assert from_full and all("extensions" in h for h in from_full), seen
+    assert [h for h in from_full if HIDDEN_NAMES & set(h["extensions"])] == [], seen
+    assert any(ECH in h.get("extensions", []) for h in from_shell), seen
 
 
 async def test_chromium_loads_an_allowed_https_asset_through_the_proxy(

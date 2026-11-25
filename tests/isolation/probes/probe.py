@@ -564,7 +564,8 @@ def serve_hello(arguments: Sequence[str]) -> None:
     listener = socket.create_server(("0.0.0.0", port))  # noqa: S104
     say(READY, {"port": port, "hostname": socket.gethostname()})
     while True:
-        connection, _ = listener.accept()
+        connection, peer = listener.accept()
+        say(HIT, {"accepted": peer[0]})
         threading.Thread(target=_hello, args=(connection,), daemon=True).start()
 
 
