@@ -127,7 +127,8 @@ class Settings:
             return value
 
         def mebibytes(name: str) -> int:
-            value = get(name)
+            # Set but empty is an error too: a budget is never the default in silence.
+            value = env[name] if name in env else _DEFAULTS[name]
             if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= _MOST_MIB:
                 raise SettingsError(
                     f"{name} must be a whole number of MiB from 1 to {_MOST_MIB}, not {value!r}"

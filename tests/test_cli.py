@@ -111,6 +111,8 @@ def test_settings_come_from_the_environment() -> None:
         ("FOOTFALL_DISK_BUDGET_MIB", "1.5"),
         ("FOOTFALL_DISK_BUDGET_MIB", "lots"),
         ("FOOTFALL_DISK_BUDGET_MIB", "99999999999"),
+        ("FOOTFALL_DISK_BUDGET_MIB", ""),  # set, but empty: never the default in silence
+        ("FOOTFALL_DISK_BUDGET_MIB", " 512"),
     ],
 )
 def test_bad_settings_are_refused(
@@ -242,6 +244,17 @@ def test_a_missing_folder_fails_cleanly(
     monkeypatch.setenv("FOOTFALL_RUNNER_SOCKET", str(tmp_path / "nobody.sock"))
     assert main(["test", str(tmp_path / "missing"), "--model", "fake:s.json"]) == 1
     assert "footfall.toml" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "", "lots", "-1"])
+def test_a_bad_disk_budget_stops_the_runner_before_it_starts(
+    value: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    started = stub_services(monkeypatch)
+    monkeypatch.setenv("FOOTFALL_DISK_BUDGET_MIB", value)
+    assert main(["runner"]) == 2
+    assert started == []
+    assert "FOOTFALL_DISK_BUDGET_MIB must be a whole number of MiB" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------- the runc warning
