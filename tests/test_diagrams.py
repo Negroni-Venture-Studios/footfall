@@ -11,6 +11,8 @@ import re
 
 import pytest
 
+from tests.test_doc_links import DOCUMENTS
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("build_diagrams", ROOT / "docs/diagrams/build.py")
 assert SPEC is not None and SPEC.loader is not None
@@ -42,6 +44,7 @@ def test_sources_use_the_palette_not_colours(source: pathlib.Path) -> None:
 
 
 def test_every_diagram_is_used_in_the_documents() -> None:
-    documents = "".join(p.read_text() for p in ROOT.glob("**/*.md") if ".venv" not in p.parts)
+    """Only the published documents count, not the plans or a local workspace's notes."""
+    documents = "".join(p.read_text() for p in DOCUMENTS)
     for path in BUILT:
         assert f"images/diagrams/{path.name}" in documents, path.name

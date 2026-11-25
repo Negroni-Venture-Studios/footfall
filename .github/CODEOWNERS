@@ -1,6 +1,17 @@
 # Reviews are requested automatically from the owners below.
 * @aallan
 
-# The authorisation path and its tests get extra scrutiny once they exist.
+# The files that hold Footfall's security boundaries: the runner and its container settings,
+# the egress proxy and its address rules, the tester's guard and tools, the images, the
+# Compose files, the workflows and the dependencies. They share the owner above for now,
+# and a second owner for them is added here.
 .github/ @aallan
 pyproject.toml @aallan
+uv.lock @aallan
+footfall/runner/ @aallan
+footfall/proxy/ @aallan
+footfall/hosts.py @aallan
+footfall/tester/guard.py @aallan
+footfall/tester/tools.py @aallan
+images/ @aallan
+deploy/ @aallan

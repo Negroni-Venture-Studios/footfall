@@ -48,3 +48,12 @@ def test_the_readme_links_the_community_files() -> None:
     linked = set(targets(ROOT / "README.md"))
     for name in ("CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "AGENTS.md"):
         assert name in linked, name
+
+
+def test_every_path_in_codeowners_exists() -> None:
+    """An owner for a path that has moved would review nothing."""
+    lines = (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
+    paths = [line.split()[0] for line in lines if line.strip() and not line.startswith("#")]
+    assert "*" in paths
+    missing = [path for path in paths if path != "*" and not (ROOT / path.strip("/")).exists()]
+    assert not missing
