@@ -521,18 +521,24 @@ class _Undiscoverable(Exception):
 
 def _read_small(path: Path) -> bytes:
     """At most `_SMALL_FILE` bytes of a regular file, never through a link and never from a
-    FIFO or a device, which could block or never end. Raises _Undiscoverable otherwise, and
-    for a NUL, which no path holds."""
+    FIFO or a device, which could block or never end. Raises _Undiscoverable otherwise, for
+    any error in opening or reading it, and for a NUL, which no path holds."""
+
+    def unreadable(error: OSError) -> _Undiscoverable:
+        return _Undiscoverable(f"Footfall cannot read {_shown(path)} ({error.strerror})")
+
     try:
         if not stat.S_ISREG(path.lstat().st_mode):
             raise _Undiscoverable(f"{_shown(path)} is not a plain file")
         handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as error:
-        raise _Undiscoverable(f"Footfall cannot read {_shown(path)} ({error.strerror})") from None
+        raise unreadable(error) from None
     try:
         if not stat.S_ISREG(os.fstat(handle).st_mode):
             raise _Undiscoverable(f"{_shown(path)} is not a plain file")
         data = os.read(handle, _SMALL_FILE)
+    except OSError as error:
+        raise unreadable(error) from None
     finally:
         os.close(handle)
     if b"\0" in data:
@@ -548,12 +554,16 @@ def _git_shaped(path: Path) -> bool:
     return _shaped_like_a_git_folder(lambda name: _kind(str(path / name)))
 
 
-def _must_be_git_shaped(path: Path, named_by: Path) -> Path:
-    if not _git_shaped(path):
-        raise _Undiscoverable(
-            f"{_shown(named_by)} names {_shown(path)}, which is not shaped like a git folder"
-        )
-    return path
+def _must_be_git_shaped(path: Path, named_by: Path | None = None) -> Path:
+    """`path`, which `named_by` names, if it is shaped like a git folder; raises
+    _Undiscoverable if not. A `.git` folder names itself, and is given no `named_by`."""
+    if _git_shaped(path):
+        return path
+    if named_by is None:
+        raise _Undiscoverable(f"{_shown(path)} is not shaped like a git folder")
+    raise _Undiscoverable(
+        f"{_shown(named_by)} names {_shown(path)}, which is not shaped like a git folder"
+    )
 
 
 def _discovered_git_folders(folder: Path) -> list[Path]:
@@ -586,7 +596,7 @@ def _discovered_git_folders(folder: Path) -> list[Path]:
                     f"Footfall cannot read {_shown(entry)} ({error.strerror})"
                 ) from None
             if stat.S_ISDIR(info.st_mode):
-                found.append(_must_be_git_shaped(entry, entry))
+                found.append(_must_be_git_shaped(entry))
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _Undiscoverable(

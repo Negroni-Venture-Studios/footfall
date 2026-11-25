@@ -8,6 +8,7 @@ lookups switched off, and the model is a `FakeModel` or a scripted tester.
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -2456,6 +2457,52 @@ def test_a_git_entry_footfall_cannot_follow_refuses_a_linked_file(
     finally:
         if git_file.exists() and not git_file.is_symlink():
             git_file.chmod(0o644)
+
+
+@pytest.mark.parametrize("call", ["fstat", "read"])
+def test_a_git_file_that_fails_as_it_is_read_cannot_be_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    """An error once the file is open, from the disk say, is a reason not to follow it,
+    reported as one, and the file is closed all the same."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    path = folder / ".git"
+    path.write_text("gitdir: g\n")
+    opened: list[int] = []
+    real_open, real_call = os.open, getattr(os, call)
+
+    def recording(name: Any, flags: int, *rest: Any, **options: Any) -> int:
+        fd = real_open(name, flags, *rest, **options)
+        if str(name) == str(path):
+            opened.append(fd)
+        return fd
+
+    def failing(fd: int, *rest: Any) -> Any:
+        if fd in opened:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_call(fd, *rest)
+
+    monkeypatch.setattr(os, "open", recording)
+    monkeypatch.setattr(os, call, failing)
+    with pytest.raises(local._Undiscoverable, match=r"cannot read .*\(Input/output error\)"):
+        local._read_small(path)
+    monkeypatch.undo()
+    assert len(opened) == 1
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(opened[0])
+
+
+def test_a_git_folder_not_shaped_like_one_is_named_once(tmp_path: Path) -> None:
+    folder = tmp_path / "source"
+    app_files(folder)
+    (folder / ".git").mkdir()  # no HEAD, no objects
+    info = linked_file(folder)
+    with pytest.raises(LocalRunError) as caught:
+        local._known_linked(folder).holds(info)
+    message = str(caught.value)
+    assert '" is not shaped like a git folder' in message
+    assert " names " not in message
 
 
 def test_only_the_start_of_a_git_file_is_read(tmp_path: Path) -> None:
