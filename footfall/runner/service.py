@@ -843,6 +843,9 @@ class RunnerService:
             self._engine.connect(run.network, container)
         proxy_address = self._engine.address(self._proxy_container, run.network)
         run.proxy_url = f"http://{proxy_address}:{self._proxy_port}"
+        # The proxy listens on no interface until told, so that only a run's containers reach
+        # it, at its address on their own network; revoke_run closes that again.
+        self._proxy.listen(proxy_address, run.run_id)
 
         if install is not None:
             install_hosts = list(dict.fromkeys([*REGISTRIES, *hosts]))

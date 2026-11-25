@@ -154,7 +154,7 @@ def test_prepare_without_install_or_seed(h: Harness) -> None:
     h.workspace(files={"serve.py": "print('hi')\n", "lib/util.py": "X = 1\n"})
     prepare(h)
     assert h.engine.names("create") == []
-    assert h.proxy.calls == []
+    assert h.proxy.calls == [("listen", OUTSIDE_IPS[PROXY], RUN)]
     assert h.engine.attached == {(NETWORK, PROXY), (NETWORK, ORCHESTRATOR)}
     prepared = h.runs / RUN / "prepared"
     assert (prepared / "lib" / "util.py").read_text() == "X = 1\n"
@@ -164,6 +164,26 @@ def test_prepare_without_install_or_seed(h: Harness) -> None:
         prepared / "lib",
         prepared / "lib" / "util.py",
     }
+
+
+def test_the_proxy_listens_on_the_runs_network_before_any_container_starts(h: Harness) -> None:
+    prepare(h, install="pip install -r requirements.txt", seed="python3 seed.py")
+    listen = ("listen", OUTSIDE_IPS[PROXY], RUN)
+    assert h.proxy.calls.count(listen) == 1
+    # The proxy is told where to listen once it is on the run's network, and before the
+    # first container could want it.
+    assert h.proxy.calls.index(listen) == 0
+    calls = h.engine.calls
+    assert calls.index(("connect", NETWORK, PROXY)) < calls.index(("create", INSTALL))
+
+
+def test_a_proxy_that_cannot_listen_fails_the_prepare_and_leaves_nothing(h: Harness) -> None:
+    h.proxy.failures["listen"] = ConnectionRefusedError(61, "Connection refused")
+    with pytest.raises(RunnerError, match="Connection refused"):
+        prepare(h, install="pip install -r requirements.txt")
+    assert h.engine.names("create") == []
+    assert ("revoke_run", RUN) in h.proxy.calls
+    assert_nothing_left(h)
 
 
 def test_install_failure_raises_with_log_tail_and_cleans_its_container(h: Harness) -> None:
