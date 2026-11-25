@@ -622,3 +622,22 @@ async def test_sign_in_fills_nothing_once_the_page_has_moved_on() -> None:
     with pytest.raises(SignInError, match="left the app"):
         await sign_in(page, LOGIN, USERNAME, PASSWORD, APP)  # type: ignore[arg-type]
     assert page.acted == []
+
+
+@pytest.mark.parametrize(
+    ("origin", "secure"),
+    [
+        ("http://127.0.0.1:8000", True),
+        ("http://localhost:8000", True),
+        ("http://app.localhost:8000", True),
+        ("http://[::1]:8000", True),
+        ("https://172.18.0.3:8443", True),
+        # How the app is reached in the real stack: Chromium refuses to grant a permission
+        # there ("Permission can't be granted in current context"), and the page could not
+        # use the location anyway (found in the isolation workflow).
+        ("http://172.18.0.3:8080", False),
+        ("http://example.com", False),
+    ],
+)
+def test_location_is_granted_only_to_an_origin_that_could_use_it(origin: str, secure: bool) -> None:
+    assert browsers.potentially_trustworthy(origin) is secure

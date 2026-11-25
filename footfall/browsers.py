@@ -34,6 +34,7 @@ __all__ = [
     "SignInError",
     "connect_run_server",
     "open_context",
+    "potentially_trustworthy",
     "sign_in",
 ]
 
@@ -181,7 +182,11 @@ async def open_context(
         options["geolocation"] = {"latitude": latitude, "longitude": longitude}
     context = await browser.new_context(**options)
     try:
-        if persona.geolocation is not None and persona.allow_location:
+        if (
+            persona.geolocation is not None
+            and persona.allow_location
+            and potentially_trustworthy(app_origin)
+        ):
             await context.grant_permissions(["geolocation"], origin=app_origin)
         if persona.text_scale != 1:
             scale = repr(float(persona.text_scale))
@@ -190,6 +195,17 @@ async def open_context(
         await context.close()
         raise
     return context
+
+
+def potentially_trustworthy(origin: str) -> bool:
+    """Whether a page at `origin` is a secure context, where a browser lets it ask for the
+    location. Chromium refuses to grant the permission anywhere else, and the page could not
+    use it there, so the app reached at a container's plain-HTTP address is not granted it."""
+    parts = urlsplit(origin)
+    host = (parts.hostname or "").lower()
+    if parts.scheme == "https":
+        return True
+    return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
