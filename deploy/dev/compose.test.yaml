@@ -10,7 +10,8 @@
 # runner gets a disk budget of 128 MiB, so that a seed can go over it in seconds.
 # The proxy also copies its log to a file the orchestrator can read, so that a
 # test can see what the proxy decided; the workflow makes the folder, owned by
-# the proxy's user, 10001.
+# the proxy's user, 10001. The orchestrator is told whether it runs in GitHub
+# Actions, so that it masks each secret it makes in the job's log.
 
 services:
   proxy:
@@ -32,3 +33,4 @@ services:
       - FOOTFALL_ISOLATION=1
       - FOOTFALL_TEST_HOST_ADDRESSES=${FOOTFALL_TEST_HOST_ADDRESSES:-}
       - FOOTFALL_TEST_HOST_PORT=${FOOTFALL_TEST_HOST_PORT:-}
+      - GITHUB_ACTIONS=${GITHUB_ACTIONS:-}

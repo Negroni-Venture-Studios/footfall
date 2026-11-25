@@ -1,5 +1,8 @@
 """The isolation tests' own guard: they refuse to run without gVisor."""
 
+import re
+from pathlib import Path
+
 import pytest
 
 from tests.isolation.conftest import refusal
@@ -68,3 +71,19 @@ def test_a_refusal_can_be_matched_by_its_reason() -> None:
     assert refused(line, "is not on this client's allow list")
     assert not refused(line, "not a valid host name")
     assert not refused(LINE + "allowed", "allowed")
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_the_masks_reach_the_log_before_anything_else() -> None:
+    """Footfall writes ::add-mask:: to file descriptor 1, which pytest's default capture
+    would hold until after a failure's traceback; the isolation run captures at the sys
+    level only, and the end-to-end run's footfall test writes straight to the job's output."""
+    workflow = (ROOT / ".github" / "workflows" / "isolation.yml").read_text()
+    pytest_line = re.search(r"^\s+PYTEST: (.+)$", workflow, re.MULTILINE)
+    assert pytest_line is not None
+    assert "--capture=sys" in pytest_line.group(1).split()
+    end_to_end = (ROOT / "tests" / "isolation" / "test_end_to_end.py").read_text()
+    assert "capture_output" not in end_to_end
+    assert "stdout=" not in end_to_end

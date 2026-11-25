@@ -639,7 +639,8 @@ class RunnerService:
     def start_browsers(self, run_id: str, assets: Sequence[str]) -> str:
         """Start the run's browser container and return its Playwright endpoint.
 
-        The endpoint holds the server's secret path, so it goes to the caller and nowhere else.
+        The endpoint holds the server's secret path, so it goes to the caller and nowhere else,
+        not even in the message of an error that quotes it.
         """
         with _as_runner_error():
             _check_run_id(run_id)
@@ -664,12 +665,19 @@ class RunnerService:
                     runtime=self._runtime,
                     proxy_name=self._proxy_container,
                 )
+                hidden: str | None = None
                 try:
                     address = self._launch_locked(run, name, config, hosts)
-                except BaseException:
+                except BaseException as error:
                     if not run.closed:
                         self._forget_locked(run, name)
-                    raise
+                    if path not in str(error):
+                        raise
+                    hidden = str(error).replace(path, "[the browsers' path]")
+                if hidden is not None:
+                    # Raised here, apart from the error it replaces, so that no traceback of
+                    # this one leads back to the path.
+                    raise RunnerError(hidden)
                 run.browsers = True
                 return f"ws://{address}:{BROWSERS_PORT}{path}"
 

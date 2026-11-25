@@ -10,7 +10,9 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import urlsplit
 
+from footfall.actions import mask
 from footfall.runner.service import RunnerError
 
 # Replies carry at most a capped log tail, which JSON escaping can make several times longer.
@@ -91,7 +93,17 @@ class RunnerClient:
         return _text(result)
 
     async def start_browsers(self, run_id: str, assets: Sequence[str]) -> str:
-        return _text(await self._call("start_browsers", run_id=run_id, assets=list(assets)))
+        """Start the run's browsers and return their endpoint, whose path is a secret.
+
+        The runner makes the path in its own container, whose output no GitHub Actions job
+        reads as it goes; the orchestrator's output is, so the path is masked here, before
+        anything can print it.
+        """
+        endpoint = _text(await self._call("start_browsers", run_id=run_id, assets=list(assets)))
+        path = urlsplit(endpoint).path.lstrip("/")
+        if path:
+            mask(path)
+        return endpoint
 
     async def logs(self, run_id: str, copy: str) -> str:
         return _text(await self._call("logs", run_id=run_id, copy=copy))

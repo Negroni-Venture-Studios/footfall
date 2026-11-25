@@ -1519,3 +1519,46 @@ async def test_a_tracked_git_fixture_is_still_copied(
     assert "fixtures/repo/config" in files
     assert "fixtures/repo/objects/README" in files
     assert "fixtures/repo/untracked-note" not in files  # untracked, inside a git-shaped folder
+
+
+# ---------------------------------------------------------------- GitHub Actions
+
+
+async def test_in_github_actions_the_password_is_masked_before_it_is_used(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    folder = two_pages(tmp_path, LOGIN_MANIFEST)
+    printed: list[str] = []
+
+    class SeedFails(FakeRunner):
+        async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> None:
+            # The first use of the password: by now the mask must be in the log already.
+            printed.append(capfd.readouterr().out)
+            self.envs.append(dict(rest[-1]))
+            raise RunnerError("seed failed with exit code 1")
+
+    async def unreachable(engine: str, endpoint: str) -> Browser:
+        raise BrowserConnectError("never reached")
+
+    runner = SeedFails(lambda copy: "127.0.0.1:9")
+    with pytest.raises(RunnerError):
+        await run_folder(folder, runner, unreachable, tmp_path)
+    password = runner.envs[0]["FOOTFALL_PASSWORD"]
+    assert f"::add-mask::{password}\n" in printed[0]
+
+
+async def test_outside_github_actions_nothing_is_masked(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    folder = two_pages(tmp_path, LOGIN_MANIFEST)
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    runner.fail["prepare"] = RunnerError("seed failed with exit code 1")
+
+    async def unreachable(engine: str, endpoint: str) -> Browser:
+        raise BrowserConnectError("never reached")
+
+    with pytest.raises(RunnerError):
+        await run_folder(folder, runner, unreachable, tmp_path)
+    assert "::add-mask::" not in capfd.readouterr().out

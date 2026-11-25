@@ -74,7 +74,10 @@ async def exchange(path: Path, data: bytes) -> dict[str, Any]:
     return reply
 
 
-async def test_round_trip_prepare(live: Live) -> None:
+async def test_round_trip_prepare(
+    live: Live, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     h, client = live.harness, live.client
     workspace = h.workspace()
     await client.prepare(
@@ -99,6 +102,8 @@ async def test_round_trip_prepare(live: Live) -> None:
     browsers = h.engine.configs[f"footfall-{RUN}-browsers-browsers"]
     address = h.engine.ips[f"footfall-{RUN}-browsers-browsers"]
     assert endpoint == f"ws://{address}:3000{browsers['Cmd'][-1]}"
+    # The orchestrator's output is what a GitHub Actions job reads, so it masks the path there.
+    assert f"::add-mask::{browsers['Cmd'][-1].lstrip('/')}\n" in capfd.readouterr().out
     assert len(browsers["Cmd"][-1]) == 33
     assert browsers["Cmd"][:2] == ["node", "/opt/footfall/gate.js"]
     h.engine.output["app"] = "listening on 8000\n"

@@ -43,6 +43,7 @@ from urllib.parse import quote as url_quote
 from playwright.async_api import Browser, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from footfall.actions import mask
 from footfall.browsers import Engine, SignInError, connect_run_server, open_context, sign_in
 from footfall.manifest import Brief, Manifest, load_brief, load_manifest
 from footfall.personas import Device, Persona, PersonaError, load_devices, load_personas, select
@@ -810,6 +811,7 @@ async def test_folder(
     account = None
     if manifest.login is not None:
         account = ("tester-" + secrets.token_urlsafe(6), secrets.token_urlsafe(24))
+        mask(account[1])  # in a GitHub Actions job, before anything can print it
     workspace = workspaces / run_id
     stream = stdout or sys.stdout
     async with contextlib.AsyncExitStack() as stack:

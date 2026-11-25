@@ -1684,3 +1684,26 @@ def test_a_run_still_on_record_keeps_its_reason_however_many_others_stop(
         h.service.stop(f"r_{letter * 26}")
     assert RUN in h.service._stopped  # it is still on record, so it is not forgotten
     assert "still in use" in (h.service.status(RUN) or "")
+
+
+def test_a_failure_to_start_the_browsers_never_carries_their_path(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The path goes to the caller on success and nowhere else, not in an error either."""
+    prepare(h)
+    real_start = h.engine.start
+
+    def start(container: str) -> None:
+        config = h.engine.configs.get(container) or {}
+        if config.get("Labels", {}).get("footfall.role") == "browsers":
+            raise EngineError(f"OCI runtime create failed: {' '.join(config['Cmd'])}")
+        real_start(container)
+
+    monkeypatch.setattr(h.engine, "start", start)
+    with pytest.raises(RunnerError) as caught:
+        h.service.start_browsers(RUN, [])
+    path = h.engine.configs[f"footfall-{RUN}-browsers-browsers"]["Cmd"][-1]
+    assert path not in str(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert "OCI runtime create failed" in str(caught.value)
+    assert "[the browsers' path]" in str(caught.value)

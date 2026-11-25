@@ -124,9 +124,10 @@ def overlay_blocks(text: str = TEST_OVERLAY) -> dict[str, str]:
 
 def test_the_test_overlay_widens_only_what_r54_allows() -> None:
     # The isolation tests must test the stack's own settings. The overlay may run the
-    # orchestrator from the test stage (R7), copy the proxy's log to a host folder, and give
-    # the runner a small disk budget (R54), and nothing else: no socket, port, capability,
-    # privilege, user or network, and no hardening changed.
+    # orchestrator from the test stage (R7), copy the proxy's log to a host folder, give
+    # the runner a small disk budget (R54), and tell the orchestrator whether it runs in
+    # GitHub Actions, so that it masks its secrets in the log, and nothing else: no socket,
+    # port, capability, privilege, user or network, and no hardening changed.
     assert overlay_blocks() == {
         "proxy": "\n".join(
             [
@@ -147,6 +148,7 @@ def test_the_test_overlay_widens_only_what_r54_allows() -> None:
                 "      - FOOTFALL_ISOLATION=1",
                 "      - FOOTFALL_TEST_HOST_ADDRESSES=${FOOTFALL_TEST_HOST_ADDRESSES:-}",
                 "      - FOOTFALL_TEST_HOST_PORT=${FOOTFALL_TEST_HOST_PORT:-}",
+                "      - GITHUB_ACTIONS=${GITHUB_ACTIONS:-}",
             ]
         ),
     }

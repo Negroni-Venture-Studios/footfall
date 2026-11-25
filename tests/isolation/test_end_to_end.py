@@ -39,7 +39,9 @@ def test_footfall_test_runs_the_demo_app_end_to_end(tmp_path: Path, proxy_log: P
             "--out",
             str(out),
         ],
-        capture_output=True,
+        # Its standard output goes straight to the job's, so that the mask it writes for
+        # the run's password reaches the log before anything else could print the password.
+        stderr=subprocess.PIPE,
         text=True,
         timeout=900,
         check=False,
