@@ -67,7 +67,7 @@ Write the test that proves the change, and confirm it fails for the reason you e
 
 ### Versions
 
-Pin dependencies, tools and GitHub Actions to released versions, never pre-releases. Pin Actions by commit SHA, with the version in a comment. Once the browser image exists, the Playwright version in `uv.lock` must be the version installed in it, and a test will enforce that.
+Pin dependencies, tools and GitHub Actions to released versions, never pre-releases. Pin Actions by commit SHA, with the version in a comment. The Playwright version in `uv.lock` must be the version installed in the browser image, and `tests/test_images.py` enforces that.
 
 Take Dependabot's pull requests as they arrive. Read the diff and the release notes, check a major version against what Footfall uses, and merge once it looks sound and CI is green. Never close one by hand, which tells Dependabot to skip that version for good; it closes superseded ones itself.
 
