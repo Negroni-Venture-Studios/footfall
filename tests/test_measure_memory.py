@@ -88,6 +88,7 @@ def test_peaks_keep_the_largest_container_and_the_largest_total_of_each_role() -
         "peak_all_mib": 170.0,
         "kernel_peak_one_mib": None,
         "kernel_peak_sum_mib": None,
+        "kernel_peak_covers": "the run",
     }
     assert report["roles"]["proxy"]["peak_one_mib"] == 40.0
     assert "unrelated" not in json.dumps(report)
@@ -161,3 +162,15 @@ def test_the_table_says_the_services_kernel_peaks_cover_their_whole_lives() -> N
     assert "since the stack started" in table
     assert "not only this run" in table
     assert "have been up since the stack started" in " ".join((measure.__doc__ or "").split())
+
+
+def test_the_json_says_what_each_roles_kernel_peak_covers() -> None:
+    # Whoever reads only memory.json, the workflow's artefact, sees the caveat too.
+    peaks = measure.Peaks()
+    for name in ("footfall-proxy", "footfall-runner", "footfall-orchestrator"):
+        peaks.note_peak(name, 90 * 1024**2)
+    peaks.note_peak(f"footfall-{RUN}-app-sven", 50 * 1024**2)
+    roles = peaks.to_json()["roles"]
+    for role in ("proxy", "runner", "orchestrator"):
+        assert roles[role]["kernel_peak_covers"] == "since the stack started"
+    assert roles["app"]["kernel_peak_covers"] == "the run"

@@ -132,6 +132,11 @@ class Peaks:
                 "peak_all_mib": _mib(self._all.get(role, 0)),
                 "kernel_peak_one_mib": _mib(max(kernel)) if kernel else None,
                 "kernel_peak_sum_mib": _mib(sum(kernel)) if kernel else None,
+                # The services have been up since the stack started, a run's containers
+                # only for the run.
+                "kernel_peak_covers": (
+                    "since the stack started" if role in _SERVICES.values() else "the run"
+                ),
             }
         return {
             "samples": self.samples,
