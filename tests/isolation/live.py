@@ -207,7 +207,14 @@ def decision_outcome(line: str) -> str:
 
 
 def allowed(line: str) -> bool:
-    return decision_outcome(line) == "allowed"
+    """Whether the line says the proxy allowed a connection: in full, as the last line before
+    the rest are summarised, or in a summary."""
+    outcome = decision_outcome(line)
+    return (
+        outcome == "allowed"
+        or outcome.startswith("allowed;")
+        or (outcome.startswith("summary of ") and outcome.endswith(" more connections: allowed"))
+    )
 
 
 def refused(line: str, reason: str | None = None) -> bool:

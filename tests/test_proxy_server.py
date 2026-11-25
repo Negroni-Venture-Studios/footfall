@@ -22,7 +22,7 @@ import pytest
 
 from footfall.hosts import HostError, resolve_public
 from footfall.proxy.policy import Policy
-from footfall.proxy.server import MAX_HEAD, ProxyServer, _look_up, _RefusalLog
+from footfall.proxy.server import KINDS, MAX_HEAD, ProxyServer, _DecisionLog, _look_up
 from tests.tls_hellos import (
     CHANGE_CIPHER_SPEC,
     HELLO_RETRY,
@@ -1176,6 +1176,8 @@ async def test_connections_in_all_are_capped() -> None:
         {"lookup_threads": 0},
         {"routine_refusal_lines": 0},
         {"other_refusal_lines": 0},
+        {"allowed_lines": 0},
+        {"unreached_lines": 0},
         {"refusal_window": 0},
     ],
 )
@@ -1552,20 +1554,69 @@ async def test_a_revoked_runs_held_refusals_are_written_under_its_own_run(
     assert len(proxy_lines(caplog)) == 6
 
 
+async def test_a_flood_of_allowed_requests_is_logged_to_its_budget_then_summarised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ruling R75: allowed lines have a budget of their own, as refusals do, so a client that
+    connects over and over cannot rotate earlier lines out of the log, nor use up the lines
+    kept for its refusals."""
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+    async with running(allowed_lines=3, refusal_window=0.6) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        for _ in range(7):
+            assert await exchange(live.port, get(f"http://{ALLOWED}/")) == RESPONSE
+        assert status(await exchange(live.port, get("http://evil.example.com/"))) == 403
+        logged = proxy_lines(caplog)
+        assert len(logged) == 4
+        assert all(line.endswith("allowed") for line in logged[:2])
+        assert "allowed" in logged[2] and "summarised" in logged[2]
+        assert "refused (403)" in logged[3]  # a refusal after the flood is written in full
+        summary = (await wait_for_lines(caplog, 5))[4]
+        assert summary.startswith(f"{CLIENT} run={RUN} host={ALLOWED} ")
+        assert "summary of 4 more connections: allowed" in summary
+
+
+async def test_a_flood_of_hosts_not_reached_is_logged_to_its_budget_then_summarised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ruling R75: a line saying an allowed host could not be reached names the run, and has
+    its own budget, past which it is counted and summarised."""
+    caplog.set_level(logging.INFO, logger="footfall.proxy.server")
+
+    async def unreachable(address: str, port: int) -> tuple[Any, Any]:
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    budgets: dict[str, Any] = {"unreached_lines": 2, "refusal_window": 0.6}
+    async with running(open_upstream=unreachable, **budgets) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        for _ in range(5):
+            assert status(await exchange(live.port, get(f"http://{ALLOWED}/"))) == 502
+        logged = proxy_lines(caplog)
+        unreached = [line for line in logged if "could not reach" in line]
+        assert len(logged) == 7
+        assert len(unreached) == 2
+        assert unreached[0].startswith(f"{CLIENT} run={RUN} host={ALLOWED} port=80 ")
+        assert unreached[0].endswith("could not reach: ConnectionRefusedError")
+        assert "summarised" in unreached[1]
+        summary = (await wait_for_lines(caplog, 8))[7]
+        assert summary.startswith(f"{CLIENT} run={RUN} host={ALLOWED} ")
+        assert "summary of 3 more connections: could not reach: ConnectionRefusedError" in summary
+
+
 async def test_summaries_name_a_bounded_number_of_hosts(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="footfall.proxy.server")
-    log = _RefusalLog(1, 1, 60.0)
+    log = _DecisionLog(dict.fromkeys(KINDS, 1), 60.0)
     off_list = "refused (403): off the list"
-    for n in range(_RefusalLog.MOST_HELD + 6):
-        log.write(CLIENT, RUN, f"host{n}.example.com", 80, off_list, routine=True)
-    log.write(CLIENT, RUN, "host1.example.com", 80, off_list, routine=True)
-    log.write(CLIENT, RUN, ALLOWED, 443, SNI_REFUSAL, routine=False)
-    log.write(CLIENT, RUN, ALLOWED, 443, SNI_REFUSAL, routine=False)
+    for n in range(_DecisionLog.MOST_HELD + 6):
+        log.write(CLIENT, RUN, f"host{n}.example.com", 80, off_list, kind="routine refusals")
+    log.write(CLIENT, RUN, "host1.example.com", 80, off_list, kind="routine refusals")
+    log.write(CLIENT, RUN, ALLOWED, 443, SNI_REFUSAL, kind="other refusals")
+    log.write(CLIENT, RUN, ALLOWED, 443, SNI_REFUSAL, kind="other refusals")
     assert len(proxy_lines(caplog)) == 2  # one of each kind, in full
     log.close()
     summaries = proxy_lines(caplog)[2:]
     # 38 hosts: 1 written, 32 held by name and 5 in all; the held TLS refusal has its own line.
-    assert len(summaries) == _RefusalLog.MOST_HELD + 2
+    assert len(summaries) == _DecisionLog.MOST_HELD + 2
     assert any(
         "host=host1.example.com" in line and "summary of 2 more refusals" in line
         for line in summaries
@@ -1576,4 +1627,4 @@ async def test_summaries_name_a_bounded_number_of_hosts(caplog: pytest.LogCaptur
     assert others[0].startswith(f"{CLIENT} run={RUN} host=- ")
     assert "summary of 5 more routine refusals for other hosts" in others[0]
     log.close()  # twice is harmless
-    assert len(proxy_lines(caplog)) == _RefusalLog.MOST_HELD + 4
+    assert len(proxy_lines(caplog)) == _DecisionLog.MOST_HELD + 4

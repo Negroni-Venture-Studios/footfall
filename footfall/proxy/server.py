@@ -31,17 +31,19 @@ runner revokes an address's allow list, every connection from that address is cl
 tunnels included, so that nothing outlasts the list that allowed it. A connection idle for
 `idle_timeout` seconds in both directions is closed, and connections are capped in all and per
 client address. The proxy logs one line per decision, with the client's address, the run, the
-host, the port and the outcome. It never logs a path, a query string, a header value or a body.
+host, the port and the outcome, and one when an allowed host could not be reached. It never
+logs a path, a query string, a header value or a body.
 
-So that no client can rotate earlier decisions out of the log by being refused over and over,
-each client's refusals for each run are written in full only up to a budget in each window of
-`refusal_window` seconds. There are two budgets, so that a flood of routine refusals never uses
-up the lines kept for the rest: `routine_refusal_lines` for the 503 of a connection or lookup
-bound and the policy's 403 for an unknown client or a host off the list, and the larger
-`other_refusal_lines` for every other refusal, such as a TLS hello that does not match. Past a
-budget nothing is dropped: refusals are counted by host and reason, and written as one summary
-line for each, with its count and run, when the window closes, or at once when the client's
-allow list is revoked.
+So that no client can rotate earlier decisions out of the log by connecting, or being refused,
+over and over, each client's lines for each run are written in full only up to a budget in
+each window of `refusal_window` seconds. Each kind of line has its own budget, so that a flood
+of one kind never uses up the lines kept for another: `routine_refusal_lines` for the 503 of a
+connection or lookup bound and the policy's 403 for an unknown client or a host off the list,
+the larger `other_refusal_lines` for every other refusal, such as a TLS hello that does not
+match, `allowed_lines` for connections allowed, and `unreached_lines` for allowed hosts that
+could not be reached. Past a budget nothing is dropped: lines are counted by host and outcome,
+and written as one summary line for each, with its count and run, when the window closes, or
+at once when the client's allow list is revoked.
 
 Each run's names are looked up on a small pool of threads of its own, made at the run's first
 lookup and shut down when the run is revoked, never on a pool that runs share. A lookup's thread
@@ -62,10 +64,10 @@ import logging
 import re
 import socket
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Literal
 
 from footfall.hosts import HostError, pooled_resolver, resolve_public, validate_host_name
 from footfall.proxy.policy import (
@@ -331,41 +333,55 @@ def _log(client: str, run_id: str | None, host: str, port: int | None, outcome: 
     logger.info("%s run=%s host=%s port=%s %s", client, run_id or "-", host, port_text, outcome)
 
 
+type Kind = Literal["routine refusals", "other refusals", "allowed connections", "unreached hosts"]
+KINDS: Final[tuple[Kind, ...]] = (
+    "routine refusals",
+    "other refusals",
+    "allowed connections",
+    "unreached hosts",
+)
+# What a summary line counts, for each kind.
+_COUNTED: Final[dict[Kind, str]] = {
+    "routine refusals": "refusals",
+    "other refusals": "refusals",
+    "allowed connections": "connections",
+    "unreached hosts": "connections",
+}
+
+
 @dataclass(eq=False)
 class _Budget:
     """The lines of one kind a client has written for a run in a window, and what it holds."""
 
-    kind: str  # "routine refusals" or "other refusals", for the lines that say what happened
+    kind: Kind  # for the lines that say what happened
     lines: int
     written: int = 0
     held: Counter[tuple[str, str]] = field(default_factory=Counter)  # by host and outcome
-    others: int = 0  # held past MOST_HELD hosts and reasons
+    others: int = 0  # held past MOST_HELD hosts and outcomes
 
 
 @dataclass(eq=False)
 class _Window:
-    """One client's refusals for one run, from the first until the window closes."""
+    """One client's lines for one run, from the first until the window closes."""
 
     timer: asyncio.TimerHandle
-    routine: _Budget
-    other: _Budget
+    budgets: dict[Kind, _Budget]
 
 
-class _RefusalLog:
-    """Writes the proxy's refusal lines, summarising what is past a budget.
+class _DecisionLog:
+    """Writes the proxy's decision lines, summarising what is past a budget.
 
-    For each client and run, a window of `window` seconds starts with the first refusal. In it,
-    `routine_lines` routine refusals and `other_lines` others are written in full. Past its
-    budget a refusal is counted by host and outcome, for up to `MOST_HELD` of them and together
-    for any more, and each count is written as one summary line when the window closes or the
-    client is forgotten, under the run it belongs to. Every method runs on the event loop.
+    For each client and run, a window of `window` seconds starts with the first line. In it,
+    as many lines of each kind as `lines` gives it are written in full. Past its budget a line
+    is counted by host and outcome, for up to `MOST_HELD` of them and together for any more,
+    and each count is written as one summary line when the window closes or the client is
+    forgotten, under the run it belongs to. Every method runs on the event loop.
     """
 
     MOST_HELD: Final = 32
 
-    def __init__(self, routine_lines: int, other_lines: int, window: float) -> None:
-        self._routine_lines = routine_lines
-        self._other_lines = other_lines
+    def __init__(self, lines: Mapping[Kind, int], window: float) -> None:
+        self._lines = dict(lines)
         self._window = window
         self._windows: dict[tuple[str, str | None], _Window] = {}  # by client and run
 
@@ -377,18 +393,16 @@ class _RefusalLog:
         port: int | None,
         outcome: str,
         *,
-        routine: bool,
+        kind: Kind,
     ) -> None:
         key = (_client_key(client), run_id)
         window = self._windows.get(key)
         if window is None:
             timer = asyncio.get_running_loop().call_later(self._window, self._close, key)
             window = self._windows[key] = _Window(
-                timer,
-                _Budget("routine refusals", self._routine_lines),
-                _Budget("other refusals", self._other_lines),
+                timer, {each: _Budget(each, self._lines[each]) for each in KINDS}
             )
-        budget = window.routine if routine else window.other
+        budget = window.budgets[kind]
         if budget.written < budget.lines:
             budget.written += 1
             if budget.written == budget.lines:
@@ -419,16 +433,17 @@ class _RefusalLog:
             return
         window.timer.cancel()
         client, run_id = key
-        for budget in (window.routine, window.other):
+        for budget in window.budgets.values():
+            counted = _COUNTED[budget.kind]
             for (host, outcome), count in budget.held.items():
-                _log(client, run_id, host, None, f"summary of {count} more refusals: {outcome}")
+                _log(client, run_id, host, None, f"summary of {count} more {counted}: {outcome}")
             if budget.others:
                 _log(
                     client,
                     run_id,
                     "-",
                     None,
-                    f"summary of {budget.others} more {budget.kind} for other hosts and reasons",
+                    f"summary of {budget.others} more {budget.kind} for other hosts and outcomes",
                 )
 
 
@@ -713,6 +728,8 @@ class ProxyServer:
         max_lookups_per_run: int = 16,
         routine_refusal_lines: int = 20,
         other_refusal_lines: int = 100,
+        allowed_lines: int = 100,
+        unreached_lines: int = 100,
         refusal_window: float = 60.0,
         lookup_threads: int = 16,
         open_upstream: Opener = _open_upstream,
@@ -725,8 +742,14 @@ class ProxyServer:
             raise ValueError("max_connections and max_per_client must be at least 1")
         if max_lookups_per_client < 1 or max_lookups_per_run < 1 or lookup_threads < 1:
             raise ValueError("the lookup bounds and lookup_threads must be at least 1")
-        if routine_refusal_lines < 1 or other_refusal_lines < 1 or refusal_window <= 0:
-            raise ValueError("the refusal budgets must be at least 1, refusal_window positive")
+        budgets: dict[Kind, int] = {
+            "routine refusals": routine_refusal_lines,
+            "other refusals": other_refusal_lines,
+            "allowed connections": allowed_lines,
+            "unreached hosts": unreached_lines,
+        }
+        if min(budgets.values()) < 1 or refusal_window <= 0:
+            raise ValueError("the log's budgets must be at least 1, refusal_window positive")
         if not 0 <= port <= 65535:
             raise ValueError("port must be from 0 to 65535")
         self._policy = policy
@@ -738,7 +761,7 @@ class ProxyServer:
         self._lookup_pools: dict[str, ThreadPoolExecutor] = {}  # by run
         self._max_lookups_per_client = max_lookups_per_client
         self._max_lookups_per_run = max_lookups_per_run
-        self._refusal_log = _RefusalLog(routine_refusal_lines, other_refusal_lines, refusal_window)
+        self._decisions = _DecisionLog(budgets, refusal_window)
         # Lookups in flight, by run, client, name and port, and how many each of a run's clients
         # and each run holds. A client is counted with its run, so that a run given an address
         # another run held starts with nothing counted against it.
@@ -835,7 +858,7 @@ class ProxyServer:
         for pool in self._lookup_pools.values():
             pool.shutdown(wait=False, cancel_futures=True)
         self._lookup_pools.clear()
-        self._refusal_log.close()
+        self._decisions.close()
 
     # ------------------------------------------------------------ connections
 
@@ -859,7 +882,7 @@ class ProxyServer:
         """Close every connection from the client at `ip`, as its allow list is revoked, and
         return how many there were. Each closes as its task is cancelled. What the refusal log
         holds for the client is written first, under the run it belongs to."""
-        self._refusal_log.forget(ip)
+        self._decisions.forget(ip)
         key = _client_key(ip)
         tasks = [task for task, client in self._serving.items() if client == key]
         for task in tasks:
@@ -871,8 +894,13 @@ class ProxyServer:
         client = str(peer[0]) if isinstance(peer, tuple) and peer else ""
         if not self._admit(client):
             # Closed without reading or lingering, so that a flood holds nothing open.
-            self._refusal_log.write(
-                client, None, "-", None, "refused (503): too many connections", routine=True
+            self._decisions.write(
+                client,
+                None,
+                "-",
+                None,
+                "refused (503): too many connections",
+                kind="routine refusals",
             )
             writer.write(_response(503, "too many connections"))
             writer.close()
@@ -927,13 +955,13 @@ class ProxyServer:
                 raise _Refusal(403, decision.reason, routine=routine)
             address = await self._resolved(client, run_id, request.host, request.port)
         except _Refusal as refusal:
-            self._refusal_log.write(
+            self._decisions.write(
                 client,
                 run_id,
                 host,
                 port,
                 f"refused ({refusal.status}): {refusal.reason}",
-                routine=refusal.routine,
+                kind="routine refusals" if refusal.routine else "other refusals",
             )
             writer.write(_response(refusal.status, refusal.reason))
             async with asyncio.timeout(self._idle):
@@ -942,7 +970,7 @@ class ProxyServer:
         if request.method == "CONNECT":
             await self._tunnel(client, run_id, request, address, reader, writer)
         else:
-            _log(client, run_id, host, port, "allowed")
+            self._decisions.write(client, run_id, host, port, "allowed", kind="allowed connections")
             await self._forward(client, run_id, request, address, reader, writer)
 
     async def _decide(self, client: str, host: str, port: int) -> Decision:
@@ -1009,14 +1037,14 @@ class ProxyServer:
             lookup.exception()  # retrieved here, as every waiter may have given up
 
     async def _connect(
-        self, client: str, host: str, address: str, port: int
+        self, client: str, run_id: str, host: str, address: str, port: int
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
         try:
             async with asyncio.timeout(self._idle):
                 return await self._open_upstream(address, port)
         except (OSError, TimeoutError) as error:
-            reason = type(error).__name__
-            logger.info("%s could not reach %s port %d: %s", client, host, port, reason)
+            outcome = f"could not reach: {type(error).__name__}"
+            self._decisions.write(client, run_id, host, port, outcome, kind="unreached hosts")
             return None
 
     # ------------------------------------------------------------ plain HTTP
@@ -1030,7 +1058,7 @@ class ProxyServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        upstream = await self._connect(client, request.host, address, request.port)
+        upstream = await self._connect(client, run_id, request.host, address, request.port)
         if upstream is None:
             writer.write(_response(502, f"could not reach {request.host}"))
             async with asyncio.timeout(self._idle):
@@ -1079,12 +1107,19 @@ class ProxyServer:
         except (asyncio.IncompleteReadError, TimeoutError):
             refusal = "no TLS ClientHello arrived"
         if refusal is not None:
-            self._refusal_log.write(
-                client, run_id, request.host, request.port, f"refused: {refusal}", routine=False
+            self._decisions.write(
+                client,
+                run_id,
+                request.host,
+                request.port,
+                f"refused: {refusal}",
+                kind="other refusals",
             )
             return
-        _log(client, run_id, request.host, request.port, "allowed")
-        upstream = await self._connect(client, request.host, address, request.port)
+        self._decisions.write(
+            client, run_id, request.host, request.port, "allowed", kind="allowed connections"
+        )
+        upstream = await self._connect(client, run_id, request.host, address, request.port)
         if upstream is None:
             return
         self._policy.record(run_id, request.host)
@@ -1109,13 +1144,13 @@ class ProxyServer:
                 outcomes = await _finish(client, tasks)
             for outcome in outcomes:
                 if isinstance(outcome, _TunnelRefused):
-                    self._refusal_log.write(
+                    self._decisions.write(
                         client,
                         run_id,
                         request.host,
                         request.port,
                         f"refused: {outcome}",
-                        routine=False,
+                        kind="other refusals",
                     )
         finally:
             upstream_writer.close()
