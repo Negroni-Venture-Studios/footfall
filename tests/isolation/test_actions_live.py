@@ -3,7 +3,8 @@
 The isolation workflow runs pytest in the orchestrator through `docker compose exec`, so the
 orchestrator's standard output is the step's, which the Actions runner reads as it goes.
 This test masks a value made for it alone, as Footfall masks a password, then prints it.
-The run's log must show `FOOTFALL-MASK-CHECK ***`; whoever reviews the run reads it there.
+The run's log must show `FOOTFALL-MASK-CHECK ***`: the workflow's masks job reads the log
+through the API and fails the run unless it does, and unless the value never shows in clear.
 Were the mask to fail, the log would show a random value that guards nothing.
 """
 
