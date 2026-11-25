@@ -1,5 +1,6 @@
 """The runner's logic, against a fake Docker engine and a fake proxy, with real folders."""
 
+import errno
 import inspect
 import os
 import re
@@ -21,12 +22,14 @@ from footfall.runner.service import (
     MEASURE_REASON,
     NEVER_PREPARED,
     REGISTRIES,
+    UNSTEADY_REASON,
     RunnerError,
     RunnerService,
     _copy_file,
     _copy_tree,
     _disk_usage,
     _entries,
+    _measure,
     _OverBudget,
     _size,
     _TooDeep,
@@ -1073,10 +1076,10 @@ def test_a_run_that_cannot_be_measured_is_stopped(
     prepare(h)
     h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
 
-    def too_many_files(top: Path) -> int:
+    def too_many_files(top: Path, max_depth: int) -> tuple[int, int]:
         raise OSError(24, "Too many open files")
 
-    monkeypatch.setattr("footfall.runner.service._disk_usage", too_many_files)
+    monkeypatch.setattr("footfall.runner.service._measure", too_many_files)
     h.service.check_runs()
     assert h.service.status(RUN) == MEASURE_REASON
     assert_nothing_left(h)
@@ -1714,7 +1717,9 @@ def test_a_failure_to_start_the_browsers_never_carries_their_path(
 def test_a_folder_swapped_while_measured_is_skipped_and_the_rest_still_counted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A swap must not end the measure early, or a run could hide its size by swapping."""
+    """A swap must not end the measure early. The swapped folder itself is not counted, so
+    a run that keeps swapping can hide part of its size from any one measure; the measure
+    counts what it skips, and a run whose measures keep skipping is stopped (see below)."""
     top = tmp_path / "top"
     for name in ("a", "z"):
         (top / name).mkdir(parents=True)
@@ -1735,3 +1740,80 @@ def test_a_folder_swapped_while_measured_is_skipped_and_the_rest_still_counted(
     assert swapped
     assert measured >= 400_000  # the other folder and its file are still counted
     assert measured <= whole  # and nothing is counted through the link
+
+
+def test_a_measure_counts_what_it_skips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    top = tmp_path / "top"
+    (top / "folder").mkdir(parents=True)
+    (top / "gone.bin").write_bytes(b"\x01" * 400_000)
+    (top / "kept.txt").write_text("kept\n")
+    assert _measure(top, MAX_DEPTH)[1] == 0
+    real_stat = os.stat
+    real_open = os.open
+
+    def vanishing(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if path == "gone.bin":
+            raise FileNotFoundError(path)
+        return real_stat(path, *args, **kwargs)
+
+    def changing(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if path == "folder":
+            raise OSError(errno.ELOOP, "a link now")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", vanishing)
+    monkeypatch.setattr(os, "open", changing)
+    usage, skipped = _measure(top, MAX_DEPTH)
+    assert skipped == 2  # the file that vanished, and the folder that changed
+    assert usage < 400_000
+
+
+def unsteady(h: Harness, monkeypatch: pytest.MonkeyPatch, skips: list[int]) -> None:
+    """Make each check of the run measure a little, skipping as `skips` says, in turn."""
+    left = list(skips)
+
+    def measure(top: Path, max_depth: int) -> tuple[int, int]:
+        return PAGE, left.pop(0) if left else 0
+
+    monkeypatch.setattr("footfall.runner.service._measure", measure)
+
+
+def test_a_run_whose_measures_keep_skipping_is_stopped(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that keeps renaming or swapping its files could hide them from every measure,
+    so three measures in a row that skip something stop it."""
+    prepare(h)
+    h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    unsteady(h, monkeypatch, [1, 3, 1])
+    h.service.check_runs()
+    h.service.check_runs()
+    assert h.service.status(RUN) is None
+    h.service.check_runs()
+    assert h.service.status(RUN) == UNSTEADY_REASON
+    assert UNSTEADY_REASON.startswith(MEASURE_REASON)
+    assert_nothing_left(h)
+
+
+def test_a_steady_measure_between_unsteady_ones_starts_the_count_again(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(h)
+    unsteady(h, monkeypatch, [1, 1, 0, 1, 1])
+    for _ in range(5):
+        h.service.check_runs()
+    assert h.service.status(RUN) is None
+    h.service.start_browsers(RUN, [])
+
+
+def test_the_budget_checks_count_towards_the_unsteady_measures(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(h)
+    unsteady(h, monkeypatch, [1, 1, 1, 1, 1, 1])
+    h.service.check_runs()
+    h.service.check_runs()
+    with pytest.raises(RunnerError, match="kept changing"):
+        h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])  # its budget check
+    assert h.service.status(RUN) == UNSTEADY_REASON
+    assert_nothing_left(h)

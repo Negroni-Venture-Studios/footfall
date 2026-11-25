@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 REGISTRIES: Final = ("pypi.org", "files.pythonhosted.org", "registry.npmjs.org")
 DISK_REASON: Final = "disk budget exceeded"
 MEASURE_REASON: Final = "disk usage could not be measured"
+# A run whose files keep vanishing or changing under the measure could keep part of its size
+# out of every measure, so this many measures in a row that skip something stop it.
+UNSTEADY_MEASURES: Final = 3
+UNSTEADY_REASON: Final = f"{MEASURE_REASON}: the run's files kept changing while they were measured"
 NEVER_PREPARED: Final = "stopped before it was prepared"
 MAX_DEPTH: Final = 100  # folders below a workspace or prepared app
 # How many stopped run ids the runner remembers, to refuse each if it is prepared again, and
@@ -165,6 +169,7 @@ class _Run:
     containers: dict[str, str | None] = field(default_factory=dict)  # name or id -> address
     copies: set[str] = field(default_factory=set)
     problems: list[str] = field(default_factory=list)  # why the last stop did not finish
+    unsteady: int = 0  # measures in a row that skipped something, guarded by the service's lock
     retry_delay: float = 0.0
     retry_at: float = 0.0
 
@@ -290,8 +295,15 @@ class _Deep(Exception):
 _TOP: Final = PurePath()
 
 
+@dataclass
+class _Tally:
+    """What a walk that goes on past changes skipped: names that vanished, folders changed."""
+
+    skipped: int = 0
+
+
 def _walk(
-    folder: int, max_depth: int, *, gone_ok: bool, here: PurePath = _TOP
+    folder: int, max_depth: int, *, tally: _Tally | None, here: PurePath = _TOP
 ) -> Generator[tuple[PurePath, int, str, os.stat_result]]:
     """Yield (where, its descriptor, name, lstat) for everything below an open folder.
 
@@ -300,9 +312,9 @@ def _walk(
     folders it has finished or not yet reached. Each folder is yielded before anything in it.
     A folder is opened by name without following a link, and must then be the folder that was
     listed, so a folder swapped for a link is never walked through, or even opened. A folder
-    more than `max_depth` below the top raises `_Deep`. With `gone_ok`, a name removed or a
-    folder changed while the walk reads is skipped, and the walk goes on; without it, a
-    removed name raises its error and a changed folder raises `_Changed`.
+    more than `max_depth` below the top raises `_Deep`. With a `tally`, a name removed or a
+    folder changed while the walk reads is skipped and counted, and the walk goes on; without
+    one, a removed name raises its error and a changed folder raises `_Changed`.
     """
     with os.scandir(folder) as listing:
         for entry in listing:
@@ -310,9 +322,10 @@ def _walk(
             try:
                 info = os.stat(name, dir_fd=folder, follow_symlinks=False)
             except FileNotFoundError:
-                if gone_ok:
-                    continue
-                raise
+                if tally is None:
+                    raise
+                tally.skipped += 1
+                continue
             where = here / name
             if stat.S_ISDIR(info.st_mode) and len(here.parts) >= max_depth:
                 raise _Deep(where)
@@ -324,14 +337,17 @@ def _walk(
             except OSError as error:
                 if error.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
                     raise
-                if gone_ok:
-                    continue
-                raise _Changed(where) from None
+                if tally is None:
+                    raise _Changed(where) from None
+                tally.skipped += 1
+                continue
             try:
                 if os.path.samestat(info, os.fstat(inner)):
-                    yield from _walk(inner, max_depth, gone_ok=gone_ok, here=where)
-                elif not gone_ok:
+                    yield from _walk(inner, max_depth, tally=tally, here=where)
+                elif tally is None:
                     raise _Changed(where)
+                else:
+                    tally.skipped += 1
             finally:
                 os.close(inner)
 
@@ -345,7 +361,7 @@ def _entries(folder: int, what: str) -> Generator[tuple[PurePath, int, str, os.s
     anything in it.
     """
     try:
-        for here, dirfd, name, info in _walk(folder, MAX_DEPTH, gone_ok=False):
+        for here, dirfd, name, info in _walk(folder, MAX_DEPTH, tally=None):
             if not stat.S_ISDIR(info.st_mode) and not (
                 stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
             ):
@@ -462,38 +478,46 @@ def _size(info: os.stat_result) -> int:
     return max(_charge(info.st_size), info.st_blocks * _BLOCK)
 
 
-def _disk_usage(top: Path, max_depth: int = MAX_DEPTH) -> int:
-    """Bytes that copying `top` would write, never following a link.
+def _measure(top: Path, max_depth: int) -> tuple[int, int]:
+    """Bytes that copying `top` would write, never following a link, and how many entries the
+    measure skipped because they vanished or changed while it read.
 
     Every name counts at the larger of its size, rounded up to whole 4 KiB blocks, and its
     allocated blocks, and at least one block. So a sparse file counts in full, each hard link
     counts again, as a copy writes them, and the budget bounds how many entries a run holds.
-    Entries removed during the walk are skipped and a missing `top` measures 0. A folder more
-    than `max_depth` below `top` raises _TooDeep, so the walk never holds more descriptors than
-    that. A folder swapped for a link while it is measured is never opened through the link.
-    Any other failure is raised.
+    A missing `top` measures 0. A folder more than `max_depth` below `top` raises _TooDeep,
+    so the walk never holds more descriptors than that. A folder swapped for a link while it
+    is measured is never opened through the link. An entry that vanishes, or a folder that
+    changes, is skipped and counted: what it held is not in the total, which is why a run
+    whose measures keep skipping is stopped. Any other failure is raised.
     """
     try:
         info = top.lstat()
     except FileNotFoundError:
-        return 0
+        return 0, 0
     total = _size(info)
     if not stat.S_ISDIR(info.st_mode):
-        return total
+        return total, 0
     try:
         folder = os.open(top, _FOLDER_FLAGS)
     except FileNotFoundError:
-        return 0
+        return 0, 0
+    tally = _Tally()
     try:
         if not os.path.samestat(info, os.fstat(folder)):
-            return 0  # replaced while being measured
-        for _, _, _, entry in _walk(folder, max_depth, gone_ok=True):
+            return 0, 1  # replaced while being measured
+        for _, _, _, entry in _walk(folder, max_depth, tally=tally):
             total += _size(entry)
     except _Deep as deep:
         raise _TooDeep(f"more than {max_depth} folders deep at {_show(str(deep.where))}") from None
     finally:
         os.close(folder)
-    return total
+    return total, tally.skipped
+
+
+def _disk_usage(top: Path, max_depth: int = MAX_DEPTH) -> int:
+    """Bytes that copying `top` would write, as `_measure` counts them."""
+    return _measure(top, max_depth)[0]
 
 
 def _remove_tree(path: Path) -> None:
@@ -743,8 +767,11 @@ class RunnerService:
                             self._teardown_locked(run)
                 continue
             try:
-                if _disk_usage(run.directory, _RUN_DEPTH) > self._disk_budget:
+                usage, skipped = _measure(run.directory, _RUN_DEPTH)
+                if usage > self._disk_budget:
                     reason = DISK_REASON
+                elif self._unsteady(run, skipped):
+                    reason = UNSTEADY_REASON
             except _TooDeep:
                 reason = DISK_REASON
             except Exception:
@@ -852,7 +879,7 @@ class RunnerService:
         """Return the run's disk use, after stopping the run and raising if that use, plus a
         copy of `incoming`, is over budget or cannot be measured."""
         try:
-            usage = _disk_usage(run.directory, _RUN_DEPTH)
+            usage, skipped = _measure(run.directory, _RUN_DEPTH)
             extra = 0 if incoming is None else _disk_usage(incoming)
         except _TooDeep as deep:
             self._stop_for_locked(run, DISK_REASON)
@@ -863,7 +890,17 @@ class RunnerService:
         if usage + extra > self._disk_budget:
             self._stop_for_locked(run, DISK_REASON)
             raise RunnerError(DISK_REASON)
+        if self._unsteady(run, skipped):
+            self._stop_for_locked(run, UNSTEADY_REASON)
+            raise RunnerError(UNSTEADY_REASON)
         return usage
+
+    def _unsteady(self, run: _Run, skipped: int) -> bool:
+        """Count a measure of the run that skipped something, and say whether the last
+        `UNSTEADY_MEASURES` all did; a measure that skipped nothing starts the count again."""
+        with self._lock:
+            run.unsteady = run.unsteady + 1 if skipped else 0
+            return run.unsteady >= UNSTEADY_MEASURES
 
     def _copy_locked(
         self, run: _Run, root: Path, relative: PurePath, target: Path, what: str
