@@ -36,7 +36,6 @@ pytestmark = pytest.mark.isolation
 PROXY_URL: Final = "http://footfall-proxy:3128"  # as footfall test gives it
 ASSETS: Final = ("example.com",)
 NOT_LISTED: Final = "is not on this client's allow list"
-GVISOR_RELEASE: Final = "4.4.0"  # the kernel release gVisor reports, whatever the host runs
 # Every code point of Encrypted Client Hello and of the encrypted SNI before it.
 HIDDEN_NAMES: Final = frozenset({0xFE08, 0xFE09, 0xFE0A, 0xFE0B, 0xFE0C, 0xFE0D, 0xFF02, 0xFFCE})
 ECH: Final = 0xFE0D
@@ -144,12 +143,15 @@ async def test_the_browser_container_runs_on_gvisors_kernel(browsers: Browsers) 
             await asyncio.sleep(0.5)
     finally:
         await browser.close()
-    found = set(re.findall(r"Operating system\s*Linux\s+(\d+\.\d+\.\d+)", text))
+    shown = re.findall(r"Operating system[^\n]{0,60}", text)
+    found = set(re.findall(r"Operating system\s*:?\s*Linux\s+(\d+\.\d+\.\d+)-gvisor", text))
     host = re.match(r"\d+\.\d+\.\d+", os.uname().release)
     assert host is not None
-    shown = re.findall(r"Operating system[^\n]{0,60}", text)
-    assert found == {GVISOR_RELEASE}, shown or text[:1500]
-    assert host.group(0) != GVISOR_RELEASE  # the host's own kernel is another
+    # gVisor names itself in the release it reports, such as 4.19.0-gvisor; the host's own
+    # kernel, which the orchestrator runs on, is another release.
+    assert len(found) == 1, shown or text[:1500]
+    assert found != {host.group(0)}, (shown, os.uname().release)
+    assert "gvisor" not in os.uname().release
 
 
 async def test_chromium_is_the_full_build_and_reads_the_policy(browsers: Browsers) -> None:
