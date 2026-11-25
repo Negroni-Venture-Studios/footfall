@@ -4,7 +4,7 @@ import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -631,6 +631,9 @@ async def test_sign_in_fills_nothing_once_the_page_has_moved_on() -> None:
         ("http://localhost:8000", True),
         ("http://app.localhost:8000", True),
         ("http://[::1]:8000", True),
+        ("http://127.8.9.10:8000", True),  # all of 127.0.0.0/8 is loopback, as Chromium has it
+        ("http://127.0.0.1.example.com", False),
+        ("http://128.0.0.1:8000", False),
         ("https://172.18.0.3:8443", True),
         # How the app is reached in the real stack: Chromium refuses to grant a permission
         # there ("Permission can't be granted in current context"), and the page could not
@@ -641,3 +644,50 @@ async def test_sign_in_fills_nothing_once_the_page_has_moved_on() -> None:
 )
 def test_location_is_granted_only_to_an_origin_that_could_use_it(origin: str, secure: bool) -> None:
     assert browsers.potentially_trustworthy(origin) is secure
+
+
+class _RecordingContext:
+    """Stands in for a browser context: records what open_context asks of it."""
+
+    def __init__(self) -> None:
+        self.granted: list[tuple[list[str], str]] = []
+        self.scripts: list[str] = []
+
+    async def grant_permissions(self, permissions: list[str], origin: str) -> None:
+        self.granted.append((permissions, origin))
+
+    async def add_init_script(self, script: str) -> None:
+        self.scripts.append(script)
+
+    async def close(self) -> None:
+        return None
+
+
+class _RecordingBrowser:
+    def __init__(self) -> None:
+        self.context = _RecordingContext()
+        self.options: dict[str, Any] = {}
+
+    async def new_context(self, **options: Any) -> _RecordingContext:
+        self.options = options
+        return self.context
+
+
+@pytest.mark.parametrize(
+    ("origin", "granted"),
+    [("http://172.18.0.3:8080", False), ("http://127.0.0.1:8080", True)],
+)
+async def test_open_context_grants_the_location_only_where_it_can_be_used(
+    origin: str, granted: bool
+) -> None:
+    # The app in the real stack is plain HTTP at a container's address, where Chromium
+    # refuses to grant the permission; the context still opens, with the location set.
+    browser = _RecordingBrowser()
+    descriptors = {PIXEL.playwright: {"viewport": {"width": 412, "height": 839}}}
+    context = await open_context(
+        cast(Browser, browser), PERSONA, PIXEL, descriptors, origin, "http://proxy:3128"
+    )
+    assert context is cast(BrowserContext, browser.context)
+    assert browser.options["geolocation"] == {"latitude": -33.8688, "longitude": 151.2093}
+    expected = [(["geolocation"], origin)] if granted else []
+    assert browser.context.granted == expected

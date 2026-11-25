@@ -13,6 +13,7 @@ refuse an added `<style>` element but cannot refuse a script that Playwright run
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import re
 import time
@@ -199,13 +200,18 @@ async def open_context(
 
 def potentially_trustworthy(origin: str) -> bool:
     """Whether a page at `origin` is a secure context, where a browser lets it ask for the
-    location. Chromium refuses to grant the permission anywhere else, and the page could not
-    use it there, so the app reached at a container's plain-HTTP address is not granted it."""
+    location: https, a localhost name, or a loopback address, all of 127.0.0.0/8 and ::1,
+    as Chromium has it. Chromium refuses to grant the permission anywhere else, and the page
+    could not use it there, so the app reached at a container's plain-HTTP address is not
+    granted it."""
     parts = urlsplit(origin)
     host = (parts.hostname or "").lower()
-    if parts.scheme == "https":
+    if parts.scheme == "https" or host == "localhost" or host.endswith(".localhost"):
         return True
-    return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
