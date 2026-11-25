@@ -47,9 +47,23 @@ PS = shutil.which("ps") or "ps"
 
 
 def running(marker: str) -> list[str]:
-    """The command lines of every process still running that carry `marker`."""
-    listed = subprocess.run([PS, "-axo", "command="], capture_output=True, check=True)
+    """The command lines of every process still running that carry `marker`.
+
+    `-A` is POSIX for every process. procps reads `-axo` as processes with a terminal,
+    which leaves out everything a CI runner starts.
+    """
+    listed = subprocess.run([PS, "-A", "-o", "command="], capture_output=True, check=True)
     return [line for line in listed.stdout.decode().splitlines() if marker in line]
+
+
+def appears(marker: str, within: float) -> bool:
+    """Whether a process carrying `marker` is running within `within` seconds."""
+    deadline = time.monotonic() + within
+    while not running(marker):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+    return True
 
 
 def gone(marker: str, within: float) -> bool:
@@ -292,7 +306,7 @@ def test_a_stopped_gate_leaves_no_child_behind() -> None:
     marker = f"{MARKER}-stopped"
     gate = Gate(free_port(), keep_running(marker))
     try:
-        assert running(marker)
+        assert appears(marker, within=5)
         started = time.monotonic()
         gate.process.terminate()
         gate.process.wait(timeout=8)
@@ -308,7 +322,7 @@ def test_a_child_that_ignores_sigterm_is_killed_within_a_bound() -> None:
     marker = f"{MARKER}-stubborn"
     gate = Gate(free_port(), ignores_term(marker))
     try:
-        assert running(marker)
+        assert appears(marker, within=5)
         started = time.monotonic()
         gate.process.terminate()
         gate.process.wait(timeout=10)
@@ -322,7 +336,7 @@ def test_a_killed_gate_takes_its_child_with_it() -> None:
     marker = f"{MARKER}-orphan"
     gate = Gate(free_port(), keep_running(marker))
     try:
-        assert running(marker)
+        assert appears(marker, within=5)
         gate.process.kill()
         gate.process.wait(timeout=5)
         assert gone(marker, within=6)
