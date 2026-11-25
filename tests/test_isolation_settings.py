@@ -87,3 +87,17 @@ def test_the_masks_reach_the_log_before_anything_else() -> None:
     end_to_end = (ROOT / "tests" / "isolation" / "test_end_to_end.py").read_text()
     assert "capture_output" not in end_to_end
     assert "stdout=" not in end_to_end
+
+
+def test_a_job_fails_the_run_unless_the_isolation_log_shows_the_mask_check_masked() -> None:
+    """A person reading the log is no check: a job reads it through the API, counts the
+    masked and unmasked check lines, and fails unless only the masked one is there."""
+    workflow = (ROOT / ".github" / "workflows" / "isolation.yml").read_text()
+    job = workflow.split("\n  masks:\n", 1)[1]
+    assert "needs: isolation" in job
+    assert "if: ${{ !cancelled() }}" in job
+    assert re.search(r"permissions:\n\s+actions: read\n", job)
+    assert "grep -c 'FOOTFALL-MASK-CHECK \\*\\*\\*'" in job
+    assert "grep -c 'FOOTFALL-MASK-CHECK footfall-mask-check-'" in job
+    # Counts only: no line of the log is ever printed.
+    assert not re.search(r"\bcat\b|grep (?!-c)", job)

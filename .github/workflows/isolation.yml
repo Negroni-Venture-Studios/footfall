@@ -126,3 +126,35 @@ jobs:
         if: always()
         working-directory: deploy/dev
         run: $COMPOSE down --volumes || true
+
+  # Reads the isolation job's log through the API and fails unless the mask check's line is
+  # there masked, and never in clear, so a mask that stops working turns the run red rather
+  # than waiting for someone to read the log. It counts lines and prints none of them.
+  masks:
+    name: masks
+    needs: isolation
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    steps:
+      - name: The isolation log shows the mask check masked, and never in clear
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          job=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name == "isolation") | .id')
+          log="$RUNNER_TEMP/isolation.log"
+          # A finished job's log can take a moment to be readable.
+          for attempt in $(seq 1 12); do
+            gh api "repos/$REPO/actions/jobs/$job/logs" > "$log" 2>/dev/null && break
+            sleep 10
+          done
+          masked=$(grep -c 'FOOTFALL-MASK-CHECK \*\*\*' "$log" || true)
+          clear=$(grep -c 'FOOTFALL-MASK-CHECK footfall-mask-check-' "$log" || true)
+          echo "Mask check lines in the isolation log: $masked masked, $clear in clear."
+          test "$masked" -ge 1
+          test "$clear" -eq 0
