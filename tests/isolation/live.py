@@ -11,6 +11,7 @@ import contextlib
 import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -191,6 +192,27 @@ async def finish(run: LiveRun) -> None:
         shutil.rmtree(run.workspace, ignore_errors=True)
 
 
+_OUTCOME: Final = re.compile(r" port=\S+ (.*)$")
+
+
+def decision_outcome(line: str) -> str:
+    """The outcome of one of the proxy's decision lines: all that follows `port=N `."""
+    found = _OUTCOME.search(line)
+    return found.group(1) if found else ""
+
+
+def allowed(line: str) -> bool:
+    return decision_outcome(line) == "allowed"
+
+
+def refused(line: str, reason: str | None = None) -> bool:
+    """Whether the proxy refused, and, given a reason, refused for that reason."""
+    outcome = decision_outcome(line)
+    if not outcome.startswith("refused"):
+        return False
+    return reason is None or reason in outcome.partition(": ")[2]
+
+
 class ProxyLog:
     """The egress proxy's log, from where it stood when this was made.
 
@@ -223,10 +245,15 @@ class ProxyLog:
     async def wait_for(
         self, client: str, host: str, outcome: str, *, timeout: float = 15.0
     ) -> list[str]:
-        """Wait for a decision on `host` for `client` whose outcome contains `outcome`."""
+        """Wait for a decision on `host` for `client`: "allowed", or a refusal whose reason
+        holds `outcome`."""
         deadline = time.monotonic() + timeout
+
+        def matches(line: str) -> bool:
+            return allowed(line) if outcome == "allowed" else refused(line, outcome)
+
         while True:
-            found = [line for line in self.decisions(client, host) if outcome in line]
+            found = [line for line in self.decisions(client, host) if matches(line)]
             if found:
                 return found
             if time.monotonic() > deadline:

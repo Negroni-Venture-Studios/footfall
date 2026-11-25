@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from tests.isolation.live import PROBE, LiveRun, NewRun, ProxyLog
+from tests.isolation.live import PROBE, LiveRun, NewRun, ProxyLog, allowed
 
 pytestmark = pytest.mark.isolation
 
@@ -39,7 +39,7 @@ async def test_a_host_not_on_the_list_gets_403(run: LiveRun, proxy_log: ProxyLog
     client = _host(run.copies["unlisted"])
     for host in ("pypi.org", "example.org", "www.example.com"):
         await proxy_log.wait_for(client, host, NOT_LISTED)
-        assert [line for line in proxy_log.decisions(client, host) if "allowed" in line] == []
+        assert [line for line in proxy_log.decisions(client, host) if allowed(line)] == []
 
 
 async def test_addresses_and_the_metadata_service_are_refused(
@@ -50,7 +50,7 @@ async def test_addresses_and_the_metadata_service_are_refused(
     assert result[urls[0]]["status"] == 403, result
     assert result[urls[1]]["proxy_status"] == 403, result
     client = _host(run.copies["addresses"])
-    assert [line for line in proxy_log.decisions(client) if " allowed" in line] == []
+    assert [line for line in proxy_log.decisions(client) if allowed(line)] == []
 
 
 async def test_registries_are_reachable_during_install_and_refused_after(

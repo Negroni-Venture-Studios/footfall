@@ -3,7 +3,7 @@
 import pytest
 
 from tests.isolation.conftest import refusal
-from tests.isolation.live import is_private
+from tests.isolation.live import allowed, decision_outcome, is_private, refused
 
 
 def test_the_isolation_tests_refuse_runc() -> None:
@@ -37,3 +37,34 @@ def test_the_isolation_tests_may_connect_to_private_addresses_only(
     host: str, reachable: bool
 ) -> None:
     assert is_private(host) is reachable
+
+
+LINE = (
+    "2026-11-25 08:39:20,888 INFO footfall.proxy.server: 172.18.0.4 run=r_x host=pypi.org port=443 "
+)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "is_allowed", "is_refused"),
+    [
+        ("allowed", True, False),
+        ("refused (403): pypi.org is not on this client's allow list", False, True),
+        ("refused: the TLS ClientHello hides its server name", False, True),
+        # Refusal reasons that hold the word "allowed" are refusals all the same.
+        ("refused (403): CONNECT is allowed only to port 443", False, True),
+        ("refused (405): method not allowed", False, True),
+    ],
+)
+def test_a_proxy_decision_is_judged_by_its_outcome_not_a_word_in_it(
+    outcome: str, is_allowed: bool, is_refused: bool
+) -> None:
+    assert decision_outcome(LINE + outcome) == outcome
+    assert allowed(LINE + outcome) is is_allowed
+    assert refused(LINE + outcome) is is_refused
+
+
+def test_a_refusal_can_be_matched_by_its_reason() -> None:
+    line = LINE + "refused (403): pypi.org is not on this client's allow list"
+    assert refused(line, "is not on this client's allow list")
+    assert not refused(line, "not a valid host name")
+    assert not refused(LINE + "allowed", "allowed")

@@ -29,7 +29,16 @@ from footfall.personas import load_devices, load_personas
 from footfall.tester.guard import Guard, GuardEvent
 from footfall.tester.tools import Executor
 from footfall.tester.trace import Trace
-from tests.isolation.live import HELLO, HIT, LiveRun, ProxyLog, address_of, lines
+from tests.isolation.live import (
+    HELLO,
+    HIT,
+    LiveRun,
+    ProxyLog,
+    address_of,
+    allowed,
+    lines,
+    refused,
+)
 
 pytestmark = pytest.mark.isolation
 
@@ -245,8 +254,8 @@ async def test_chromium_loads_an_allowed_https_asset_through_the_proxy(
         await browser.close()
     # The proxy refuses every ClientHello that carries ECH, so this is the end-to-end proof.
     await proxy_log.wait_for(browsers.address, "example.com", "allowed")
-    refused = [d for d in proxy_log.decisions(browsers.address, "example.com") if "refused" in d]
-    assert refused == []
+    refusals = [d for d in proxy_log.decisions(browsers.address, "example.com") if refused(d)]
+    assert refusals == []
 
 
 # ---------------------------------------------------------------- the gate
@@ -319,8 +328,10 @@ async def test_a_page_cannot_reach_run_server_on_loopback(
         await browser.close()
     assert (direct, redirected, framed) == (False, False, False)
     assert reachable
-    refused = [d for d in proxy_log.decisions(browsers.address) if "not a valid host" in d]
-    assert refused, proxy_log.decisions(browsers.address)
+    refusals = [
+        d for d in proxy_log.decisions(browsers.address) if refused(d, "not a valid host name")
+    ]
+    assert refusals, proxy_log.decisions(browsers.address)
 
 
 # ---------------------------------------------------------------- the guard and the proxy
@@ -405,7 +416,8 @@ async def test_an_unload_beacon_and_a_keepalive_fetch_are_refused_by_the_proxy(
 
     Controls: a beacon and a keepalive fetch to the app itself, which the context sends
     straight there, show the browser sent them at all; and a pair to a second server on the
-    run's network, by address and not bypassed, must reach the proxy, never that server.
+    run's network, by address and not bypassed, must never reach that server, and where the
+    proxy is the wall must reach the proxy, which refuses an address.
     """
     beacon, keepalive = "unload-beacon.example.com", "keepalive-fetch.example.com"
     sink, _ = await browsers.run.serve("sink", "pages", 8000)
@@ -431,7 +443,8 @@ async def test_an_unload_beacon_and_a_keepalive_fetch_are_refused_by_the_proxy(
         # its pagehide sends them all.
         async with page.expect_navigation(timeout=30_000):
             await page.evaluate("location.assign('/')")
-        for host in (beacon, keepalive):
+        proxy_is_the_wall = not guarded or engine == "chromium"
+        for host in (beacon, keepalive) if proxy_is_the_wall else ():
             with contextlib.suppress(TimeoutError):
                 await proxy_log.wait_for(browsers.address, host, NOT_LISTED, timeout=20)
         await asyncio.sleep(2)
@@ -445,15 +458,20 @@ async def test_an_unload_beacon_and_a_keepalive_fetch_are_refused_by_the_proxy(
     # The controls: the browser sent them, and nothing not bypassed went around the proxy.
     assert {"/to-app-beacon", "/to-app-keepalive"} <= to_app, seen
     assert to_sink == set(), seen
+    if proxy_is_the_wall:
+        # The pair to the second server reached the proxy, which refuses an address.
+        by_address = [d for d in decisions if refused(d, "not a valid host name")]
+        assert len(by_address) >= 2, seen
     for host in (beacon, keepalive):
-        refused = [d for d in proxy_log.decisions(browsers.address, host) if NOT_LISTED in d]
-        allowed = [d for d in proxy_log.decisions(browsers.address, host) if "allowed" in d]
+        decided = proxy_log.decisions(browsers.address, host)
+        refusals = [d for d in decided if refused(d, NOT_LISTED)]
+        allowances = [d for d in decided if allowed(d)]
         blocked = [e for e in events if host in _hosts(e)]
-        assert allowed == [], (host, seen)
-        if not guarded or engine == "chromium":
+        assert allowances == [], (host, seen)
+        if proxy_is_the_wall:
             # With no guard, and in Chromium, whose guard never sees a request made as the
             # page goes, the proxy is the wall.
-            assert refused, (host, seen)
+            assert refusals, (host, seen)
             assert blocked == [], (host, seen)
         else:
             # WebKit routes these requests, so its guard blocks them before they leave.
