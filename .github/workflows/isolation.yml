@@ -155,10 +155,12 @@ jobs:
           said="$RUNNER_TEMP/gh.err"
           # A finished job's log can take minutes to be readable, and until then the API
           # answers with an error or a log that is not yet the job's. Only a log that names
-          # the job counts as read.
+          # the job counts as read. The log holds the colour codes of the steps' output,
+          # which gh refuses to write without being told it may.
           read=no
           for attempt in $(seq 1 60); do
-            if gh api "repos/$REPO/actions/jobs/$job/logs" > "$log" 2> "$said" \
+            if gh api --allow-escape-sequences "repos/$REPO/actions/jobs/$job/logs" \
+              > "$log" 2> "$said" \
               && grep -q '^\S* *Complete job name: isolation' "$log"; then
               read=yes
               break

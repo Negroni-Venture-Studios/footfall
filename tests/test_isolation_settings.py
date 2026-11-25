@@ -101,6 +101,8 @@ def test_a_job_fails_the_run_unless_the_isolation_log_shows_the_mask_check_maske
     assert "grep -c 'FOOTFALL-MASK-CHECK footfall-mask-check-'" in job
     # It waits for a log that is the job's own, and says which way it failed.
     assert "Complete job name: isolation" in job
+    # The log holds colour codes, which gh refuses to write without this.
+    assert "gh api --allow-escape-sequences" in job
     for failure in ("Could not read the isolation job's log", "did not run", "in clear"):
         assert failure in job
     # Counts only: no line of the log is ever printed.
