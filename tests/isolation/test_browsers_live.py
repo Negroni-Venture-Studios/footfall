@@ -208,9 +208,13 @@ async def test_chromium_sends_no_encrypted_client_hello(browsers: Browsers) -> N
         await full.close()
     # The control: Playwright's headless shell reads no policies and sends ECH, so the
     # probe must see it there, or its silence about full Chromium proves nothing.
-    shell = await browsers.playwright.chromium.connect(
-        browsers.endpoint, timeout=CONNECT_TIMEOUT_MS, headers={LAUNCH_HEADER: json.dumps({})}
-    )
+    try:
+        shell = await browsers.playwright.chromium.connect(
+            browsers.endpoint, timeout=CONNECT_TIMEOUT_MS, headers={LAUNCH_HEADER: json.dumps({})}
+        )
+    except PlaywrightError:
+        # Playwright's message names the endpoint, secret path and all: never show it.
+        raise AssertionError("could not connect the headless shell") from None
     try:
         from_shell = await visit(shell, "shell")
     finally:
@@ -248,22 +252,33 @@ async def test_chromium_loads_an_allowed_https_asset_through_the_proxy(
 # ---------------------------------------------------------------- the gate
 
 
+def _gate_verdict(answer: dict[str, Any]) -> str:
+    """ "404" for the gate's own empty 404, "closed" for no answer, "other" for anything else."""
+    if answer.get("bytes") == 0 or "error" in answer:
+        return "closed"
+    empty = answer.get("body_bytes") == 0 and "Content-Length: 0" in answer.get("head", "")
+    if answer.get("status_line") == "HTTP/1.1 404 Not Found" and empty:
+        return "404"
+    return "other"
+
+
 async def test_the_gate_shows_an_app_container_nothing(browsers: Browsers) -> None:
     run = browsers.run
     answers = await run.probe("gate", "raw", f"{browsers.address}:3000")
     scan = await run.probe("scan", "scan", f"{browsers.address}:1-65535")
     asked = {"json", "root", "json-upgrade", "wrong-path-upgrade", "root-upgrade", "http10"}
     assert set(answers) == asked
-    for name, answer in answers.items():
-        closed = answer.get("bytes") == 0 or "error" in answer
-        refused = answer.get("status_line") == "HTTP/1.1 404 Not Found" and not answer["body_bytes"]
-        assert closed or refused, (name, answer)
-    shown = json.dumps([answers, scan])
-    assert "wsEndpoint" not in shown
-    leaked = browsers.endpoint.rpartition("/")[2] in shown  # the secret path, never printed
-    assert not leaked
+    # Judged by names and verdicts alone: an answer could hold the path, so none is printed.
+    verdicts = {name: _gate_verdict(answer) for name, answer in answers.items()}
+    # The gate's own empty 404, so the probe does read what comes back.
+    assert (verdicts["json"], verdicts["root"]) == ("404", "404"), verdicts
+    assert set(verdicts.values()) <= {"404", "closed"}, verdicts
+    everything = json.dumps([answers, scan])
+    named = "wsEndpoint" in everything
+    leaked = browsers.endpoint.rpartition("/")[2] in everything  # the secret path
+    assert (named, leaked) == (False, False)
     # run-server listens on loopback alone; the gate is all there is on the network.
-    assert scan[f"{browsers.address}:1-65535"]["open"] == [3000], scan
+    assert scan[f"{browsers.address}:1-65535"]["open"] == [3000]
 
 
 async def test_the_path_connects_from_the_orchestrator(browsers: Browsers) -> None:
