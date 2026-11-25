@@ -15,6 +15,7 @@ No allowed name may become a route to another site on the same server (domain fr
 
 - Plain HTTP goes only to port 80. The proxy sends exactly one request upstream, in origin form,
   with the Host header set to the checked name, the client's Host and Proxy-* headers dropped,
+  and with them the headers that name another host, such as X-Forwarded-Host and Forwarded,
   the body cut to its Content-Length, and `Connection: close`. It relays the response and
   closes.
 - CONNECT goes only to port 443. After replying 200, the proxy reads the client's first TLS
@@ -106,12 +107,15 @@ _PORT: Final = re.compile(r"[0-9]{1,5}")
 _LENGTH: Final = re.compile(r"[0-9]{1,15}")
 _CONTROL: Final = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 _TOO_LARGE: Final = f"request headers are larger than {MAX_HEAD // 1024} KiB"
-# Never passed upstream: hop-by-hop headers, the client's Host, and Content-Length, which the
-# proxy writes itself from the length it checked.
+# Never passed upstream: hop-by-hop headers, the client's Host, Content-Length, which the
+# proxy writes itself from the length it checked, and the headers some servers and the proxies
+# in front of them read as the host asked for, which would let an allowed name front for
+# another site on the same server.
 _DROPPED: Final = frozenset(
     {
         "connection",
         "content-length",
+        "forwarded",
         "host",
         "keep-alive",
         "proxy-connection",
@@ -119,6 +123,11 @@ _DROPPED: Final = frozenset(
         "trailer",
         "transfer-encoding",
         "upgrade",
+        "x-forwarded-host",
+        "x-forwarded-server",
+        "x-host",
+        "x-http-host-override",
+        "x-original-host",
     }
 )
 

@@ -734,6 +734,31 @@ async def test_http_client_host_header_is_replaced(live: Live) -> None:
     assert sent == b"GET / HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n"
 
 
+async def test_http_headers_that_name_another_host_are_dropped(live: Live) -> None:
+    # A server that routes by one of these would serve another site behind the checked name.
+    reply = await exchange(
+        live.port,
+        get(
+            f"http://{ALLOWED}/",
+            "X-Forwarded-Host: evil.example.com",
+            "forwarded: for=10.0.0.1;host=evil.example.com",
+            "X-Host: evil.example.com",
+            "X_Forwarded_Host: evil.example.com",
+            "X-Forwarded-Server: evil.example.com",
+            "X-Original-Host: evil.example.com",
+            "X-HTTP-Host-Override: evil.example.com",
+            "X-Forwarded-For: 10.0.0.1",
+            "X-Kept: yes",
+        ),
+    )
+    assert reply == RESPONSE
+    await live.upstream.wait_for(1)
+    assert live.upstream.received == [
+        b"GET / HTTP/1.1\r\nHost: api.example.com\r\n"
+        b"X-Forwarded-For: 10.0.0.1\r\nX-Kept: yes\r\nConnection: close\r\n\r\n"
+    ]
+
+
 async def test_http_body_forwarded_by_its_content_length(live: Live) -> None:
     request = get(f"http://{ALLOWED}/form", "Content-Length: 5", method="POST", body=b"hello")
     assert await exchange(live.port, request) == RESPONSE
