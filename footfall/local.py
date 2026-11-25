@@ -1287,9 +1287,9 @@ def _open_results(out: Path, tested: Path) -> Folder:
 
     `tested` is the checkout under test, all of which is the tested branch's, so in any
     folder that lies inside it a part that is a link is refused with OutputError, whatever
-    path led there. Anywhere else
-    a link is the operator's own, as /var and /tmp are on a Mac, or a home folder can be,
-    and is followed. `out` itself is never followed when it is a link, wherever it is.
+    path led there. Anywhere else a link is the operator's own, as /var and /tmp are on a
+    Mac, or a home folder can be, and is followed. `out` itself is never followed when it is
+    a link, wherever it is.
     """
     try:
         info = tested.stat()
@@ -1355,10 +1355,11 @@ def _prepare_results(out: Path, personas: Sequence[Persona], tested: Path) -> _R
     persona, refusing to overwrite what an earlier run left there, and return them all, open.
 
     The results folder may lie inside `tested`, the checkout under test, whose branch
-    decides what is there. `_open_results` says which links on the way there it refuses; in the
-    results folder, OutputError refuses a link, even one to nothing, where summary.json or a
-    persona's folder would go. From then on every result is written by name in a folder
-    held open, never by path, so a link put in place of one later moves nothing.
+    decides what is there. `_open_results` says which links on the way there it refuses;
+    in the results folder, OutputError refuses a link, even one to nothing, where
+    summary.json or a persona's folder would go. From then on every result is written by
+    name in a folder held open, never by path, so a link put in place of one later moves
+    nothing.
     """
     folder = _open_results(out, tested)
     made: dict[str, Folder] = {}
