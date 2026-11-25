@@ -23,6 +23,7 @@ ends, and the run's summary once all have.
 import asyncio
 import base64
 import contextlib
+import errno
 import functools
 import json
 import logging
@@ -34,6 +35,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Protocol, TextIO
 from urllib.parse import quote as url_quote
@@ -49,6 +51,7 @@ from footfall.tester.guard import Guard
 from footfall.tester.loop import Budget, run_persona
 from footfall.tester.model import model_from_spec
 from footfall.tester.report import PersonaReport, clean_text, strip_invisible
+from footfall.tester.screen import quote
 from footfall.tester.tools import REDACTED, Executor
 from footfall.tester.trace import Trace
 
@@ -80,6 +83,13 @@ _FOLDER_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _WRITE_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 _CHUNK: Final = 1024 * 1024
+_GIT_PASSED: Final = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL")
+# The errors that mean one part of a path is a link or a file, not a folder.
+_NOT_A_FOLDER: Final = frozenset({errno.ELOOP, errno.ENOTDIR, errno.EMLINK})
+# The code points HFS+ ignores in a name, which git's is_hfs_dotgit skips.
+_HFS_IGNORED: Final = frozenset(
+    [*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF]
+)
 
 type ConnectBrowser = Callable[[str, str], Awaitable[Browser]]
 
@@ -219,72 +229,128 @@ def _write_json(path: Path, data: object, password: str | None) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _git_files(folder: Path) -> list[PurePosixPath]:
-    """The files git would commit from `folder`: tracked, or untracked and not ignored.
+@dataclass(frozen=True)
+class _Listing:
+    """What git would commit from a folder, and the identity of the repository's git folder."""
 
-    git runs with no filesystem monitor and no untracked cache, either of which a
-    repository's own configuration could point at a program, and with no GIT_ variables from
-    the environment. Listing files runs no hook, filter or pager. With those off, it is safe
-    to read a repository another user owns, as the dev stack's mounted folder is, so git's
-    check of the owner is set aside. Raises LocalRunError when git is missing, hangs, or
-    cannot read the folder.
+    names: list[PurePosixPath]
+    git_dir: tuple[int, int]  # (st_dev, st_ino)
+
+
+_GIT_ADVICE: Final = "pass --all-files to copy every file in the folder, ignored ones included"
+
+
+def _git_env() -> dict[str, str]:
+    """The only environment git is given.
+
+    A repository's own configuration can make git run a program, as a lazy fetch through a
+    promisor remote whose upload-pack is a shell command does, and that program would get
+    git's environment. So git gets no key and nothing else of Footfall's: only where to find
+    programs, the user's own configuration (whose excludes file may be what keeps their
+    `.env` ignored), and the language. It may not fetch lazily, use any transport at all,
+    ask at a terminal, or take a lock in the folder.
     """
-    git = shutil.which("git")
-    advice = "pass --all-files to copy every file in the folder, ignored ones included"
-    if git is None:
-        raise LocalRunError(
-            f"git is not installed, so Footfall cannot tell which files to copy; {advice}"
-        )
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_OPTIONAL_LOCKS"] = "0"  # never write to the folder, which may be read-only
-    command = [
-        git,
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.untrackedCache=false",
-        "-c",
-        "safe.directory=*",
-        "ls-files",
-        "-z",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-    ]
+    env = {name: os.environ[name] for name in _GIT_PASSED if name in os.environ}
+    env |= {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_ALLOW_PROTOCOL": "",
+    }
+    return env
+
+
+def _run_git(git: str, folder: Path, arguments: Sequence[str]) -> bytes:
+    """Run git in `folder` with `_git_env`, no input and a time limit; return its output.
+
+    The filesystem monitor and the untracked cache, which a repository's configuration could
+    point at a program, are off. git's own check of the repository's owner stays on: a
+    repository someone else owns is read only where the system configuration trusts it, as
+    the footfall image trusts its mount point, /repo. Raises LocalRunError when git hangs,
+    cannot start or fails.
+    """
+    command = [git, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *arguments]
     try:
         done = subprocess.run(  # noqa: S603  # a fixed command, in the folder
-            command, cwd=folder, env=env, capture_output=True, timeout=GIT_TIMEOUT, check=False
+            command,
+            cwd=folder,
+            env=_git_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         raise LocalRunError(
-            f"git took more than {GIT_TIMEOUT:g} seconds to list the files in {folder}; {advice}"
+            f"git took more than {GIT_TIMEOUT:g} seconds to read {folder}; {_GIT_ADVICE}"
         ) from None
     except OSError as error:
         why = error.strerror or type(error).__name__
-        raise LocalRunError(f"git could not be started ({why}); {advice}") from None
+        raise LocalRunError(f"git could not be started ({why}); {_GIT_ADVICE}") from None
     if done.returncode != 0:
         said = done.stderr.decode("utf-8", "replace").strip().splitlines()
         why = clean_text(said[0], 200, single_line=True) if said else "no reason given"
-        raise LocalRunError(f"git cannot list the files in {folder} ({why}); {advice}")
-    names = [os.fsdecode(name) for name in done.stdout.split(b"\0") if name]
-    return sorted({PurePosixPath(name) for name in names})
+        raise LocalRunError(f"git cannot read the files in {folder} ({why}); {_GIT_ADVICE}")
+    return done.stdout
+
+
+def _git_files(folder: Path) -> _Listing:
+    """The files git would commit from `folder`, tracked or untracked but not ignored, and
+    the identity of the repository's git folder, which no name may lead into.
+
+    Raises LocalRunError when git is missing, hangs, or cannot read the folder.
+    """
+    git = shutil.which("git")
+    if git is None:
+        raise LocalRunError(
+            f"git is not installed, so Footfall cannot tell which files to copy; {_GIT_ADVICE}"
+        )
+    listed = _run_git(git, folder, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    names = sorted({PurePosixPath(os.fsdecode(n)) for n in listed.split(b"\0") if n})
+    where = _run_git(git, folder, ["rev-parse", "--absolute-git-dir"])
+    try:
+        info = Path(os.fsdecode(where.strip())).stat()
+    except OSError as error:
+        why = error.strerror or type(error).__name__
+        raise LocalRunError(
+            f"cannot find the git folder of {folder} ({why}); {_GIT_ADVICE}"
+        ) from None
+    return _Listing(names, (info.st_dev, info.st_ino))
 
 
 def _inside(path: Path, folder: Path) -> bool:
     return path == folder or path.is_relative_to(folder)
 
 
-def _open_folders(top: int, parts: Sequence[str], *, create: bool, name: PurePosixPath) -> int:
+def _shown(name: object) -> str:
+    """A name from git's output or the disk, quoted and safe to print."""
+    return quote(str(name), 120)
+
+
+def _is_dot_git(part: str) -> bool:
+    """Whether a name is `.git` as a case-insensitive file system, or HFS+, would read it."""
+    kept = "".join(ch for ch in part if ord(ch) not in _HFS_IGNORED)
+    return kept.casefold() == ".git"
+
+
+def _open_folders(
+    top: int,
+    parts: Sequence[str],
+    *,
+    create: bool,
+    name: PurePosixPath,
+    git_dir: tuple[int, int] | None = None,
+) -> int:
     """Open the folder `parts` below the open folder `top`, one name at a time and never
     through a link, making each that is missing when `create` is set.
 
     Raises FileNotFoundError for a missing folder when not creating, and LocalRunError when
-    any part is a link or not a folder.
+    any part is a link or a file, cannot be opened, or is the git folder `git_dir`.
     """
     current = os.dup(top)
     try:
         for index, part in enumerate(parts):
+            where = "/".join(parts[: index + 1])
             if create:
                 with contextlib.suppress(FileExistsError):
                     os.mkdir(part, 0o755, dir_fd=current)
@@ -292,15 +358,24 @@ def _open_folders(top: int, parts: Sequence[str], *, create: bool, name: PurePos
                 inner = os.open(part, _FOLDER_FLAGS, dir_fd=current)
             except FileNotFoundError:
                 raise
-            except OSError:
-                where = "/".join(parts[: index + 1])
-                side = "workspace" if create else "folder"
-                raise LocalRunError(
-                    f"cannot copy {name}: {where} in the {side} is a link or a file, not a "
-                    "folder, and Footfall copies nothing through a link"
-                ) from None
+            except OSError as error:
+                if error.errno in _NOT_A_FOLDER:
+                    side = "workspace" if create else "folder"
+                    raise LocalRunError(
+                        f"cannot copy {_shown(name)}: {_shown(where)} in the {side} is a link "
+                        "or a file, not a folder, and Footfall copies nothing through a link"
+                    ) from None
+                why = error.strerror or type(error).__name__
+                raise LocalRunError(f"cannot open {_shown(where)} ({why})") from None
             os.close(current)
             current = inner
+            if git_dir is not None:
+                info = os.fstat(current)
+                if (info.st_dev, info.st_ino) == git_dir:
+                    raise LocalRunError(
+                        f"cannot copy {_shown(name)}: {_shown(where)} is the repository's own "
+                        "git folder"
+                    )
     except BaseException:
         os.close(current)
         raise
@@ -313,7 +388,7 @@ def _copy_file(source: int, target: int, leaf: str, name: PurePosixPath) -> None
     try:
         info = os.fstat(reader)
         if not stat.S_ISREG(info.st_mode):
-            raise LocalRunError(f"cannot copy {name}: it changed while it was copied")
+            raise LocalRunError(f"cannot copy {_shown(name)}: it changed while it was copied")
         mode = stat.S_IMODE(info.st_mode) & 0o777  # no set-id or sticky bits
         writer = os.open(leaf, _WRITE_FLAGS, mode, dir_fd=target)
         try:
@@ -329,18 +404,27 @@ def _copy_file(source: int, target: int, leaf: str, name: PurePosixPath) -> None
         os.close(reader)
 
 
-def _copy_files(folder: Path, workspace: Path, names: Sequence[PurePosixPath], out: Path) -> None:
-    """Copy the named files into the workspace, links as links, leaving the results out.
+def _copy_files(
+    folder: Path,
+    workspace: Path,
+    names: Sequence[PurePosixPath],
+    out: Path,
+    *,
+    git_dir: tuple[int, int] | None = None,
+) -> None:
+    """Copy the named files into a new workspace, links as links, leaving the results out.
 
     Every name is opened one folder at a time from an open folder, never through a link, on
     both sides, as the runner copies. A name below a link, which a crafted index or a folder
-    swapped for a link can list, is refused. So is a folder of its own, such as a submodule
-    or another repository, whose files git does not list. A name that is gone is skipped.
+    swapped for a link can list, is refused. So is a name in a `.git` folder, however a
+    crafted index spells it, and a name in the folder `git_dir` identifies, whatever it is
+    called, since a repository's configuration can hold a token. So is a folder of its own,
+    such as a submodule, whose files git does not list. A name that is gone is skipped.
     """
     base = folder.resolve()
     results = out.resolve()
     left_out = results.relative_to(base).parts if _inside(results, base) else None
-    workspace.mkdir(exist_ok=True)
+    workspace.mkdir()
     source_top = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
     try:
         target_top = os.open(workspace, _FOLDER_FLAGS)
@@ -348,21 +432,34 @@ def _copy_files(folder: Path, workspace: Path, names: Sequence[PurePosixPath], o
             for name in names:
                 parts = name.parts
                 if not parts or name.is_absolute() or any(p in (".", "..") for p in parts):
-                    # git refuses such a name in its index, and one would lead out of the folder.
-                    raise LocalRunError(f"cannot copy {name}: it is not a name inside the folder")
+                    # git never adds such a name, but a crafted index can hold one, and it
+                    # would lead out of the folder.
+                    raise LocalRunError(
+                        f"cannot copy {_shown(name)}: it is not a name inside the folder"
+                    )
+                if any(_is_dot_git(part) for part in parts):
+                    raise LocalRunError(
+                        f"cannot copy {_shown(name)}: it is in the repository's git folder"
+                    )
                 if left_out is not None and parts[: len(left_out)] == left_out:
                     continue
-                _copy_name(source_top, target_top, name)
+                _copy_name(source_top, target_top, name, git_dir)
         finally:
             os.close(target_top)
     finally:
         os.close(source_top)
 
 
-def _copy_name(source_top: int, target_top: int, name: PurePosixPath) -> None:
+def _copy_name(
+    source_top: int,
+    target_top: int,
+    name: PurePosixPath,
+    git_dir: tuple[int, int] | None = None,
+) -> None:
+    """Copy one name between two open folders, as `_copy_files` describes."""
     parents, leaf = name.parts[:-1], name.parts[-1]
     try:
-        source = _open_folders(source_top, parents, create=False, name=name)
+        source = _open_folders(source_top, parents, create=False, name=name, git_dir=git_dir)
     except FileNotFoundError:
         return  # tracked, but its folder was deleted since
     try:
@@ -372,12 +469,12 @@ def _copy_name(source_top: int, target_top: int, name: PurePosixPath) -> None:
             return  # tracked, but deleted since
         if stat.S_ISDIR(info.st_mode):
             raise LocalRunError(
-                f"{name} is a folder git lists without its files, such as a submodule or "
-                "another repository; pass --all-files to copy every file in the folder, "
-                "ignored ones included"
+                f"{_shown(name)} is a folder git lists without its files, such as a "
+                "submodule, another repository, or a tracked file now replaced by a folder; "
+                f"{_GIT_ADVICE}"
             )
         if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
-            raise LocalRunError(f"cannot copy {name}: it is not a file, a link or a folder")
+            raise LocalRunError(f"cannot copy {_shown(name)}: it is not a file, a link or a folder")
         target = _open_folders(target_top, parents, create=True, name=name)
         try:
             if stat.S_ISLNK(info.st_mode):
@@ -597,7 +694,7 @@ async def test_folder(
     devices = load_devices()
     personas = select(load_personas(devices), list(persona_ids) or list(manifest.test.personas))
     model_from_spec(model_spec)  # a spec that names nothing runnable stops the run here
-    names = None if all_files else await asyncio.to_thread(_git_files, folder)
+    listing = None if all_files else await asyncio.to_thread(_git_files, folder)
 
     run_id = new_run_id()
     account = None
@@ -626,7 +723,7 @@ async def test_folder(
             account=account,
         )
         try:
-            reports = await _go(run, runner, connect, personas, folder, workspace, names)
+            reports = await _go(run, runner, connect, personas, folder, workspace, listing)
             _write_json(out / "summary.json", run.summary(reports), run.password)
             print(format_table(reports), file=stream)
         except BaseException as error:
@@ -651,18 +748,27 @@ async def _go(
     personas: Sequence[Persona],
     folder: Path,
     workspace: Path,
-    names: Sequence[PurePosixPath] | None,
+    listing: _Listing | None,
 ) -> list[PersonaReport]:
     """Prepare the app, start its copies and the browsers, and run every persona.
 
-    `names` are the files to copy, or None to copy every file in the folder.
+    `listing` is what git would commit, or None to copy every file in the folder.
     """
     manifest = run.manifest
     workspace.parent.mkdir(parents=True, exist_ok=True)
-    if names is None:
+    if listing is None:
         await asyncio.to_thread(_copy_folder, folder, workspace, run.out)
     else:
-        await asyncio.to_thread(_copy_files, folder, workspace, names, run.out)
+        await asyncio.to_thread(
+            functools.partial(
+                _copy_files,
+                folder,
+                workspace,
+                listing.names,
+                run.out,
+                git_dir=listing.git_dir,
+            )
+        )
     env: dict[str, str] = {}
     if run.account is not None:
         env = {"FOOTFALL_USERNAME": run.account[0], "FOOTFALL_PASSWORD": run.account[1]}

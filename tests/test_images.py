@@ -96,6 +96,10 @@ def test_footfall_image_installs_git_from_its_own_release() -> None:
     install = re.search(r"apt-get install --yes --no-install-recommends git\b", runtime)
     assert install is not None
     assert "rm -rf /var/lib/apt/lists/*" in runtime
+    # Only the dev stack's mount point is trusted, whoever owns it, and only system-wide.
+    assert re.search(r"&& git config --system --add safe\.directory /repo\b", runtime)
+    assert "safe.directory '*'" not in text and "safe.directory=*" not in text
+    assert "safe.directory" not in (ROOT / "footfall" / "local.py").read_text()
     assert re.search(r"^FROM python:[^ ]+-trixie@sha256:", runtime, re.MULTILINE)
 
 
@@ -104,14 +108,22 @@ def test_footfall_image_installs_git_from_its_own_release() -> None:
 
 def _pattern(text: str) -> re.Pattern[str]:
     """A .dockerignore pattern as a regular expression, as Docker's matcher reads it: `*`
-    and `?` stay within one folder, and `**` crosses folders."""
+    and `?` stay within one folder, `**` crosses folders, `**/` may match no folder at all,
+    and `[...]` is a character class."""
     parts = []
     index = 0
     clean = text.strip().strip("/")
     while index < len(clean):
-        if clean.startswith("**", index):
+        if clean.startswith("**/", index):
+            parts.append("(?:.*/)?")
+            index += 3
+        elif clean.startswith("**", index):
             parts.append(".*")
             index += 2
+        elif clean[index] == "[" and "]" in clean[index + 1 :]:
+            end = clean.index("]", index + 1)
+            parts.append(clean[index : end + 1])
+            index = end + 1
         elif clean[index] == "*":
             parts.append("[^/]*")
             index += 1
@@ -143,19 +155,58 @@ def admitted(path: str, ignore: str) -> bool:
     return verdict
 
 
-def copy_sources() -> list[tuple[str, str]]:
-    """Every COPY source in every Dockerfile that comes from the build context."""
+def sources_in(dockerfile: str) -> list[str]:
+    """Every COPY or ADD source in a Dockerfile's text that comes from the build context.
+
+    Raises ValueError for a form this reading does not follow: an instruction continued on
+    the next line, or one in JSON array form, which must not slip past the check unread.
+    """
     sources = []
-    for path in DOCKERFILES:
-        for line in path.read_text().splitlines():
-            words = line.split()
-            if not words or words[0].upper() != "COPY":
-                continue
-            arguments = [w for w in words[1:] if not w.startswith("--")]
-            if any(w.startswith("--from=") for w in words[1:]):
-                continue
-            sources += [(path.parent.name, source) for source in arguments[:-1]]
+    for line in dockerfile.splitlines():
+        words = line.split()
+        if not words or words[0].upper() not in ("COPY", "ADD"):
+            continue
+        if line.rstrip().endswith("\\"):
+            raise ValueError(f"a continued {words[0]} is not read here: {line!r}")
+        arguments = [w for w in words[1:] if not w.startswith("--")]
+        if arguments and arguments[0].startswith("["):
+            raise ValueError(f"a {words[0]} in JSON form is not read here: {line!r}")
+        if any(w.startswith("--from=") for w in words[1:]):
+            continue
+        sources += arguments[:-1]
     return sources
+
+
+def copy_sources() -> list[tuple[str, str]]:
+    """Every COPY or ADD source in every Dockerfile that comes from the build context."""
+    return [
+        (path.parent.name, source)
+        for path in DOCKERFILES
+        for source in sources_in(path.read_text())
+    ]
+
+
+def test_add_counts_and_unread_forms_are_refused() -> None:
+    assert sources_in("ADD site.tar /srv/\nCOPY --from=build /app /app\nCOPY a b ./") == [
+        "site.tar",
+        "a",
+        "b",
+    ]
+    with pytest.raises(ValueError, match="continued"):
+        sources_in("COPY a \\\n  b ./")
+    with pytest.raises(ValueError, match="JSON"):
+        sources_in('COPY ["gate.js", "/opt/footfall/gate.js"]')
+
+
+def test_the_matcher_reads_patterns_as_docker_does() -> None:
+    # `**/` may match no folder at all, and a bracket is a character class.
+    assert not admitted("stray.pyc", "**/*.pyc")
+    assert not admitted("deep/down/stray.pyc", "**/*.pyc")
+    assert admitted("stray.py", "**/*.pyc")
+    assert not admitted("notes3.txt", "notes[0-9].txt")
+    assert admitted("notesX.txt", "notes[0-9].txt")
+    assert not admitted("a/b", "a/*")
+    assert admitted("a/b/c", "*/b\n!a/b/c") is True
 
 
 def context_files(source: str) -> list[str]:

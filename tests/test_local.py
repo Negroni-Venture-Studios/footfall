@@ -8,10 +8,13 @@ lookups switched off, and the model is a `FakeModel` or a scripted tester.
 
 import asyncio
 import contextlib
+import hashlib
 import json
+import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -1105,8 +1108,14 @@ def test_the_copy_never_writes_through_a_link_in_the_workspace(tmp_path: Path) -
     folder = tmp_path / "source"
     (folder / "keys").mkdir(parents=True)
     (folder / "keys" / "x").write_text("data\n")
-    with pytest.raises(LocalRunError, match="keys"):
-        local._copy_files(folder, workspace, [PurePosixPath("keys/x")], tmp_path / "out")
+    source = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    target = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(LocalRunError, match="keys"):
+            local._copy_name(source, target, PurePosixPath("keys/x"))
+    finally:
+        os.close(source)
+        os.close(target)
     assert list(outside.iterdir()) == []
 
 
@@ -1145,3 +1154,156 @@ async def test_git_that_hangs_or_cannot_start_is_reported(
     with pytest.raises(LocalRunError, match="--all-files"):
         await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path, all_files=False)
     assert runner.calls == []
+
+
+# ---------------------------------------------------------------- a hostile repository
+
+
+def hostile_repository(folder: Path, marker: Path) -> None:
+    """A repository whose listing would fetch a missing .gitignore lazily, through a promisor
+    remote whose upload-pack command is a shell command of the repository's choosing."""
+    folder.mkdir()
+    git(folder, "init", "-q")
+    (folder / "index.html").write_text("hi\n")
+    git(folder, "add", "index.html")
+    missing = "1234567890123456789012345678901234567890"
+    git(folder, "update-index", "--add", "--cacheinfo", f"100644,{missing},.gitignore")
+    git(folder, "update-index", "--skip-worktree", ".gitignore")
+    git(folder, "config", "core.repositoryformatversion", "1")
+    git(folder, "config", "extensions.partialClone", "origin")
+    git(folder, "config", "remote.origin.url", str(folder))
+    git(folder, "config", "remote.origin.promisor", "true")
+    git(folder, "config", "remote.origin.uploadpack", f"touch {marker}; git-upload-pack")
+    (folder / "notes.txt").write_text("untracked\n")
+
+
+def test_a_repository_cannot_make_git_run_a_command(tmp_path: Path) -> None:
+    marker = tmp_path / "marker"
+    folder = tmp_path / "hostile"
+    hostile_repository(folder, marker)
+    with contextlib.suppress(LocalRunError):
+        local._git_files(folder)
+    assert not marker.exists()
+
+
+def test_git_runs_with_a_bare_environment_and_no_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")  # gitleaks:allow
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("LANG", "en_GB.UTF-8")
+    monkeypatch.setenv("SOMETHING_ELSE", "not for git")
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    real_run = subprocess.run
+
+    def run(command: list[str], **options: Any) -> Any:
+        calls.append((command, options))
+        return real_run(command, **options)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    listing = local._git_files(folder)
+    assert PurePosixPath("footfall.toml") in listing.names
+    assert len(calls) == 2  # ls-files, then rev-parse for the git folder
+    allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL"}
+    for command, options in calls:
+        assert not any("safe.directory" in part for part in command)
+        assert options["stdin"] is subprocess.DEVNULL
+        env = options["env"]
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_OPTIONAL_LOCKS"] == "0"
+        assert env["GIT_NO_LAZY_FETCH"] == "1"
+        assert env["GIT_ALLOW_PROTOCOL"] == ""
+        assert env["LANG"] == "en_GB.UTF-8"
+        assert set(env) - allowed == {
+            "GIT_TERMINAL_PROMPT",
+            "GIT_OPTIONAL_LOCKS",
+            "GIT_NO_LAZY_FETCH",
+            "GIT_ALLOW_PROTOCOL",
+        }
+
+
+def craft_index(path: Path, names: Sequence[str]) -> None:
+    """Write a git index by hand, naming paths git itself would never add."""
+    empty = bytes.fromhex("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+    entries = b""
+    for name in sorted(n.encode() for n in names):
+        entry = struct.pack(">10I", 0, 0, 0, 0, 0, 0, 0o100644, 0, 0, 0) + empty
+        entry += struct.pack(">H", min(len(name), 0xFFF)) + name
+        entry += b"\0" * (8 - len(entry) % 8)
+        entries += entry
+    body = b"DIRC" + struct.pack(">II", 2, len(names)) + entries
+    path.write_bytes(body + hashlib.sha1(body, usedforsecurity=False).digest())
+
+
+@pytest.mark.parametrize("spelling", [".git/config", ".GIT/config", ".g\u200cit/config"])
+async def test_a_crafted_index_cannot_copy_the_git_folder(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]], spelling: str
+) -> None:
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    git(folder, "config", "remote.origin.url", "https://token-not-real@example.com/app.git")
+    craft_index(folder / ".git" / "index", [spelling, "footfall.toml"])
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError, match="git folder"):
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert "prepare" not in runner.ops()
+
+
+def test_the_git_folder_is_refused_whatever_it_is_called(tmp_path: Path) -> None:
+    folder = tmp_path / "source"
+    (folder / "meta").mkdir(parents=True)
+    (folder / "meta" / "config").write_text("url = https://token-not-real@example.com\n")
+    info = (folder / "meta").stat()
+    with pytest.raises(LocalRunError, match="git folder"):
+        local._copy_files(
+            folder,
+            tmp_path / "workspace",
+            [PurePosixPath("meta/config")],
+            tmp_path / "out",
+            git_dir=(info.st_dev, info.st_ino),
+        )
+    assert not (tmp_path / "workspace" / "meta").exists()
+
+
+async def test_names_in_errors_are_quoted(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
+) -> None:
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    nested = folder / "evil\x1b[2Jname"
+    nested.mkdir()
+    git(nested, "init", "-q")
+    (nested / "x.js").write_text("1\n")
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError) as caught:
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    message = str(caught.value)
+    assert "\x1b" not in message
+    assert '"evil[2Jname"' in message
+    assert "tracked file now replaced by a folder" in message
+
+
+def test_a_folder_that_cannot_be_opened_is_not_called_a_link(tmp_path: Path) -> None:
+    folder = tmp_path / "source"
+    (folder / "locked").mkdir(parents=True)
+    (folder / "locked" / "x").write_text("data\n")
+    (folder / "locked").chmod(0)
+    try:
+        with pytest.raises(LocalRunError) as caught:
+            local._copy_files(
+                folder, tmp_path / "workspace", [PurePosixPath("locked/x")], tmp_path / "out"
+            )
+    finally:
+        (folder / "locked").chmod(0o755)
+    assert 'cannot open "locked" (Permission denied)' in str(caught.value)
+    assert "link" not in str(caught.value)
+
+
+def test_the_workspace_must_be_new(tmp_path: Path) -> None:
+    folder = tmp_path / "source"
+    folder.mkdir()
+    (tmp_path / "workspace").mkdir()
+    with pytest.raises(FileExistsError):
+        local._copy_files(folder, tmp_path / "workspace", [], tmp_path / "out")

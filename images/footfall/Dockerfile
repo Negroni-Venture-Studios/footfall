@@ -34,10 +34,13 @@ LABEL org.opencontainers.image.source="https://github.com/Negroni-Venture-Studio
       org.opencontainers.image.licenses="MIT"
 
 # git, from the base image's own Debian release (trixie) and its security
-# updates: footfall test copies only the files git would commit.
+# updates: footfall test copies only the files git would commit. git reads a
+# repository someone else owns only where it is told to trust it; the dev
+# stack mounts the repository under test at /repo, and nowhere else is trusted.
 RUN apt-get update \
  && apt-get install --yes --no-install-recommends git \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && git config --system --add safe.directory /repo
 
 # The two socket folders are mount points for volumes, which take their owner
 # and mode from here: the runner's socket, which the orchestrator's group may
