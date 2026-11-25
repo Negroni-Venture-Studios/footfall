@@ -4,7 +4,7 @@ about: Something in Footfall does not work as documented
 labels: bug
 ---
 
-**Do not report security vulnerabilities here.** Use the private route in SECURITY.md.
+**Do not report security vulnerabilities here.** Use the private route in the [security policy](https://github.com/Negroni-Venture-Studios/footfall/security/policy).
 
 ## What happened
 

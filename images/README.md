@@ -10,6 +10,8 @@ Footfall builds four images, tagged `dev` when built locally. Each base image is
 
 `footfall-python3.13` is the base image for Python apps under test. The runner starts an app in it when the manifest asks for the Python runtime, so the app's own install and run commands work as they would on a developer's machine. It runs as uid 10010 in `/workspace`, and `pip` installs into `/workspace/.local`, which lets the root file system stay read-only.
 
+The image sets `PIP_USER=1` so that a plain `pip install` lands in `/workspace/.local`. pip inside a virtual environment refuses a user install, so an `install` command that makes its own environment must turn the setting off for that pip, for example `python -m venv .venv && PIP_USER=0 .venv/bin/pip install -r requirements.txt`.
+
 ## node22
 
 `footfall-node22` is the equivalent for Node apps. The runner starts it in the same way, as uid 10010 in `/workspace`, with the `npm` cache in `/tmp/npm`.

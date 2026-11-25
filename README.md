@@ -19,7 +19,7 @@ The design follows [Snug](https://github.com/Negroni-Venture-Studios/snug), Negr
 
 ## Trying phase 1
 
-There is nothing to run yet. This section will be filled in when phase 1 has a command to try.
+`footfall test <folder>` sends the testers at an app in a local folder. It runs in the development stack in [deploy/dev/compose.yaml](deploy/dev/compose.yaml), which needs Docker with gVisor, as on Linux, and an Anthropic API key. Build the images as [images/README.md](images/README.md) describes, then follow the commands at the top of the Compose file; `footfall test /repo/demo-app` tests [Tiny Tasks](demo-app/README.md), the demo app with planted bugs. Docker Desktop on a Mac has no gVisor, and `FOOTFALL_RUNTIME=runc` starts the containers under test without it, with a warning from every command. Never set it on a server.
 
 ## Contributing and security
 
