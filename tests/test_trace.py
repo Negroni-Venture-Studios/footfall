@@ -1,5 +1,6 @@
 import errno
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -72,6 +73,12 @@ def test_a_trace_is_never_written_through_a_link(tmp_path: Path) -> None:
         Trace(tmp_path / "trace.jsonl").append(step(1))
     assert refused.value.errno == errno.ELOOP
     assert not target.exists()
+
+
+@pytest.mark.usefixtures("no_umask")
+def test_a_trace_is_made_for_its_owner_alone(tmp_path: Path) -> None:
+    Trace(tmp_path / "trace.jsonl").append(step(1))
+    assert stat.S_IMODE((tmp_path / "trace.jsonl").stat().st_mode) == 0o600
 
 
 def test_empty_or_missing_trace_has_no_steps(tmp_path: Path) -> None:

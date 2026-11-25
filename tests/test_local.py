@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -40,6 +41,7 @@ from footfall.local import (
     wait_ready,
 )
 from footfall.manifest import ManifestError
+from footfall.personas import load_devices, load_personas, select
 from footfall.runner.service import RunnerError
 from footfall.tester import loop as tester_loop
 from footfall.tester import tools
@@ -653,6 +655,17 @@ async def test_a_results_folder_that_is_a_link_is_refused_before_the_run(
         await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
     assert runner.calls == []
     assert list(target.iterdir()) == []
+
+
+@pytest.mark.usefixtures("no_umask")
+def test_results_are_made_for_their_owner_alone(tmp_path: Path) -> None:
+    (grace,) = select(load_personas(load_devices()), ["grace"])
+    out = tmp_path / "out"
+    (folder,) = local._prepare_results(out, [grace])
+    local._write_json(out / "summary.json", {"run": "r"}, None)
+    modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in (out, folder)}
+    modes["summary.json"] = stat.S_IMODE((out / "summary.json").stat().st_mode)
+    assert modes == {"out": 0o700, "grace": 0o700, "summary.json": 0o600}
 
 
 def test_a_results_file_is_never_written_through_a_link(tmp_path: Path) -> None:

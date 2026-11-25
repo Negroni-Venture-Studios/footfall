@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import sys
 import unicodedata
@@ -50,7 +51,7 @@ from footfall.tester.screen import (
     describe,
     quote,
 )
-from footfall.tester.trace import Step, Trace
+from footfall.tester.trace import FILE_MODE, FOLDER_MODE, Step, Trace
 
 __all__ = [
     "EVENTS_HEADING",
@@ -92,6 +93,7 @@ LOG = logging.getLogger(__name__)
 
 _LARGE: Final = 10**9
 _UNCAPPED: Final = sys.maxsize
+_NEW_FILE: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 _KEY_CAP: Final = 40  # the most characters of a field's name in the trace or an error
 _MOST_NAMED: Final = 5  # the fields a tool does not have that the trace names, before a count
 # Characters a path may not hold: controls, surrogates, invisible format characters (such as
@@ -931,9 +933,10 @@ class Executor:
 
     def _save(self, jpeg: bytes) -> str:
         shot = screenshot_id(len(self._shots) + 1)
-        self._dir.mkdir(parents=True, exist_ok=True)
-        # "x": never overwrite a screenshot, nor follow a link left where one should go.
-        with (self._dir / f"{shot}.jpg").open("xb") as handle:
+        self._dir.mkdir(FOLDER_MODE, parents=True, exist_ok=True)
+        # Exclusive: never overwrite a screenshot, nor follow a link left where one should go.
+        # The operator's alone, as every results file is.
+        with os.fdopen(os.open(self._dir / f"{shot}.jpg", _NEW_FILE, FILE_MODE), "wb") as handle:
             handle.write(jpeg)
         self._shots.append(shot)
         return shot

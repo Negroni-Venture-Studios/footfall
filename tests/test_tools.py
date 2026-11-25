@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import stat
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1033,6 +1034,13 @@ async def test_a_screenshot_that_is_not_a_jpeg_is_never_saved(
     with pytest.raises(CaptureError, match="not a JPEG"):
         await s.executor.run("look", {})
     assert sorted(p.name for p in s.shots.iterdir()) == ["01.jpg"]
+
+
+@pytest.mark.usefixtures("no_umask")
+async def test_screenshots_are_made_for_their_owner_alone(session: MakeSession) -> None:
+    s = await session()
+    assert stat.S_IMODE(s.shots.stat().st_mode) == 0o700
+    assert stat.S_IMODE((s.shots / "01.jpg").stat().st_mode) == 0o600
 
 
 def test_touch_must_be_given() -> None:

@@ -14,6 +14,10 @@ from footfall.tester.report import OBSERVATIONS
 
 # Appended to, and made if it is not there, but never through a link, even one to nothing.
 _APPEND: Final = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+# Results hold a run's tester text and screenshots, and belong to the person who ran it, so
+# every results file and folder Footfall makes is theirs alone.
+FILE_MODE: Final = 0o600
+FOLDER_MODE: Final = 0o700
 
 
 class TraceError(ValueError):
@@ -61,7 +65,7 @@ class Trace:
         # ASCII only: a lone surrogate from the model is escaped, not a write error.
         labelled = {"note": OBSERVATIONS, **fields}
         line = json.dumps(labelled, ensure_ascii=True, separators=(",", ":")) + "\n"
-        with os.fdopen(os.open(self.path, _APPEND, 0o666), "a", encoding="utf-8") as handle:
+        with os.fdopen(os.open(self.path, _APPEND, FILE_MODE), "a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())

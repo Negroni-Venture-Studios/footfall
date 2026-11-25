@@ -170,3 +170,13 @@ def mask_output(monkeypatch: pytest.MonkeyPatch) -> Iterator[MaskOutput]:
         yield output
     finally:
         output.close()
+
+
+@pytest.fixture
+def no_umask() -> Iterator[None]:
+    """A umask of 0 for the test, so that a file's mode is the one Footfall asked for."""
+    old = os.umask(0)
+    try:
+        yield
+    finally:
+        os.umask(old)

@@ -70,7 +70,7 @@ from footfall.tester.model import model_from_spec
 from footfall.tester.report import OBSERVATIONS, PersonaReport, clean_text, strip_invisible
 from footfall.tester.screen import quote
 from footfall.tester.tools import REDACTED, Executor
-from footfall.tester.trace import Trace
+from footfall.tester.trace import FILE_MODE, FOLDER_MODE, Trace
 
 __all__ = [
     "DEFAULT_PROXY_CONTAINER",
@@ -250,11 +250,12 @@ def _failed(persona: Persona, device: Device, reason: str, started: float) -> Pe
 def _write_json(path: Path, data: object, password: str | None) -> None:
     """Write `data` as JSON to a new file, with the password taken out once more in case
     anything held it. The file is created exclusively, which never follows a link, even one
-    to nothing: a name already there, link or not, raises FileExistsError."""
+    to nothing: a name already there, link or not, raises FileExistsError. It is the
+    operator's alone, mode 0o600."""
     text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     if password:
         text = text.replace(password, REDACTED)
-    with path.open("x", encoding="utf-8") as handle:
+    with os.fdopen(os.open(path, _WRITE_FLAGS, FILE_MODE), "w", encoding="utf-8") as handle:
         handle.write(text)
 
 
@@ -1210,10 +1211,10 @@ def _prepare_results(out: Path, personas: Sequence[Persona]) -> list[Path]:
             f"{taken[0]} already exists; choose another results folder with --out, "
             "or move the old results away"
         )
-    out.mkdir(parents=True, exist_ok=True)
+    out.mkdir(FOLDER_MODE, parents=True, exist_ok=True)
     folders = [out / persona.id for persona in personas]
     for folder in folders:
-        folder.mkdir()
+        folder.mkdir(FOLDER_MODE)
     return folders
 
 
