@@ -432,6 +432,31 @@ def test_a_labelled_network_of_another_name_is_left_alone_and_named(
     assert not any("removing" in line for line in said), said
 
 
+def test_a_run_only_the_proxy_still_holds_is_revoked_by_the_sweep(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ruling R75: a run whose containers, network and folder are gone, but which the proxy
+    still holds an allow list or a lookup pool for, is gone, so the sweep revokes it there."""
+    h.proxy.allow("10.89.0.77", THIRD, ["api.example.com"])
+    with caplog.at_level("WARNING", logger="footfall.runner.service"):
+        assert restarted(h).sweep() == [THIRD]
+    assert ("revoke_run", THIRD) in h.proxy.calls
+    assert h.proxy.allowed == {}
+    assert any(THIRD in record.getMessage() for record in caplog.records)
+
+
+def test_a_sweep_that_cannot_ask_the_proxy_says_so_and_goes_on(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The proxy may start after the runner, so a sweep that cannot ask it which runs it holds
+    says so, and the runner serves: an allow list left there only refuses a new run the same
+    address, and the proxy's own revoke of that run lets the pool go."""
+    h.proxy.failures["runs"] = ConnectionRefusedError(61, "Connection refused")
+    with caplog.at_level("WARNING", logger="footfall.runner.service"):
+        assert restarted(h).sweep() == []
+    assert any("proxy" in record.getMessage() for record in caplog.records)
+
+
 def test_a_sweep_with_nothing_left_does_nothing(h: Harness) -> None:
     assert restarted(h).sweep() == []
     listing = ("labelled", "labelled_networks")

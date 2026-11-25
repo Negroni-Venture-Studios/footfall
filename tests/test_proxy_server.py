@@ -1394,6 +1394,43 @@ async def test_a_revoked_runs_lookup_pool_and_budget_are_released(lookups: Looku
         assert lookup_threads(OTHER_RUN) == 1  # the other run's pool stays until it is revoked
 
 
+async def test_a_runs_lookup_pool_goes_once_its_last_address_is_revoked(lookups: Lookups) -> None:
+    """Ruling R75: a run whose last allow list is revoked, with no listener left, is gone, so
+    its idle lookup pool is shut down then, not only when the whole run is revoked."""
+    async with running(real_resolve=True) as live, second_listener(live) as port:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.policy.allow(SECOND, RUN, [ALLOWED])
+        async with connecting(CLIENT, live.port, [f"{ALLOWED}:443"]) as [(reader, _)]:
+            assert (await head(reader)).startswith(b"HTTP/1.1 200")
+        assert lookup_threads(RUN) == 1
+        assert live.proxy.runs() == [RUN]
+        assert live.policy.revoke(CLIENT) == RUN
+        assert not live.proxy.release_if_gone(RUN)  # another address still holds a list
+        assert lookup_threads(RUN) == 1
+        assert live.policy.revoke(SECOND) == RUN
+        assert live.policy.revoke(SECOND) is None  # already revoked
+        assert live.proxy.release_if_gone(RUN)
+        async with asyncio.timeout(TIMEOUT):
+            while lookup_threads(RUN):
+                await asyncio.sleep(0.01)
+        assert live.proxy.runs() == []
+        del port
+
+
+async def test_a_lookup_for_a_run_the_proxy_no_longer_serves_makes_no_pool(
+    lookups: Lookups,
+) -> None:
+    """A request decided before its run was revoked, whose lookup comes after, is refused
+    rather than given a new pool that nothing would ever shut down."""
+    from footfall.proxy.server import _Refusal
+
+    async with running(real_resolve=True) as live:
+        with pytest.raises(_Refusal, match="no longer"):
+            live.proxy._lookup(CLIENT, RUN, ALLOWED, 443)
+        assert live.proxy.runs() == []
+        assert lookup_threads(RUN) == 0
+
+
 async def test_a_lookup_queued_after_its_run_ended_does_not_resolve() -> None:
     # A revoke can shut a run's pool down between a lookup being made and its being queued.
     pool = ThreadPoolExecutor(1)

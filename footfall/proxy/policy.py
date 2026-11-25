@@ -100,11 +100,18 @@ class Policy:
                 raise ValueError(f"{key} already has an allow list for another run")
             self._lists[key] = (run_id, names)
 
-    def revoke(self, ip: str) -> None:
-        """Take away an address's allow list. Revoking one that has none is harmless."""
+    def revoke(self, ip: str) -> str | None:
+        """Take away an address's allow list, and return the run it belonged to. Revoking one
+        that has none is harmless, and returns None."""
         key = canonical_address(ip)
         with self._lock:
-            self._lists.pop(key, None)
+            held = self._lists.pop(key, None)
+        return None if held is None else held[0]
+
+    def runs(self) -> set[str]:
+        """The runs that hold an allow list."""
+        with self._lock:
+            return {owner for owner, _ in self._lists.values()}
 
     def revoke_run(self, run_id: str) -> list[str]:
         """Take away every allow list that belongs to a run, and return their addresses."""

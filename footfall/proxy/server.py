@@ -45,14 +45,16 @@ could not be reached. Past a budget nothing is dropped: lines are counted by hos
 and written as one summary line for each, with its count and run, when the window closes, or
 at once when the client's allow list is revoked.
 
-Each run's names are looked up on a small pool of threads of its own, made at the run's first
-lookup and shut down when the run is revoked, never on a pool that runs share. A lookup's thread
-cannot be stopped, and one whose name server is slow or silent holds it for as long as the
-system resolver waits, so a run that allows such a name can hold up only its own lookups. A
-client's lookups in flight are bounded, and so are its run's. A lookup counts from before it is
-queued until its thread returns, even when the request that asked for it has given up waiting,
-and a request over a bound is refused with 503. Requests from one client for a name already
-being looked up join that lookup, so that a burst of connections to one host costs one thread.
+Each run's names are looked up on a small pool of threads of its own, never on a pool that
+runs share. It is made at the run's first lookup, and shut down when the run is revoked or once
+the run holds neither an allow list nor a listener; a run the proxy no longer serves is given
+none. A lookup's thread cannot be stopped, and one whose name server is slow or silent holds it
+for as long as the system resolver waits, so a run that allows such a name can hold up only its
+own lookups. A client's lookups in flight are bounded, and so are its run's. A lookup counts
+from before it is queued until its thread returns, even when the request that asked for it has
+given up waiting, and a request over a bound is refused with 503. Requests from one client for
+a name already being looked up join that lookup, so that a burst of connections to one host
+costs one thread.
 """
 
 import asyncio
@@ -848,6 +850,26 @@ class ProxyServer:
                 server.close()  # frees the address at once; connections are left to their run
         return len(addresses)
 
+    def runs(self) -> list[str]:
+        """Every run the proxy holds something for: an allow list, a listener or a lookup pool."""
+        listening = {owner for owner, _ in self._listeners.values()}
+        return sorted(self._policy.runs() | listening | set(self._lookup_pools))
+
+    def release_if_gone(self, run_id: str) -> bool:
+        """Shut a run's lookup pool down if the run holds neither an allow list nor a
+        listener, as once its last address is revoked; whether it did."""
+        if self._serves(run_id):
+            return False
+        pool = self._lookup_pools.pop(run_id, None)
+        if pool is None:
+            return False
+        pool.shutdown(wait=False, cancel_futures=True)
+        return True
+
+    def _serves(self, run_id: str) -> bool:
+        listening = any(owner == run_id for owner, _ in self._listeners.values())
+        return listening or run_id in self._policy.runs()
+
     async def close(self) -> None:
         """Stop listening everywhere, and write what the refusal log holds, as the proxy shuts
         down."""
@@ -1005,6 +1027,9 @@ class ProxyServer:
         lookup = self._lookups.get(key)
         if lookup is not None:
             return lookup
+        if self._resolve is None and run_id not in self._lookup_pools and not self._serves(run_id):
+            # Decided before its run was revoked: a pool made now would never be shut down.
+            raise _Refusal(403, f"run {run_id} is no longer served", routine=True)
         if self._lookups_by_client.get((run_id, client), 0) >= self._max_lookups_per_client:
             raise _Refusal(503, "too many name lookups in flight for this client", routine=True)
         if self._lookups_by_run.get(run_id, 0) >= self._max_lookups_per_run:

@@ -212,6 +212,7 @@ class FakeProxy:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self.allowed: dict[str, tuple[str, tuple[str, ...]]] = {}
+        self.listening: dict[str, str] = {}  # address -> run
         self.failures: dict[str, BaseException] = {}
 
     def allow(self, ip: str, run_id: str, hosts: Any) -> None:
@@ -235,6 +236,8 @@ class FakeProxy:
             raise self.failures["revoke_run"]
         for ip in [ip for ip, (owner, _) in self.allowed.items() if owner == run_id]:
             del self.allowed[ip]
+        for ip in [ip for ip, owner in self.listening.items() if owner == run_id]:
+            del self.listening[ip]
 
     def reached(self, run_id: str) -> list[str]:
         return []
@@ -243,6 +246,14 @@ class FakeProxy:
         self.calls.append(("listen", ip, run_id))
         if "listen" in self.failures:
             raise self.failures["listen"]
+        self.listening[ip] = run_id
+
+    def runs(self) -> list[str]:
+        self.calls.append(("runs",))
+        if "runs" in self.failures:
+            raise self.failures["runs"]
+        held = {owner for owner, _ in self.allowed.values()} | set(self.listening.values())
+        return sorted(held)
 
 
 @dataclass

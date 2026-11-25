@@ -124,6 +124,7 @@ def test_the_client_is_a_proxy_control() -> None:
     control: ProxyControl = ProxyControlClient(Path("/run/footfall/proxy.sock"))
     assert callable(control.revoke_run)
     assert callable(control.listen)
+    assert callable(control.runs)
 
 
 async def test_allow_revoke_and_reached_round_trip(live: Live) -> None:
@@ -187,6 +188,19 @@ async def test_listen_on_another_runs_address_is_refused(live: Live) -> None:
         await call(live.client.listen, "127.0.0.1", OTHER)
     await call(live.client.revoke_run, OTHER)  # the other run holds nothing to close
     assert await connects(live.port)
+
+
+async def test_runs_names_every_run_the_proxy_holds(live: Live) -> None:
+    """Ruling R75: the runner's sweep asks which runs the proxy holds anything for, so that it
+    can revoke those it finds gone."""
+    assert await call(live.client.runs) == []
+    await call(live.client.allow, APP, RUN, ["example.com"])
+    await call(live.client.listen, "127.0.0.1", OTHER)
+    assert await call(live.client.runs) == sorted([RUN, OTHER])
+    await call(live.client.revoke, APP)
+    assert await call(live.client.runs) == [OTHER]
+    await call(live.client.revoke_run, OTHER)
+    assert await call(live.client.runs) == []
 
 
 async def test_revoke_run_closes_the_runs_listeners(live: Live) -> None:

@@ -16,13 +16,17 @@ on a platform that cannot say, before it reads the request.
     {"op": "revoke_run", "run_id": "r_..."}
     {"op": "reached", "run_id": "r_..."}
     {"op": "listen", "ip": "10.89.0.2", "run_id": "r_..."}
+    {"op": "runs"}
     {"ok": true, "result": ...}
     {"ok": false, "error": "..."}
 
 `listen` names the proxy's own address on a run's network, once the runner has connected the
 proxy to it, and the proxy accepts connections there on its port until `revoke_run` closes
 every listener the run holds, after revoking its allow lists. `revoke` and `revoke_run` also
-close every connection from the addresses they revoke, open tunnels included.
+close every connection from the addresses they revoke, open tunnels included, and a run left
+with neither an allow list nor a listener has its lookup pool shut down. `runs` names every run
+the proxy holds anything for, so that a runner starting afresh can revoke the runs it finds
+gone.
 
 `ProxyControlClient` is the runner's side. It is synchronous, as the runner's `ProxyControl` is.
 It raises OSError when the proxy cannot be reached or does not answer properly, and
@@ -88,6 +92,7 @@ _OPS: Final[Mapping[str, Mapping[str, tuple[Callable[[object], bool], str]]]] = 
     "revoke_run": {"run_id": _TEXT},
     "reached": {"run_id": _TEXT},
     "listen": {"ip": _TEXT, "run_id": _TEXT},
+    "runs": {},
 }
 
 
@@ -137,9 +142,17 @@ async def _call(proxy: ProxyServer, op: str, fields: dict[str, Any]) -> object:
             )
             return None
         case "revoke":
-            policy.revoke(fields["ip"])
+            run_id = policy.revoke(fields["ip"])
             dropped = proxy.drop(fields["ip"])
-            logger.info("revoked %s and closed %d connections", fields["ip"], dropped)
+            released = run_id is not None and proxy.release_if_gone(run_id)
+            logger.info(
+                "revoked %s and closed %d connections%s",
+                fields["ip"],
+                dropped,
+                f"; run {run_id} holds nothing more, and its lookup pool is shut"
+                if released
+                else "",
+            )
             return None
         case "revoke_run":
             revoked = policy.revoke_run(fields["run_id"])
@@ -156,6 +169,8 @@ async def _call(proxy: ProxyServer, op: str, fields: dict[str, Any]) -> object:
             await proxy.listen(fields["ip"], fields["run_id"])
             logger.info("listening on %s for run %s", fields["ip"], fields["run_id"])
             return None
+        case "runs":
+            return proxy.runs()
         case _:
             return policy.reached(fields["run_id"])
 
@@ -349,4 +364,10 @@ class ProxyControlClient:
         result = self._call("reached", run_id=run_id)
         if not isinstance(result, list) or not all(isinstance(host, str) for host in result):
             raise ConnectionError("the proxy sent a result that is not a list of host names")
+        return result
+
+    def runs(self) -> list[str]:
+        result = self._call("runs")
+        if not isinstance(result, list) or not all(isinstance(run, str) for run in result):
+            raise ConnectionError("the proxy sent a result that is not a list of run ids")
         return result

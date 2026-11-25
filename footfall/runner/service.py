@@ -171,7 +171,8 @@ class ProxyControl(Protocol):
     ValueError, an address another run still holds. `revoke_run` revokes every list held for a
     run. `listen` has the proxy listen at its own address on a run's network, for that run,
     until `revoke_run`; it refuses, with a ValueError, an address another run listens on or one
-    it cannot listen on. Implementations raise OSError when the proxy cannot be reached.
+    it cannot listen on. `runs` names every run the proxy holds anything for. Implementations
+    raise OSError when the proxy cannot be reached.
     """
 
     def allow(self, ip: str, run_id: str, hosts: Sequence[str]) -> None: ...
@@ -179,6 +180,7 @@ class ProxyControl(Protocol):
     def revoke_run(self, run_id: str) -> None: ...
     def reached(self, run_id: str) -> list[str]: ...
     def listen(self, ip: str, run_id: str) -> None: ...
+    def runs(self) -> list[str]: ...
 
 
 # Gives an entry to the containers' user: the entry is `name` in the open folder, and the path
@@ -1141,6 +1143,11 @@ class RunnerService:
         know, and logged. A removal that fails keeps the run on record for the watch to try
         again. Failing to list what Docker holds is raised: the runner must not serve without
         knowing. A folder in the runs folder that is not a run's is named and left alone.
+
+        Last, every run the egress proxy still holds an allow list, a listener or a lookup pool
+        for, and that nothing else showed, is gone, so it is revoked there and recorded as
+        swept. The proxy may start after the runner, so a proxy that cannot be asked is logged,
+        and the runner serves: a list left there only refuses a new run its address.
         """
         found: dict[str, list[str]] = {}
         for container, value in self._engine.labelled(RUN_LABEL):
@@ -1180,7 +1187,29 @@ class RunnerService:
             run = _Run(value, "", self._runs_root / value, ())
             with run.lock:
                 self._teardown_locked(run)
-        return sorted(value for value in found if _RUN_ID.fullmatch(value))
+        swept = {value for value in found if _RUN_ID.fullmatch(value)}
+        return sorted(swept | self._sweep_proxy(swept))
+
+    def _sweep_proxy(self, swept: set[str]) -> set[str]:
+        """Revoke, in the proxy, every run it holds that the sweep found nothing else of;
+        return their ids."""
+        try:
+            held = self._proxy.runs()
+        except (OSError, ValueError) as error:
+            logger.warning(
+                "could not ask the egress proxy which runs it holds, so any it holds stay "
+                "until it is restarted: %s",
+                error,
+            )
+            return set()
+        gone = {value for value in held if _RUN_ID.fullmatch(value) and value not in swept}
+        for value in sorted(gone):
+            logger.warning("revoking run %s, which only the egress proxy still held", value)
+            with self._lock:
+                self._remember_stop_locked(value, SWEPT_REASON)
+            revoke = functools.partial(self._proxy.revoke_run, value)
+            self._attempt([], f"revoke the allow lists of run {value}", revoke)
+        return gone
 
     def watch(self, stop: threading.Event) -> None:
         """Call `check_runs` every `disk_interval` seconds until `stop` is set."""
