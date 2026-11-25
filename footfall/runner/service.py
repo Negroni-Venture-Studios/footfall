@@ -712,15 +712,18 @@ class RunnerService:
                 failure: RunnerError | None = None
                 try:
                     address = self._launch_locked(run, name, config, hosts)
-                except BaseException as error:
+                except Exception as error:  # noqa: BLE001  # any kind is replaced, none is lost
+                    failure = _without(error, path, "[the browsers' path]")
+                except BaseException:
                     if not run.closed:
                         self._forget_locked(run, name)
-                    if not isinstance(error, Exception):
-                        raise
-                    failure = _without(error, path, "[the browsers' path]")
+                    raise
                 if failure is not None:
-                    # Raised here, apart from the error it replaces, whose message or chain may
-                    # name the path, so that no traceback of this one leads back to it.
+                    # Cleaned up and raised here, apart from the error, whose message or chain
+                    # may name the path, so that neither the traceback of a clean-up that fails
+                    # too, which is logged, nor this error leads back to it.
+                    if not run.closed:
+                        self._forget_locked(run, name)
                     raise failure
                 run.browsers = True
                 return f"ws://{address}:{BROWSERS_PORT}{path}"

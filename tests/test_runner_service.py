@@ -1881,3 +1881,37 @@ def test_an_interrupt_while_starting_the_browsers_is_not_turned_into_an_error(
     monkeypatch.setattr(h.engine, "start", interrupted)
     with pytest.raises(KeyboardInterrupt):
         h.service.start_browsers(RUN, [])
+
+
+def test_a_failed_clean_up_after_the_browsers_fail_never_logs_their_path(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The clean-up runs apart from the launch's error, so a clean-up that fails too, and is
+    logged with its traceback, cannot carry the launch's error, path and all, with it."""
+    prepare(h)
+    real_start = h.engine.start
+
+    def start(container: str) -> None:
+        config = h.engine.configs.get(container) or {}
+        if config.get("Labels", {}).get("footfall.role") != "browsers":
+            real_start(container)
+            return
+        raise EngineError(f"OCI runtime create failed: {config['Cmd'][-1]}")
+
+    def remove(container: str) -> None:
+        raise EngineError("remove failed")
+
+    monkeypatch.setattr(h.engine, "start", start)
+    monkeypatch.setattr(h.engine, "remove", remove)
+    with caplog.at_level("DEBUG", logger="footfall"), pytest.raises(RunnerError) as caught:
+        h.service.start_browsers(RUN, [])
+    path = h.engine.configs[f"footfall-{RUN}-browsers-browsers"]["Cmd"][-1]
+    logged = "".join(
+        record.getMessage() + "".join(traceback.format_exception(*record.exc_info))
+        if record.exc_info
+        else record.getMessage()
+        for record in caplog.records
+    )
+    assert "remove failed" in logged  # the clean-up's failure was logged
+    assert path not in logged
+    assert path not in str(caught.value)
