@@ -897,8 +897,10 @@ class RunnerService:
         seed: str | None,
         egress: Sequence[str],
         env: Mapping[str, str],
-    ) -> None:
-        """Copy the workspace into the run, make its network, then run install and seed.
+    ) -> str:
+        """Copy the workspace into the run, make its network, then run install and seed, and
+        return the runtime its containers start under, runsc or runc, so that the caller can
+        say when that is runc, without gVisor.
 
         On any failure everything made for the run is removed again, and RunnerError carries
         the failing step's last output.
@@ -938,6 +940,7 @@ class RunnerService:
                     # traceback that leads back to the error, and so to the password.
                     self._teardown_locked(run)
                     raise failure
+            return self._runtime
 
     def start_app(
         self, run_id: str, copy: str, start: str, port: int, egress: Sequence[str]

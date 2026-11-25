@@ -72,8 +72,10 @@ class RunnerClient:
         seed: str | None,
         egress: Sequence[str],
         env: Mapping[str, str],
-    ) -> None:
-        await self._call(
+    ) -> str | None:
+        """Prepare a run, and return the runtime its containers start under, as the runner
+        says, or None from a runner that does not say."""
+        result = await self._call(
             "prepare",
             run_id=run_id,
             workspace=str(workspace),
@@ -83,6 +85,7 @@ class RunnerClient:
             egress=list(egress),
             env=dict(env),
         )
+        return result if isinstance(result, str) else None
 
     async def start_app(
         self, run_id: str, copy: str, start: str, port: int, egress: Sequence[str]

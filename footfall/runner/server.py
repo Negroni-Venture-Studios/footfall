@@ -130,7 +130,7 @@ def _call(service: RunnerService, op: str, fields: dict[str, Any]) -> object:
     run_id = fields["run_id"]
     match op:
         case "prepare":
-            service.prepare(
+            return service.prepare(
                 run_id,
                 Path(fields["workspace"]),
                 fields["runtime"],
@@ -139,7 +139,6 @@ def _call(service: RunnerService, op: str, fields: dict[str, Any]) -> object:
                 fields["egress"],
                 fields["env"],
             )
-            return None
         case "start_app":
             return service.start_app(
                 run_id, fields["copy"], fields["start"], fields["port"], fields["egress"]

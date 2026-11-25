@@ -78,7 +78,7 @@ async def exchange(path: Path, data: bytes) -> dict[str, Any]:
 async def test_round_trip_prepare(live: Live, mask_output: MaskOutput) -> None:
     h, client = live.harness, live.client
     workspace = h.workspace()
-    await client.prepare(
+    runtime = await client.prepare(
         RUN,
         workspace,
         "python3.13",
@@ -87,6 +87,7 @@ async def test_round_trip_prepare(live: Live, mask_output: MaskOutput) -> None:
         ["api.example.com"],
         {"FOOTFALL_USERNAME": "tester", "FOOTFALL_PASSWORD": PASSWORD},
     )
+    assert runtime == "runsc"  # what the runner starts containers under
     assert h.engine.names("create") == [
         f"footfall-{RUN}-install-prepare",
         f"footfall-{RUN}-seed-prepare",

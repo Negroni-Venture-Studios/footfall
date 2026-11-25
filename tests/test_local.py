@@ -32,6 +32,7 @@ from footfall import local
 from footfall.actions import MaskError
 from footfall.browsers import BrowserConnectError, open_context
 from footfall.local import (
+    RUNC_WARNING,
     LocalRunError,
     NotReadyError,
     OutputError,
@@ -115,7 +116,7 @@ class FakeRunner:
         seed: str | None,
         egress: Sequence[str],
         env: Mapping[str, str],
-    ) -> None:
+    ) -> str | None:
         self.calls.append(("prepare", run_id, workspace, runtime, install, seed, tuple(egress)))
         self.envs.append(dict(env))
         self.workspace_files = sorted(
@@ -126,6 +127,7 @@ class FakeRunner:
             if p.is_symlink() or p.is_file()
         )
         self._maybe_fail("prepare")
+        return "runsc"
 
     async def start_app(
         self, run_id: str, copy: str, start: str, port: int, egress: Sequence[str]
@@ -2740,3 +2742,30 @@ def test_a_nested_submodule_refuses_links_to_every_superprojects_config(tmp_path
     info = (folder / "notes.cfg").lstat()
     assert local._git_files(folder).linked.holds(info)
     assert local._known_linked(folder).holds(info)
+
+
+@pytest.mark.parametrize("own_setting", ["", "runc"])
+async def test_a_runner_on_runc_has_footfall_test_say_so(
+    tmp_path: Path,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    own_setting: str,
+) -> None:
+    """Audit N-15: the runner, not this process's environment, knows whether containers start
+    without gVisor, so footfall test warns when the runner says so, and only once."""
+    monkeypatch.setenv("FOOTFALL_RUNTIME", own_setting)
+    folder = two_pages(tmp_path, LOGIN_MANIFEST)
+
+    class OnRunc(FakeRunner):
+        async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> str:
+            return "runc"
+
+        async def start_app(self, *arguments: Any) -> str:
+            raise RunnerError("start failed for this test")
+
+    with pytest.raises(RunnerError):
+        await run_folder(folder, OnRunc(lambda copy: "127.0.0.1:9"), connect[0], tmp_path)
+    err = capsys.readouterr().err
+    # With FOOTFALL_RUNTIME=runc here too, the command has already said it, at its start.
+    assert err.count(RUNC_WARNING) == (0 if own_setting == "runc" else 1)

@@ -118,8 +118,15 @@ _NOT_A_FOLDER: Final = frozenset({errno.ELOOP, errno.ENOTDIR, errno.EMLINK})
 type ConnectBrowser = Callable[[str, str], Awaitable[Browser]]
 
 
+RUNC_WARNING: Final = (
+    "footfall: warning: FOOTFALL_RUNTIME=runc starts containers without gVisor, so code "
+    "under test runs on the host's own kernel. Use it for development only, never on a server."
+)
+
+
 class Runner(Protocol):
-    """What a run needs from the runner; `RunnerClient` is the real one."""
+    """What a run needs from the runner; `RunnerClient` is the real one. `prepare` returns the
+    runtime the run's containers start under, as the runner says, or None."""
 
     async def prepare(
         self,
@@ -130,7 +137,7 @@ class Runner(Protocol):
         seed: str | None,
         egress: Sequence[str],
         env: Mapping[str, str],
-    ) -> None: ...
+    ) -> str | None: ...
 
     async def start_app(
         self, run_id: str, copy: str, start: str, port: int, egress: Sequence[str]
@@ -1450,7 +1457,13 @@ async def _go(
         env = {"FOOTFALL_USERNAME": run.account[0], "FOOTFALL_PASSWORD": run.account[1]}
     app = manifest.app
     LOG.info("preparing run %s", run.run_id)
-    await runner.prepare(run.run_id, workspace, app.runtime, app.install, app.seed, app.egress, env)
+    runtime = await runner.prepare(
+        run.run_id, workspace, app.runtime, app.install, app.seed, app.egress, env
+    )
+    # The runner knows whether its containers start without gVisor, whatever this process's
+    # own setting says; the command line has already warned when that says runc too.
+    if runtime == "runc" and os.environ.get("FOOTFALL_RUNTIME") != "runc":
+        print(RUNC_WARNING, file=sys.stderr)
     addresses: dict[str, str] = {}
     for persona in personas:
         addresses[persona.id] = await runner.start_app(

@@ -151,6 +151,12 @@ def test_prepare_runs_install_then_seed_with_their_allow_lists(h: Harness) -> No
     assert (prepared / "lib" / "util.py").read_text() == "X = 1\n"
 
 
+def test_prepare_says_which_runtime_the_containers_start_under(tmp_path: Path) -> None:
+    for runtime in ("runsc", "runc"):
+        h = make_harness(tmp_path / runtime, runtime=runtime)
+        assert h.service.prepare(RUN, h.workspace(), "python3.13", None, None, [], {}) == runtime
+
+
 def test_prepare_without_install_or_seed(h: Harness) -> None:
     h.workspace(files={"serve.py": "print('hi')\n", "lib/util.py": "X = 1\n"})
     prepare(h)

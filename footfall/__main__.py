@@ -48,7 +48,7 @@ from typing import Any, Final
 
 from footfall.actions import MaskError, no_legacy_commands
 from footfall.browsers import BrowserConnectError
-from footfall.local import PROXY_PORT, LocalRunError, test_folder
+from footfall.local import PROXY_PORT, RUNC_WARNING, LocalRunError, test_folder
 from footfall.manifest import ManifestError
 from footfall.personas import PersonaError
 from footfall.proxy.control import ProxyControlClient, serve_control
@@ -64,10 +64,6 @@ from footfall.tester.report import clean_text, strip_invisible
 
 __all__ = ["ALL_FILES_WARNING", "RUNC_WARNING", "Settings", "main", "run_proxy", "run_runner"]
 
-RUNC_WARNING: Final = (
-    "footfall: warning: FOOTFALL_RUNTIME=runc starts containers without gVisor, so code "
-    "under test runs on the host's own kernel. Use it for development only, never on a server."
-)
 ALL_FILES_WARNING: Final = (
     "footfall test: warning: --all-files copies every file in the folder into the app's "
     "containers, including files git would ignore, such as a .env with real keys in it."
