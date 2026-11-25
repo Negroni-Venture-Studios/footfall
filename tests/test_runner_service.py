@@ -1769,38 +1769,55 @@ def test_a_measure_counts_what_it_skips(tmp_path: Path, monkeypatch: pytest.Monk
     assert usage < 400_000
 
 
-def unsteady(h: Harness, monkeypatch: pytest.MonkeyPatch, skips: list[int]) -> None:
-    """Make each check of the run measure a little, skipping as `skips` says, in turn."""
+def unsteady(monkeypatch: pytest.MonkeyPatch, skips: list[int], then: int = 0) -> list[int]:
+    """Make each measure measure a little and skip as `skips` says, one value a measure, and
+    `then` once they run out. Returns the list, which empties as measures are taken."""
     left = list(skips)
 
     def measure(top: Path, max_depth: int) -> tuple[int, int]:
-        return PAGE, left.pop(0) if left else 0
+        return PAGE, left.pop(0) if left else then
 
     monkeypatch.setattr("footfall.runner.service._measure", measure)
+    return left
 
 
 def test_a_run_whose_measures_keep_skipping_is_stopped(
     h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A run that keeps renaming or swapping its files could hide them from every measure,
-    so three measures in a row that skip something stop it."""
+    so three checks in a row whose measure and re-measure both skip stop it."""
     prepare(h)
     h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
-    unsteady(h, monkeypatch, [1, 3, 1])
+    unsteady(monkeypatch, [1, 1, 3, 2, 1, 1])
     h.service.check_runs()
     h.service.check_runs()
     assert h.service.status(RUN) is None
     h.service.check_runs()
     assert h.service.status(RUN) == UNSTEADY_REASON
     assert UNSTEADY_REASON.startswith(MEASURE_REASON)
+    assert "keep its scratch files in /tmp" in UNSTEADY_REASON
     assert_nothing_left(h)
+
+
+def test_a_skip_that_a_re_measure_does_not_repeat_is_not_counted(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dev server that replaces a cache folder as it starts makes one measure skip; the
+    re-measure, taken at once, finds the folder settled, and the run goes on."""
+    prepare(h)
+    left = unsteady(monkeypatch, [1, 0, 1, 0, 1, 0, 1, 0])
+    for _ in range(4):
+        h.service.check_runs()
+    assert left == []  # each check measured twice
+    assert h.service.status(RUN) is None
+    h.service.start_browsers(RUN, [])
 
 
 def test_a_steady_measure_between_unsteady_ones_starts_the_count_again(
     h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prepare(h)
-    unsteady(h, monkeypatch, [1, 1, 0, 1, 1])
+    unsteady(monkeypatch, [1, 1, 1, 1, 0, 1, 1, 1, 1])
     for _ in range(5):
         h.service.check_runs()
     assert h.service.status(RUN) is None
@@ -1811,7 +1828,7 @@ def test_the_budget_checks_count_towards_the_unsteady_measures(
     h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prepare(h)
-    unsteady(h, monkeypatch, [1, 1, 1, 1, 1, 1])
+    unsteady(monkeypatch, [], then=1)  # a continuous renamer: every measure skips
     h.service.check_runs()
     h.service.check_runs()
     with pytest.raises(RunnerError, match="kept changing"):

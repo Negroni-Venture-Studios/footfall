@@ -52,9 +52,13 @@ REGISTRIES: Final = ("pypi.org", "files.pythonhosted.org", "registry.npmjs.org")
 DISK_REASON: Final = "disk budget exceeded"
 MEASURE_REASON: Final = "disk usage could not be measured"
 # A run whose files keep vanishing or changing under the measure could keep part of its size
-# out of every measure, so this many measures in a row that skip something stop it.
+# out of every measure, so this many checks in a row whose measure skipped something, and
+# whose re-measure skipped something too, stop it.
 UNSTEADY_MEASURES: Final = 3
-UNSTEADY_REASON: Final = f"{MEASURE_REASON}: the run's files kept changing while they were measured"
+UNSTEADY_REASON: Final = (
+    f"{MEASURE_REASON}: the run's files kept changing while they were measured; "
+    "an app should keep its scratch files in /tmp"
+)
 NEVER_PREPARED: Final = "stopped before it was prepared"
 MAX_DEPTH: Final = 100  # folders below a workspace or prepared app
 # How many stopped run ids the runner remembers, to refuse each if it is prepared again, and
@@ -523,6 +527,16 @@ def _measure(top: Path, max_depth: int) -> tuple[int, int]:
     return total, tally.skipped
 
 
+def _measure_settled(top: Path, max_depth: int) -> tuple[int, int]:
+    """A measure, taken again at once if it skipped something. A file or folder replaced
+    once, as a dev server replaces a cache folder while it starts, is found by the second;
+    a run that keeps changing its files makes both skip."""
+    usage, skipped = _measure(top, max_depth)
+    if skipped:
+        usage, skipped = _measure(top, max_depth)
+    return usage, skipped
+
+
 def _disk_usage(top: Path, max_depth: int = MAX_DEPTH) -> int:
     """Bytes that copying `top` would write, as `_measure` counts them."""
     return _measure(top, max_depth)[0]
@@ -775,7 +789,7 @@ class RunnerService:
                             self._teardown_locked(run)
                 continue
             try:
-                usage, skipped = _measure(run.directory, _RUN_DEPTH)
+                usage, skipped = _measure_settled(run.directory, _RUN_DEPTH)
                 if usage > self._disk_budget:
                     reason = DISK_REASON
                 elif self._unsteady(run, skipped):
@@ -887,7 +901,7 @@ class RunnerService:
         """Return the run's disk use, after stopping the run and raising if that use, plus a
         copy of `incoming`, is over budget or cannot be measured."""
         try:
-            usage, skipped = _measure(run.directory, _RUN_DEPTH)
+            usage, skipped = _measure_settled(run.directory, _RUN_DEPTH)
             extra = 0 if incoming is None else _disk_usage(incoming)
         except _TooDeep as deep:
             self._stop_for_locked(run, DISK_REASON)
@@ -904,8 +918,8 @@ class RunnerService:
         return usage
 
     def _unsteady(self, run: _Run, skipped: int) -> bool:
-        """Count a measure of the run that skipped something, and say whether the last
-        `UNSTEADY_MEASURES` all did; a measure that skipped nothing starts the count again."""
+        """Count a settled measure of the run that still skipped something, and say whether
+        the last `UNSTEADY_MEASURES` all did; one that skipped nothing starts the count again."""
         with self._lock:
             run.unsteady = run.unsteady + 1 if skipped else 0
             return run.unsteady >= UNSTEADY_MEASURES
