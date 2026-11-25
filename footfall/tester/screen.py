@@ -24,6 +24,7 @@ from footfall.tester.report import ELLIPSIS, PAGE_CAP, clean_text
 
 __all__ = [
     "MAX_ELEMENTS",
+    "MAX_SCREENSHOT",
     "CaptureError",
     "Element",
     "Kind",
@@ -40,6 +41,12 @@ TEXT_CAP: Final = 120
 TITLE_CAP: Final = 120
 SNAPSHOT_TIMEOUT: Final = 10.0
 JPEG_QUALITY: Final = 70
+# The most bytes a screenshot may have. The largest viewport of any device is the laptops',
+# 1280 by 720 CSS pixels, and random noise, the worst case for JPEG, filling it came to
+# 485,567 bytes at this quality in Chromium. 2 MiB is more than four times that, over two
+# bytes a pixel, so no honest screenshot comes near it, whatever the browser's encoder.
+MAX_SCREENSHOT: Final = 2 * 1024 * 1024
+_JPEG_START: Final = b"\xff\xd8\xff"  # the start of image marker, and the next one's first byte
 MIN_TARGET: Final = 44
 BIG_SHARE: Final = 0.4  # a control this much of the screen needs no name to be found
 LISTED_IN_WARNING: Final = 10
@@ -238,7 +245,8 @@ async def capture(
     """Take the screenshot and the list of what is on screen.
 
     `evaluate` replaces the call that runs `snapshot.js`, so a test can stand in for a page
-    that lies. Nothing the page returns is believed until it has been checked here.
+    that lies. Nothing the page returns is believed until it has been checked here, the
+    screenshot included, which must be a JPEG of at most `MAX_SCREENSHOT` bytes.
 
     After a `CaptureError` for a timeout the caller must close the browser context: the
     page's renderer may be stuck in a loop and will not answer anything else.
@@ -312,6 +320,7 @@ async def capture(
     except PlaywrightError as error:
         LOG.debug("the screenshot could not be taken: %s", type(error).__name__)
         raise CaptureError(f"the screenshot could not be taken ({type(error).__name__})") from error
+    _check_screenshot(jpeg)
 
     return Screen(
         path=_path(page.url),
@@ -324,6 +333,21 @@ async def capture(
         jpeg=jpeg,
         notes=notes,
     )
+
+
+def _check_screenshot(jpeg: object) -> None:
+    """Refuse a screenshot that cannot be one the browser took of the screen: not bytes, not
+    a JPEG, or larger than `MAX_SCREENSHOT`. The bytes come from the browser container, which
+    content the app shows might take over, and they are saved and sent to the model."""
+    if not isinstance(jpeg, bytes):
+        raise CaptureError(f"the screenshot was not bytes ({type(jpeg).__name__})")
+    if len(jpeg) > MAX_SCREENSHOT:
+        raise CaptureError(
+            f"the screenshot was {len(jpeg):,} bytes, more than the {MAX_SCREENSHOT:,} a "
+            "screen can take"
+        )
+    if not jpeg.startswith(_JPEG_START):
+        raise CaptureError("the screenshot was not a JPEG")
 
 
 def quote(text: str, cap: int = TEXT_CAP) -> str:

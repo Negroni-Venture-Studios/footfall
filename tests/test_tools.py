@@ -931,6 +931,20 @@ async def test_tool_mistakes_are_errors(
     assert step.error == outcome.text
 
 
+async def test_a_screenshot_that_is_not_a_jpeg_is_never_saved(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+
+    async def lying(**options: Any) -> bytes:
+        return b"NOT-A-JPEG:" + bytes(700)
+
+    monkeypatch.setattr(s.page, "screenshot", lying)
+    with pytest.raises(CaptureError, match="not a JPEG"):
+        await s.executor.run("look", {})
+    assert sorted(p.name for p in s.shots.iterdir()) == ["01.jpg"]
+
+
 def test_touch_must_be_given() -> None:
     with pytest.raises(TypeError, match="touch"):
         Executor(None, None, None, None)  # type: ignore[arg-type,call-arg]

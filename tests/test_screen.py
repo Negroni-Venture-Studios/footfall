@@ -10,7 +10,7 @@ import struct
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from playwright.async_api import Browser, Page, Playwright, async_playwright
@@ -418,6 +418,45 @@ async def test_a_huge_hostile_return_value_is_handled_quickly(make_page: MakePag
     assert len(screen.title) == 120
     assert any("999 malformed entries" in n for n in screen.notes)
     assert any("9000 entries beyond" in n for n in screen.notes)
+
+
+class ShotPage:
+    """Stands in for a page whose screenshot is whatever the browser container chose to send."""
+
+    def __init__(self, answer: object) -> None:
+        self.answer = answer
+        self.viewport_size = PHONE
+        self.url = "http://127.0.0.1:8000/"
+
+    async def screenshot(self, **options: Any) -> object:
+        return self.answer
+
+
+JPEG_START = b"\xff\xd8\xff"
+
+
+@pytest.mark.parametrize(
+    ("answer", "message"),
+    [
+        (JPEG_START + bytes(screen_module.MAX_SCREENSHOT - 2), "2,097,153 bytes, more than"),
+        (b"NOT-A-JPEG:" + bytes(700), "not a JPEG"),
+        (bytearray(JPEG_START + bytes(10)), "not bytes"),
+        ("\xff\xd8\xff and then text", "not bytes"),
+    ],
+)
+async def test_a_screenshot_that_is_not_a_screens_jpeg_is_refused(
+    answer: object, message: str
+) -> None:
+    page = cast(Page, ShotPage(answer))
+    with pytest.raises(CaptureError, match=message):
+        await capture(page, evaluate=snapshot_of(good()))
+
+
+async def test_a_screenshot_as_large_as_the_cap_is_taken() -> None:
+    largest = JPEG_START + bytes(screen_module.MAX_SCREENSHOT - 3)
+    page = cast(Page, ShotPage(largest))
+    screen = await capture(page, evaluate=snapshot_of(good()))
+    assert screen.jpeg == largest
 
 
 async def test_large_on_screen_share_not_raw_size_exempts_an_unnamed_control(
