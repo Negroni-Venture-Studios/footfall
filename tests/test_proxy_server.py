@@ -1022,6 +1022,25 @@ async def test_idle_tunnel_is_closed() -> None:
             assert 0.3 <= time.monotonic() - started < 2
 
 
+async def test_a_half_closed_tunnel_still_ends_at_the_idle_timeout() -> None:
+    """One side has finished and the other has gone quiet: the tunnel must not wait forever."""
+    async with running(idle_timeout=0.3) as live:
+        live.policy.allow(CLIENT, RUN, [ALLOWED])
+        live.upstream.echo = False
+        live.upstream.half_close = True  # the server is done sending, but still reading
+        async with tunnel(live.port, f"{ALLOWED}:443") as t:
+            t.writer.write(real_client_hello(ALLOWED))
+            await t.writer.drain()
+            assert await read_to_end(t.reader) == SERVER_HELLO  # then the server's half-close
+            started = time.monotonic()
+            # The client says nothing more and never half-closes; only the idle timeout ends it.
+            await live.upstream.wait_for(1)
+            assert 0.3 <= time.monotonic() - started < 2
+            async with asyncio.timeout(TIMEOUT):
+                while live.proxy.connections:
+                    await asyncio.sleep(0.01)
+
+
 async def test_a_busy_tunnel_is_not_idle() -> None:
     async with running(idle_timeout=0.3) as live:
         live.policy.allow(CLIENT, RUN, [ALLOWED])
