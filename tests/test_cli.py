@@ -365,6 +365,18 @@ def short_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="ff-", dir="/tmp"))
 
 
+def a_group_no_new_file_gets(folder: Path) -> int:
+    """A group this process may give a file it owns, other than either group a new file in
+    `folder` would get on its own: the process's, or, on some systems, the folder's."""
+    defaults = {os.getegid(), folder.stat().st_gid}
+    if os.geteuid() == 0:
+        return next(group for group in range(10_011, 11_000) if group not in defaults)
+    others = sorted(set(os.getgroups()) - defaults)
+    if not others:
+        pytest.skip("this user is in no group but its own, so no other group can be given")
+    return others[0]
+
+
 async def test_the_runner_socket_is_for_the_runner_and_its_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -377,6 +389,11 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
 
     monkeypatch.setattr(cli, "RunnerService", recording)
     folder = short_dir()
+    # The runner gives its socket to its own group, which for a runner started as "0:10001"
+    # is the orchestrator's. Here that group is one no new file gets by default, so the test
+    # fails unless the socket is really given to it.
+    group = a_group_no_new_file_gets(folder)
+    monkeypatch.setattr(os, "getegid", lambda: group)
     try:
         settings = Settings.from_env(
             {
@@ -396,7 +413,7 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
             info = socket_path.lstat()
             assert stat.S_ISSOCK(info.st_mode)
             assert stat.S_IMODE(info.st_mode) == 0o660
-            assert info.st_gid == os.getegid()  # 10001 when compose runs it as "0:10001"
+            assert info.st_gid == group
             client = RunnerClient(socket_path)
             assert await client.status("r_" + "a" * 26) is None
 

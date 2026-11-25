@@ -1219,12 +1219,38 @@ def hostile_repository(folder: Path, marker: Path) -> None:
     (folder / "notes.txt").write_text("untracked\n")
 
 
+def test_a_hostile_repository_makes_git_run_its_command_without_footfalls_settings(
+    tmp_path: Path,
+) -> None:
+    """The positive control: without the settings Footfall gives git, listing the hostile
+    repository runs its command, so the test that Footfall's listing does not can fail."""
+    marker = tmp_path / "control-marker"
+    folder = tmp_path / "hostile"
+    hostile_repository(folder, marker)
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    subprocess.run(
+        [GIT, "ls-files", "-z", "--others", "--exclude-standard"],
+        cwd=folder,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert marker.exists()
+
+
 def test_a_repository_cannot_make_git_run_a_command(tmp_path: Path) -> None:
     marker = tmp_path / "marker"
     folder = tmp_path / "hostile"
     hostile_repository(folder, marker)
-    with contextlib.suppress(LocalRunError):
-        local._git_files(folder)
+    try:
+        listing = local._git_files(folder)
+    except LocalRunError as error:
+        # Some versions of git refuse the folder rather than read it without the object.
+        assert "git cannot read the files" in str(error)
+    else:
+        assert PurePosixPath("notes.txt") in listing.names  # git ran, and read the folder
     assert not marker.exists()
 
 
