@@ -17,9 +17,10 @@ read differently, is refused rather than written.
 The command goes only to a pipe or a terminal, which is what a job gives a step, trying
 standard output and then standard error. A step may send Footfall's output to a file, which
 may become an artefact, and no artefact is masked, so there the command would be the value
-in clear. When neither stream is a pipe or a terminal, nothing is written, since no Actions
-log reads them. When one is but none takes the whole command, `MaskError` is raised, so that
-the caller stops before the secret is used unmasked.
+in clear; or to /dev/null, which would swallow it while standard error went to the log.
+When neither stream is a pipe or a terminal, nothing is written, since no Actions log reads
+them. When one is but none takes the whole command, `MaskError` is raised, so that the
+caller stops before the secret is used unmasked.
 """
 
 import os
@@ -41,11 +42,13 @@ class MaskError(RuntimeError):
 
 
 def _a_pipe_or_terminal(fd: int) -> bool:
+    """Whether `fd` is a pipe or a terminal. Another character device, such as /dev/null,
+    is neither, and would swallow a mask that the next stream could carry to the log."""
     try:
         mode = os.fstat(fd).st_mode
     except OSError:
         return False
-    return stat.S_ISFIFO(mode) or stat.S_ISCHR(mode)
+    return stat.S_ISFIFO(mode) or os.isatty(fd)
 
 
 def _write_all(fd: int, data: bytes) -> None:

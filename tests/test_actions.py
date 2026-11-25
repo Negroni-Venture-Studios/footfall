@@ -104,6 +104,15 @@ def test_when_no_stream_a_job_reads_takes_the_mask_it_fails_closed() -> None:
     assert VALUE[:4] not in str(caught.value)
 
 
+def test_dev_null_on_standard_output_leaves_the_mask_to_standard_error(
+    output: MaskOutput,
+) -> None:
+    """/dev/null is a character device but no terminal; the job reads standard error."""
+    with Path(os.devnull).open("wb") as null:
+        mask(VALUE, environ=IN_ACTIONS, fds=(null.fileno(), output.writer))
+    assert output.read() == f"\n::add-mask::{VALUE}\n"
+
+
 def test_files_on_both_streams_take_nothing_and_raise_nothing(tmp_path: Path) -> None:
     with (tmp_path / "out.txt").open("wb") as out, (tmp_path / "err.txt").open("wb") as err:
         mask(VALUE, environ=IN_ACTIONS, fds=(out.fileno(), err.fileno()))
