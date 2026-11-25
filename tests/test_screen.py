@@ -16,6 +16,7 @@ import pytest
 from playwright.async_api import Browser, Page, Playwright, async_playwright
 
 from footfall.personas import load_devices
+from footfall.tester import screen as screen_module
 from footfall.tester.screen import (
     MAX_ELEMENTS,
     CaptureError,
@@ -27,6 +28,7 @@ from footfall.tester.screen import (
 )
 
 PAGES = Path(__file__).parent / "fixtures" / "pages"
+SNAPSHOT_JS = (Path(__file__).parent.parent / "footfall" / "tester" / "snapshot.js").read_text()
 PHONE = {"width": 390, "height": 664}
 
 MakePage = Callable[..., Awaitable[Page]]
@@ -473,6 +475,53 @@ async def test_covered_inert_disabled_and_collapsed_elements(make_page: MakePage
     assert names(await shot(make_page, "accordion")) == ["Open link", "Fixed popup"]
 
 
+async def test_an_element_in_a_body_whose_overflow_is_the_viewports_is_listed(
+    make_page: MakePage,
+) -> None:
+    # The body's overflow belongs to the viewport, so a body made short by floats clips nothing.
+    assert names(await shot(make_page, "body_overflow")) == ["Floated"]
+
+
+async def test_a_control_under_its_own_label_is_not_covered(make_page: MakePage) -> None:
+    screen = await shot(make_page, "label_over_input")
+    covered = {e.name: e.covered for e in screen.elements if e.kind != "text"}
+    assert covered["I agree"] is False  # a tap there reaches the check box through its label
+    assert covered["Pay now"] is True  # another control's label on top still covers it
+
+
+async def test_hit_tests_are_counted_one_by_one(make_page: MakePage) -> None:
+    """The budget is of calls to elementFromPoint, which a deep shadow tree multiplies."""
+    # 300 hosts of 20 by 20 px, all on the 390 by 664 screen, each three hit tests deep.
+    style = "display:inline-block;width:20px;height:20px;vertical-align:top"
+    hosts = "".join(f'<div class="h" data-n="{n}" style="{style}"></div>' for n in range(300))
+    page = await make_page(f"<!doctype html><body style='margin:0'>{hosts}</body>")
+    await page.evaluate(
+        """() => {
+          for (const host of document.querySelectorAll(".h")) {
+            const middle = host.attachShadow({ mode: "open" });
+            middle.innerHTML = "<div></div>";
+            const inner = middle.firstChild.attachShadow({ mode: "open" });
+            const button = document.createElement("button");
+            button.style.cssText = "width:20px;height:20px;padding:0;border:0";
+            button.textContent = `B${host.dataset.n}`;
+            inner.append(button);
+          }
+          window.hits = 0;
+          for (const kind of [Document, ShadowRoot]) {
+            const real = kind.prototype.elementFromPoint;
+            kind.prototype.elementFromPoint = function (...args) {
+              window.hits += 1;
+              return real.apply(this, args);
+            };
+          }
+        }"""
+    )
+    screen = await capture(page)
+    assert len(screen.elements) == MAX_ELEMENTS
+    hits = await page.evaluate("window.hits")
+    assert 300 < hits <= 400, hits
+
+
 # --------------------------------------------------------------- describe
 
 
@@ -539,3 +588,13 @@ def test_describe_omits_the_optional_lines_when_there_is_nothing_to_say() -> Non
         "Page: / | T",
         '[1] button "Go" centre=(10,20)',
     ]
+
+
+def test_the_tap_centre_is_floored_as_the_snapshot_floors_its_hit_test() -> None:
+    """snapshot.js hit-tests at the floor of the visible box's centre; the tap must land on
+    that same pixel, not one rounded past it."""
+    raw = {"kind": "button", "role": "button", "name": "x", "value": "", "x": 0, "y": 0}
+    parsed = screen_module._parse_entry({**raw, "w": 21.8, "h": 21.8}, 100, 100)
+    assert parsed is not None
+    assert parsed.centre == (10, 10)  # 10.9 floored; rounded, it would be 11
+    assert "Math.floor((Math.max(r.left, 0) + Math.min(r.right, width)) / 2)" in SNAPSHOT_JS

@@ -151,6 +151,11 @@
     return false;
   };
 
+  // The body's overflow belongs to the viewport, not the body, unless the root element sets
+  // its own; the body then clips nothing, however short it is, as when all it holds floats.
+  const rootStyle = getComputedStyle(document.documentElement);
+  const bodyClips = rootStyle.overflowX !== "visible" || rootStyle.overflowY !== "visible";
+
   // True when an ancestor with overflow other than visible leaves nothing of `r` showing,
   // as a collapsed accordion with max-height 0 does. Fixed elements escape their ancestors,
   // and absolute ones escape any ancestor above their containing block.
@@ -161,7 +166,8 @@
     for (let a = parentOf(el); a && a !== document.documentElement; a = parentOf(a)) {
       const style = getComputedStyle(a);
       if (escaping && style.position === "static") continue;
-      if (style.overflowX !== "visible" || style.overflowY !== "visible") {
+      const clips = a !== document.body || bodyClips;
+      if (clips && (style.overflowX !== "visible" || style.overflowY !== "visible")) {
         const b = a.getBoundingClientRect();
         if (
           Math.min(r.right, b.right) <= Math.max(r.left, b.left) ||
@@ -174,24 +180,37 @@
     return false;
   };
 
-  // Is the element, or something inside it, what a tap at its centre would hit?
+  // Hit tests made, each a call to elementFromPoint; a page of deep shadow roots needs
+  // several for one element. The caller lists 150 elements at most.
+  const MAX_HIT_TESTS = 400;
+  let hitTests = 0;
+  const hitTest = (root, x, y) => {
+    hitTests += 1;
+    return root.elementFromPoint(x, y);
+  };
+
+  // Is the element, or something inside it, what a tap at its centre would hit? A tap on
+  // the element's own label reaches it too, as with a check box hidden under a styled label.
+  // The centre is floored, as screen.py floors the centre it taps. Once the hit tests are
+  // spent, no element is called covered.
   const isCovered = (el, r) => {
+    if (hitTests >= MAX_HIT_TESTS) return false;
     const x = Math.min(width - 1, Math.max(0, Math.floor((Math.max(r.left, 0) + Math.min(r.right, width)) / 2)));
     const y = Math.min(height - 1, Math.max(0, Math.floor((Math.max(r.top, 0) + Math.min(r.bottom, height)) / 2)));
-    let hit = document.elementFromPoint(x, y);
+    let hit = hitTest(document, x, y);
     while (hit && hit.shadowRoot) {
-      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (hitTests >= MAX_HIT_TESTS) return false; // spent part of the way down: not known
+      const inner = hitTest(hit.shadowRoot, x, y);
       if (!inner || inner === hit) break;
       hit = inner;
     }
     if (!hit) return false;
     for (let n = hit; n; n = parentOf(n)) {
       if (n === el) return false;
+      if (n.localName === "label" && n.control === el) return false;
     }
     return true;
   };
-
-  const MAX_HIT_TESTED = 200; // the caller lists 150 at most
 
   const entries = [];
   let total = 0;
@@ -235,7 +254,7 @@
       }
       total += 1;
       if (entries.length < MAX_RAW) {
-        entry.covered = entries.length < MAX_HIT_TESTED && isCovered(el, r);
+        entry.covered = isCovered(el, r);
         entry.disabled = entry.disabled === true;
         entry.readonly = entry.readonly === true;
         entries.push(entry);
