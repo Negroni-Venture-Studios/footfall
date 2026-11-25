@@ -86,7 +86,7 @@ def test_disconnecting_a_container_that_is_not_connected(
 
 
 def test_the_daemon_answers_as_the_engine_expects(engine: DockerEngine, network: str) -> None:
-    run_id = new_run_id()
+    run_id = network.removeprefix("footfall-")  # a container joins its own run's network only
     name = f"footfall-{run_id}-app-check"
     config = container_config(
         role="app",
@@ -106,7 +106,16 @@ def test_the_daemon_answers_as_the_engine_expects(engine: DockerEngine, network:
         assert engine.address(name, network)
         assert engine.containers(f"footfall.run={run_id}")
         inspected = json.loads(_raw(engine, "GET", f"/containers/{name}/json")[1])
-        assert inspected["HostConfig"]["Runtime"] == "runsc"
+        held = inspected["HostConfig"]
+        _record(
+            "how the daemon holds a container's settings",
+            {key: held.get(key) for key in ("Runtime", "IpcMode", "Ulimits", "Init", "Tmpfs")},
+        )
+        assert held["Runtime"] == "runsc"
+        # The daemon keeps what spec.py asked for, under gVisor as under runc.
+        assert held["IpcMode"] == "private"
+        assert held["Ulimits"] == [{"Name": "core", "Soft": 0, "Hard": 0}]
+        assert held["Init"] is True
         assert inspected["State"]["Running"] is True
     finally:
         engine.remove(name)

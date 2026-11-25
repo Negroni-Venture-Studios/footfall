@@ -16,6 +16,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
@@ -36,23 +37,40 @@ class Limits:
     pids: int
 
 
-LIMITS: Final[Mapping[Role, Limits]] = {
-    "install": Limits(memory_bytes=_GIB, nano_cpus=1_000_000_000, pids=256),
-    "seed": Limits(memory_bytes=512 * _MIB, nano_cpus=1_000_000_000, pids=256),
-    "app": Limits(memory_bytes=512 * _MIB, nano_cpus=1_000_000_000, pids=256),
-    "browsers": Limits(memory_bytes=2 * _GIB, nano_cpus=2_000_000_000, pids=1024),
-}
+LIMITS: Final[Mapping[Role, Limits]] = MappingProxyType(
+    {
+        "install": Limits(memory_bytes=_GIB, nano_cpus=1_000_000_000, pids=256),
+        "seed": Limits(memory_bytes=512 * _MIB, nano_cpus=1_000_000_000, pids=256),
+        "app": Limits(memory_bytes=512 * _MIB, nano_cpus=1_000_000_000, pids=256),
+        "browsers": Limits(memory_bytes=2 * _GIB, nano_cpus=2_000_000_000, pids=1024),
+    }
+)
 
-# The sandbox in one place: every container gets exactly these, whatever its role.
-_HARDENING: Final[Mapping[str, Any]] = {
-    "CapDrop": ["ALL"],
-    "SecurityOpt": ["no-new-privileges:true"],
-    "ReadonlyRootfs": True,
-    "Privileged": False,
-    "LogConfig": {"Type": "json-file", "Config": {"max-size": "5m", "max-file": "2"}},
-}
+# The sandbox in one place: every container gets exactly these, whatever its role. The
+# table cannot be changed, and `container_config` copies all of it, so a setting added here
+# reaches every container. Docker's default seccomp profile applies because nothing here
+# turns it off.
+_HARDENING: Final[Mapping[str, Any]] = MappingProxyType(
+    {
+        "CapDrop": ("ALL",),
+        "SecurityOpt": ("no-new-privileges:true",),
+        "ReadonlyRootfs": True,
+        "Privileged": False,
+        # Docker's init is the container's first process: it reaps orphaned processes, such
+        # as a browser's, and passes signals on.
+        "Init": True,
+        # The container's own IPC namespace, which no other container can join.
+        "IpcMode": "private",
+        # A crash writes no core file, which could hold what the process held.
+        "Ulimits": (MappingProxyType({"Name": "core", "Soft": 0, "Hard": 0}),),
+        "LogConfig": MappingProxyType(
+            {"Type": "json-file", "Config": MappingProxyType({"max-size": "5m", "max-file": "2"})}
+        ),
+    }
+)
 
-_TMPFS_OPTIONS: Final = "rw,nosuid,nodev,size=268435456"
+# Docker adds noexec to a tmpfs whatever it is given; the options say so rather than rely on it.
+_TMPFS_OPTIONS: Final = "rw,noexec,nosuid,nodev,size=268435456"
 # Chromium's renderers share memory through /dev/shm, whose Docker default of 64 MiB is too
 # small for a dozen pages. Docker's own setting sizes the mount it already makes, and the
 # pages count against the container's memory limit as any other memory does.
@@ -64,11 +82,66 @@ _RUNTIMES: Final = frozenset({"runsc", "runc"})
 _ALLOWED_ENV: Final = frozenset({"FOOTFALL_USERNAME", "FOOTFALL_PASSWORD", "PORT"})
 _RUN_ID: Final = re.compile(r"r_[a-z2-7]{26}")
 _COPY: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
-_NETWORK_PREFIX: Final = "footfall-r_"
 _HOST_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 # Leaves the host's side of a run's network without an address.
 _NO_HOST_ADDRESS: Final = "com.docker.network.bridge.inhibit_ipv4"
 _PROXY_VARS: Final = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+
+
+def _thaw(value: Any) -> Any:
+    """A fresh, mutable copy of a value from the tables above, as JSON-ready lists and dicts."""
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+def _workspace_problem(workspace: Path) -> str | None:
+    """Why a workspace cannot be bound, if it cannot.
+
+    Docker reads a bind as `source:target:options`, so a colon in the source would name
+    another target or options. A `.` or `..` part, or a control character, would make the
+    path mean something other than what the runner checked.
+    """
+    text = str(workspace)
+    if not workspace.is_absolute():
+        return f"workspace must be an absolute path: {workspace}"
+    if ":" in text or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        return f"workspace must hold no colon or control character: {text!r}"
+    if any(part in (".", "..") for part in text.split("/")):
+        return f"workspace must hold no . or .. part: {text!r}"
+    return None
+
+
+def _proxy_problem(proxy_url: str) -> str | None:
+    """Why a proxy address is not one Footfall makes: http://host:port, and nothing more."""
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in proxy_url):
+        return f"the proxy's address holds a space or control character: {proxy_url!r}"
+    try:
+        parts = urlsplit(proxy_url)
+        port = parts.port
+    except ValueError:
+        return f"the proxy's address is not a URL: {proxy_url!r}"
+    host = parts.hostname or ""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if not _HOST_NAME.fullmatch(host):
+            return f"the proxy's host is not an address or a host name: {proxy_url!r}"
+    if (
+        parts.scheme != "http"
+        or port is None
+        or port < 1
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or proxy_url.endswith(("?", "#"))
+    ):
+        return f"the proxy's address must be http://host:port, not {proxy_url!r}"
+    return None
 
 
 def _validate(
@@ -79,6 +152,7 @@ def _validate(
     command: Sequence[str],
     workspace: Path | None,
     network: str,
+    proxy_url: str,
     env: Mapping[str, str],
     runtime: str,
 ) -> None:
@@ -96,10 +170,14 @@ def _validate(
         or not all(isinstance(part, str) for part in command)
     ):
         raise ValueError("command must be a non-empty sequence of strings")
-    if workspace is not None and not workspace.is_absolute():
-        raise ValueError(f"workspace must be an absolute path: {workspace}")
-    if not network.startswith(_NETWORK_PREFIX):
-        raise ValueError(f"network must start with {_NETWORK_PREFIX!r}: {network!r}")
+    problem = None if workspace is None else _workspace_problem(workspace)
+    if problem:
+        raise ValueError(problem)
+    if network != f"footfall-{run_id}":
+        raise ValueError(f"network must be the run's own, footfall-{run_id}: {network!r}")
+    problem = _proxy_problem(proxy_url)
+    if problem:
+        raise ValueError(problem)
     for key, value in env.items():
         if key not in _ALLOWED_ENV:
             raise ValueError(f"env key not allowed: {key!r}")
@@ -146,6 +224,7 @@ def container_config(
         command=command,
         workspace=workspace,
         network=network,
+        proxy_url=proxy_url,
         env=env,
         runtime=runtime,
     )
@@ -158,17 +237,7 @@ def container_config(
 
     host_config: dict[str, Any] = {
         "Runtime": runtime,
-        # Docker's init is the container's first process: it reaps orphaned processes, such
-        # as a browser's, and passes signals on.
-        "Init": True,
-        "CapDrop": list(_HARDENING["CapDrop"]),
-        "SecurityOpt": list(_HARDENING["SecurityOpt"]),
-        "ReadonlyRootfs": _HARDENING["ReadonlyRootfs"],
-        "Privileged": _HARDENING["Privileged"],
-        "LogConfig": {
-            "Type": _HARDENING["LogConfig"]["Type"],
-            "Config": dict(_HARDENING["LogConfig"]["Config"]),
-        },
+        **_thaw(_HARDENING),
         "Tmpfs": tmpfs,
         "Memory": limits.memory_bytes,
         "MemorySwap": limits.memory_bytes,

@@ -5,6 +5,7 @@ from typing import Any, get_args
 
 import pytest
 
+from footfall.runner import spec
 from footfall.runner.spec import APP_UID, LIMITS, Role, container_config, network_config
 
 RUN_ID = "r_" + "a" * 26
@@ -50,6 +51,93 @@ def test_top_level_shape() -> None:
     assert body["Image"] == "footfall-python3.13:dev"
     assert body["Cmd"] == ["python", "-m", "app"]
     assert set(body) == {"Image", "Cmd", "Env", "User", "Labels", "WorkingDir", "HostConfig"}
+    assert set(make("browsers")) == {"Image", "Cmd", "Env", "Labels", "HostConfig"}
+
+
+# Every key a container's HostConfig may have. Anything Docker would also accept, such as
+# PortBindings, Devices, Mounts, CapAdd, IpcMode "host" or PidMode, is absent because the
+# set is exact.
+_HOST_KEYS = {
+    "Runtime",
+    "Init",
+    "CapDrop",
+    "SecurityOpt",
+    "ReadonlyRootfs",
+    "Privileged",
+    "LogConfig",
+    "IpcMode",
+    "Ulimits",
+    "Tmpfs",
+    "Memory",
+    "MemorySwap",
+    "NanoCpus",
+    "PidsLimit",
+    "NetworkMode",
+}
+
+
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("with_workspace", [True, False])
+@pytest.mark.parametrize("with_proxy_name", [True, False])
+def test_host_config_has_exactly_these_keys(
+    role: Role, with_workspace: bool, with_proxy_name: bool
+) -> None:
+    overrides: dict[str, Any] = {}
+    if not with_workspace:
+        overrides["workspace"] = None
+    if with_proxy_name:
+        overrides |= {"proxy_url": "http://172.18.0.2:3128", "proxy_name": "footfall-proxy"}
+    expected = set(_HOST_KEYS)
+    expected |= {"Binds"} if with_workspace else set()
+    expected |= {"ExtraHosts"} if with_proxy_name else set()
+    expected |= {"ShmSize"} if role == "browsers" else set()
+    assert set(host(role, **overrides)) == expected
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_env_is_exactly_the_proxy_the_marker_and_the_allowed_keys(role: Role) -> None:
+    env = make(role, env={"PORT": "8000", "FOOTFALL_USERNAME": "u"})["Env"]
+    assert env == [
+        f"HTTP_PROXY={PROXY}",
+        f"HTTPS_PROXY={PROXY}",
+        f"http_proxy={PROXY}",
+        f"https_proxy={PROXY}",
+        "NO_PROXY=localhost,127.0.0.1",
+        "FOOTFALL=1",
+        "PORT=8000",
+        "FOOTFALL_USERNAME=u",
+    ]
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_every_hardening_setting_reaches_every_container(role: Role) -> None:
+    """A setting added to the hardening table cannot be left out of a container."""
+    hc = host(role)
+    for key, value in spec._HARDENING.items():
+        assert hc[key] == spec._thaw(value), key
+
+
+def test_the_tables_cannot_be_changed() -> None:
+    with pytest.raises(TypeError):
+        spec._HARDENING["Privileged"] = True  # type: ignore[index]
+    with pytest.raises(TypeError):
+        spec._HARDENING["LogConfig"]["Type"] = "none"
+    with pytest.raises(TypeError):
+        LIMITS["app"] = LIMITS["browsers"]  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        spec._HARDENING["CapDrop"].append("X")
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_ipc_is_private(role: Role) -> None:
+    # Its own IPC namespace, which no other container can join.
+    assert host(role)["IpcMode"] == "private"
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_no_core_dumps(role: Role) -> None:
+    # A crash writes no core file, which could hold what the process held, such as a password.
+    assert host(role)["Ulimits"] == [{"Name": "core", "Soft": 0, "Hard": 0}]
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -88,11 +176,12 @@ def test_not_privileged(role: Role) -> None:
 
 @pytest.mark.parametrize("role", APP_ROLES)
 def test_tmpfs_for_app_roles(role: Role) -> None:
-    assert host(role)["Tmpfs"] == {"/tmp": "rw,nosuid,nodev,size=268435456"}  # noqa: S108
+    # noexec is what Docker adds to a tmpfs anyway; the spec says so rather than relying on it.
+    assert host(role)["Tmpfs"] == {"/tmp": "rw,noexec,nosuid,nodev,size=268435456"}  # noqa: S108
 
 
 def test_tmpfs_for_browsers_adds_pwuser_home() -> None:
-    opts = "rw,nosuid,nodev,size=268435456"
+    opts = "rw,noexec,nosuid,nodev,size=268435456"
     assert host("browsers")["Tmpfs"] == {"/tmp": opts, "/home/pwuser": opts}  # noqa: S108
 
 
@@ -107,7 +196,7 @@ def test_resource_limits(role: Role) -> None:
 
 
 def test_network_mode() -> None:
-    assert host(network="footfall-r_xyz")["NetworkMode"] == "footfall-r_xyz"
+    assert host()["NetworkMode"] == f"footfall-{RUN_ID}"
 
 
 def test_binds_with_workspace() -> None:
@@ -122,7 +211,7 @@ def test_no_binds_without_workspace() -> None:
 def test_forbidden_keys_absent(role: Role) -> None:
     body = make(role)
     hc = body["HostConfig"]
-    for key in ("PortBindings", "Devices", "ExposedPorts", "Mounts", "CapAdd"):
+    for key in ("PortBindings", "Devices", "ExposedPorts", "Mounts", "CapAdd", "PidMode"):
         assert key not in body
         assert key not in hc
 
@@ -246,10 +335,72 @@ def test_relative_workspace_rejected() -> None:
         make(workspace=Path("work/main"))
 
 
-@pytest.mark.parametrize("bad", ["bridge", "host", "none", "", "footfall-x", "footfall_r_x"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/srv/w:/etc",  # a colon would end the bind's source and name another target
+        "/srv/w/main:ro",
+        "/srv/w/../../etc",
+        "/srv/w/..",
+        "/srv/w/main\n",
+        "/srv/w/ma\x00in",
+        "/srv/w/\x7f",
+    ],
+)
+def test_workspace_that_could_reshape_the_bind_is_rejected(bad: str) -> None:
+    with pytest.raises(ValueError, match="workspace"):
+        make(workspace=Path(bad))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "bridge",
+        "host",
+        "none",
+        "",
+        "footfall-x",
+        "footfall_r_x",
+        "footfall-r_xyz",
+        "footfall-r_" + "b" * 26,  # another run's network
+        f"footfall-{RUN_ID}-x",
+    ],
+)
 def test_bad_network_rejected(bad: str) -> None:
     with pytest.raises(ValueError, match="network"):
         make(network=bad)
+
+
+@pytest.mark.parametrize(
+    "good", ["http://footfall-proxy:3128", "http://172.18.0.2:3128", "http://[fd00::2]:3128"]
+)
+def test_proxy_urls_footfall_makes_are_accepted(good: str) -> None:
+    assert f"HTTP_PROXY={good}" in make(proxy_url=good)["Env"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "footfall-proxy:3128",
+        "https://172.18.0.2:3128",
+        "socks5://172.18.0.2:1080",
+        "http://172.18.0.2",
+        "http://172.18.0.2:0",
+        "http://172.18.0.2:70000",
+        "http://user:secret@172.18.0.2:3128",
+        "http://172.18.0.2:3128/path",
+        "http://172.18.0.2:3128/",
+        "http://172.18.0.2:3128?x=1",
+        "http://172.18.0.2:3128#x",
+        "http://172.18.0.2:3128\nEVIL=1",
+        "http://Footfall Proxy:3128",
+        "http://:3128",
+    ],
+)
+def test_bad_proxy_url_rejected(bad: str) -> None:
+    with pytest.raises(ValueError, match="proxy"):
+        make(proxy_url=bad)
 
 
 @pytest.mark.parametrize("role", ROLES)

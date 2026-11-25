@@ -140,6 +140,30 @@ def _ipv6() -> dict[str, Any]:
     return found
 
 
+def _try_run(folder: Path) -> str:
+    """Write a small executable script in `folder` and run it: "ran", or why it could not."""
+    script = folder / f"probe-exec-{secrets.token_hex(4)}.sh"
+    try:
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o700)
+        done = subprocess.run([str(script)], capture_output=True, timeout=10, check=False)
+    except OSError as error:
+        return errno_name(error)
+    finally:
+        with contextlib.suppress(OSError):
+            script.unlink()
+    return "ran" if done.returncode == 0 else f"exit {done.returncode}"
+
+
+def _mount_options(target: str) -> list[str]:
+    """The options of the mount at `target`, from the kernel's own list."""
+    for line in Path("/proc/self/mounts").read_text().splitlines():
+        fields = line.split()
+        if fields[1:2] == [target]:
+            return fields[3].split(",")
+    return []
+
+
 def check_sandbox(_: Sequence[str]) -> dict[str, Any]:
     root = os.statvfs("/")
     mounts = Path("/proc/self/mounts").read_text().splitlines()
@@ -180,6 +204,9 @@ def check_sandbox(_: Sequence[str]) -> dict[str, Any]:
         "proxy": os.environ.get("HTTPS_PROXY", ""),
         "hostname": socket.gethostname(),
         "nofile": resource.getrlimit(resource.RLIMIT_NOFILE),
+        "core": resource.getrlimit(resource.RLIMIT_CORE),
+        "tmp_options": _mount_options("/tmp"),  # noqa: S108
+        "run": {"/tmp": _try_run(Path("/tmp")), "/workspace": _try_run(WORKSPACE)},  # noqa: S108
         "ipv6": _ipv6(),
     }
 

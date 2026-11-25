@@ -104,6 +104,13 @@ def test_the_root_file_system_is_read_only(sandbox: dict[str, Any]) -> None:
     ), sandbox["root_mount"]
 
 
+def test_tmp_runs_nothing_and_a_crash_dumps_no_core(sandbox: dict[str, Any]) -> None:
+    # The control: the same script runs from the workspace, so the probe can run one.
+    assert sandbox["run"] == {"/workspace": "ran", "/tmp": "EACCES"}, sandbox["run"]  # noqa: S108
+    assert {"noexec", "nosuid", "nodev"} <= set(sandbox["tmp_options"]), sandbox["tmp_options"]
+    assert sandbox["core"] == [0, 0]
+
+
 def test_no_socket_of_docker_or_footfall_is_there(sandbox: dict[str, Any]) -> None:
     assert sandbox["paths"] == {
         "/var/run/docker.sock": False,
