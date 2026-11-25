@@ -431,14 +431,18 @@ def _git_folder_paths(git: str, folder: Path) -> list[Path]:
 def _superproject_git_folders(git: str, folder: Path) -> list[Path]:
     """When `folder` is in a submodule, the git folders of its superproject, and of that
     one's when it is a submodule too, out to the outermost; otherwise none. Raises
-    LocalRunError past `_MOST_SUPERPROJECTS` levels."""
+    LocalRunError when there are more than `_MOST_SUPERPROJECTS` of them."""
     found: list[Path] = []
     current = folder
-    for _ in range(_MOST_SUPERPROJECTS):
+    # One question more than the limit allows answers, so that the last says whether the
+    # outermost allowed is the outermost there is.
+    for level in range(_MOST_SUPERPROJECTS + 1):
         where = _run_git(git, current, ["rev-parse", "--show-superproject-working-tree"])
         superproject = os.fsdecode(where.removesuffix(b"\n"))
         if not superproject:
             return found
+        if level == _MOST_SUPERPROJECTS:
+            break
         current = Path(superproject)
         found += _git_folder_paths(git, current)
     raise LocalRunError(

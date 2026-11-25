@@ -2301,6 +2301,35 @@ def test_a_failed_superproject_lookup_refuses_the_copy(
         local._known_linked(folder)
 
 
+def a_chain_of_superprojects(depth: int) -> Callable[..., bytes]:
+    """git's answers for a folder /levels/0 inside `depth` superprojects, /levels/1 and on."""
+
+    def run_git(
+        git: str, folder: Path, arguments: Sequence[str], *rest: Any, **options: Any
+    ) -> bytes:
+        if "--show-superproject-working-tree" in arguments:
+            level = int(folder.name)
+            return f"/levels/{level + 1}\n".encode() if level < depth else b""
+        return f"{folder}/.git\n".encode()
+
+    return run_git
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_superprojects_are_followed_up_to_the_limit_and_no_further(
+    monkeypatch: pytest.MonkeyPatch, extra: int
+) -> None:
+    depth = local._MOST_SUPERPROJECTS + extra
+    monkeypatch.setattr(local, "_run_git", a_chain_of_superprojects(depth))
+    if extra:
+        with pytest.raises(LocalRunError, match=f"more than {depth - 1} levels deep"):
+            local._superproject_git_folders("git", Path("/levels/0"))
+        return
+    found = local._superproject_git_folders("git", Path("/levels/0"))
+    assert len(found) == 2 * depth  # each superproject's git folder and its common one
+    assert found[-1] == Path(f"/levels/{depth}/.git")
+
+
 def test_a_folder_outside_git_is_copied_with_all_files(tmp_path: Path) -> None:
     folder = tmp_path / "source"
     app_files(folder)
