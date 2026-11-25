@@ -200,6 +200,7 @@ async def run_folder(
     model: str = FINISHES,
     brief: str = "default",
     all_files: bool = True,
+    untracked: bool = False,
     budget: Budget | None = None,
 ) -> list[Any]:
     return await test_folder(
@@ -214,6 +215,7 @@ async def run_folder(
         connect_browser=connect_browser,
         workspaces=tmp_path / "workspaces",
         all_files=all_files,
+        untracked=untracked,
     )
 
 
@@ -957,8 +959,19 @@ def git(folder: Path, *arguments: str) -> None:
     subprocess.run([GIT, "-C", str(folder), *arguments], check=True, capture_output=True)
 
 
-async def test_only_the_files_git_would_commit_are_copied(
-    tmp_path: Path, app_server: AppServer, connect: tuple[Connect, list[tuple[str, str]]]
+def git_output(folder: Path, *arguments: str) -> str:
+    done = subprocess.run(
+        [GIT, "-C", str(folder), *arguments], check=True, capture_output=True, text=True
+    )
+    return done.stdout
+
+
+@pytest.mark.parametrize("untracked", [False, True])
+async def test_only_the_files_git_tracks_are_copied(
+    tmp_path: Path,
+    app_server: AppServer,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    untracked: bool,
 ) -> None:
     serve_two_pages(app_server)
     folder = two_pages(tmp_path)
@@ -967,22 +980,19 @@ async def test_only_the_files_git_would_commit_are_copied(
     (folder / ".env").write_text("API_KEY=sk-not-a-real-key\n")  # gitleaks:allow
     (folder / "node_modules").mkdir()
     (folder / "node_modules" / "left-pad.js").write_text("module.exports = 1;\n")
-    (folder / "notes.txt").write_text("not committed yet, and not ignored\n")
     (folder / "link").symlink_to("serve.py")
     (folder / "gone.txt").write_text("tracked, then deleted\n")
-    git(folder, "add", "footfall.toml", "gone.txt")
+    git(folder, "add", ".")
     (folder / "gone.txt").unlink()
+    (folder / "notes.txt").write_text("not committed yet, and not ignored\n")
     runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
-    reports = await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    reports = await run_folder(
+        folder, runner, connect[0], tmp_path, all_files=False, untracked=untracked
+    )
     assert [r.status for r in reports] == ["finished"]
-    assert runner.workspace_files == [
-        ".gitignore",
-        "footfall.toml",
-        "footfall/briefs/default.md",
-        "link -> serve.py",
-        "notes.txt",
-        "serve.py",
-    ]
+    expected = [".gitignore", "footfall.toml", "footfall/briefs/default.md", "link -> serve.py"]
+    expected += ["notes.txt", "serve.py"] if untracked else ["serve.py"]
+    assert runner.workspace_files == expected
 
 
 async def test_results_inside_a_repository_are_not_copied(
@@ -1005,8 +1015,113 @@ async def test_results_inside_a_repository_are_not_copied(
         budget=Budget(max_actions=8, max_seconds=120),
         connect_browser=connect[0],
         workspaces=tmp_path / "workspaces",
+        untracked=True,  # the results are untracked and not ignored, so git lists them
     )
     assert runner.workspace_files == ["footfall.toml", "footfall/briefs/default.md", "serve.py"]
+
+
+F01_SECRET = ".env.f01-secret"
+F01_PLAIN = "f01-notes-untracked.txt"
+
+
+def tracked_two_pages(tmp_path: Path) -> Path:
+    """The two-page app in a repository that tracks every file of it."""
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    git(folder, "add", ".")
+    return folder
+
+
+async def run_to_prepare(
+    folder: Path, connect: Connect, tmp_path: Path, *, untracked: bool
+) -> FakeRunner:
+    """Run the folder in git's mode as far as preparing the app, which stops it there, with
+    no browser needed, and return the runner, which saw the workspace."""
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    runner.fail["prepare"] = RunnerError("f01-stop-marker")
+    with pytest.raises(RunnerError, match="f01-stop-marker"):
+        await run_folder(folder, runner, connect, tmp_path, all_files=False, untracked=untracked)
+    return runner
+
+
+@pytest.mark.parametrize("untracked", [False, True])
+async def test_a_file_the_tested_tree_un_ignores_is_copied_only_with_untracked(
+    tmp_path: Path,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    capsys: pytest.CaptureFixture[str],
+    untracked: bool,
+) -> None:
+    """The audit's case: the developer's own exclude file keeps a secret out of git, and the
+    branch under test commits a negation, which git ranks above that file."""
+    folder = tracked_two_pages(tmp_path)
+    (folder / ".git" / "info").mkdir(exist_ok=True)
+    (folder / ".git" / "info" / "exclude").write_text(f"{F01_SECRET}\n")
+    (folder / ".gitignore").write_text(f"!{F01_SECRET}\n")
+    git(folder, "add", ".gitignore")
+    (folder / F01_SECRET).write_text("F01_SECRET_MARKER_3b7e\n")
+    # The control: git now counts the secret as untracked and not ignored.
+    listed = git_output(folder, "ls-files", "--others", "--exclude-standard")
+    assert listed.splitlines() == [F01_SECRET]
+    runner = await run_to_prepare(folder, connect[0], tmp_path, untracked=untracked)
+    printed = capsys.readouterr().err
+    assert (F01_SECRET in runner.workspace_files) is untracked
+    assert (f'"{F01_SECRET}"' in printed) is untracked
+    assert {".gitignore", "footfall.toml", "serve.py"} <= set(runner.workspace_files)
+
+
+@pytest.mark.parametrize("untracked", [False, True])
+async def test_an_untracked_file_is_copied_and_named_only_with_untracked(
+    tmp_path: Path,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    capsys: pytest.CaptureFixture[str],
+    untracked: bool,
+) -> None:
+    folder = tracked_two_pages(tmp_path)
+    (folder / F01_PLAIN).write_text("F01_PLAIN_MARKER_8c21\n")
+    runner = await run_to_prepare(folder, connect[0], tmp_path, untracked=untracked)
+    printed = capsys.readouterr().err
+    assert (F01_PLAIN in runner.workspace_files) is untracked
+    assert (f'"{F01_PLAIN}"' in printed) is untracked
+    assert {"footfall.toml", "footfall/briefs/default.md", "serve.py"} <= set(
+        runner.workspace_files
+    )
+
+
+async def test_untracked_and_all_files_cannot_both_be_asked_for(tmp_path: Path) -> None:
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(ValueError, match="untracked and all_files"):
+        await test_folder(
+            two_pages(tmp_path),
+            persona_ids=["grace"],
+            brief_name="default",
+            focus=None,
+            model_spec=FINISHES,
+            out=tmp_path / "out",
+            runner=runner,
+            budget=Budget(max_actions=8, max_seconds=120),
+            workspaces=tmp_path / "workspaces",
+            all_files=True,
+            untracked=True,
+        )
+    assert runner.calls == []
+
+
+async def test_untracked_names_are_printed_cleaned(
+    tmp_path: Path,
+    connect: tuple[Connect, list[tuple[str, str]]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    folder = tracked_two_pages(tmp_path)
+    name = "f01-\x1b]0;title\x07name\nfootfall test: forged ##[add-mask]x"
+    (folder / name).write_text("F01_ODD_NAME_MARKER\n")
+    runner = await run_to_prepare(folder, connect[0], tmp_path, untracked=True)
+    printed = capsys.readouterr().err
+    assert name in runner.workspace_files
+    assert "\x1b" not in printed
+    assert "\x07" not in printed
+    assert "##[" not in printed
+    assert "f01-]0;titlename footfall test: forged ## [add-mask]x" in printed
+    assert not [line for line in printed.splitlines() if line.startswith("footfall test: forged")]
 
 
 @pytest.mark.parametrize(
@@ -1021,29 +1136,57 @@ async def test_a_manifest_or_brief_git_does_not_list_is_refused(
     (folder / ".gitignore").write_text(f"{ignored}\n")
     runner = FakeRunner(lambda copy: "127.0.0.1:9")
     with pytest.raises(ManifestError) as caught:
-        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False, untracked=True)
     assert caught.value.problems == [
-        f"{label}: is not among the files git would commit, the only files a run copies"
+        f"{label}: is not among the files the run copies, which git tracks or, with "
+        "--untracked, does not ignore"
     ]
     assert runner.calls == []
     assert not (tmp_path / "workspaces").exists()
     assert not (tmp_path / "out").exists()
 
 
-@pytest.mark.parametrize("all_files", [False, True])
-async def test_a_listed_brief_or_one_copied_with_all_files_goes_ahead(
-    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]], all_files: bool
+async def test_an_untracked_brief_is_refused_by_default(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
 ) -> None:
-    """The positive control: the run gets as far as preparing the app, which stops it here,
-    with no browser needed. With --all-files an ignored brief is copied, so it is read."""
     folder = two_pages(tmp_path)
     git(folder, "init", "-q")
-    if all_files:
+    git(folder, "add", "footfall.toml", "serve.py")
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(ManifestError) as caught:
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert caught.value.problems == [
+        "default.md: is not among the files the run copies, which git tracks or, with "
+        "--untracked, does not ignore"
+    ]
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("mode", ["tracked", "untracked", "all files"])
+async def test_a_listed_brief_or_one_copied_with_all_files_goes_ahead(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]], mode: str
+) -> None:
+    """The positive control: the run gets as far as preparing the app, which stops it here,
+    with no browser needed. An untracked brief is copied with --untracked, and an ignored
+    one with --all-files, so each is read."""
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    if mode == "all files":
         (folder / ".gitignore").write_text("footfall/briefs/default.md\n")
+    git(folder, "add", "footfall.toml", "serve.py")
+    if mode == "tracked":
+        git(folder, "add", "footfall")
     runner = FakeRunner(lambda copy: "127.0.0.1:9")
     runner.fail["prepare"] = RunnerError("f07-stop-marker")
     with pytest.raises(RunnerError, match="f07-stop-marker"):
-        await run_folder(folder, runner, connect[0], tmp_path, all_files=all_files)
+        await run_folder(
+            folder,
+            runner,
+            connect[0],
+            tmp_path,
+            all_files=mode == "all files",
+            untracked=mode == "untracked",
+        )
     assert runner.ops() == ["prepare", "stop"]
     assert "footfall/briefs/default.md" in runner.workspace_files
 
@@ -1226,7 +1369,7 @@ async def test_a_link_in_place_of_a_tracked_folder_is_never_followed(
     git(folder, "init", "-q")
     (folder / "keys").mkdir()
     (folder / "keys" / "id_key").write_text("a key that was committed\n")
-    git(folder, "add", "footfall.toml", "keys/id_key")
+    git(folder, "add", "footfall.toml", "footfall", "keys/id_key")
     shutil.rmtree(folder / "keys")
     (folder / "keys").symlink_to(outside)
     (folder / ".gitignore").write_text("keys\n")
@@ -1269,7 +1412,7 @@ async def test_a_crafted_index_cannot_reach_through_a_link(
 
     runner = Recording(lambda copy: "127.0.0.1:9")
     with pytest.raises(LocalRunError, match="keys"):
-        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False, untracked=True)
     assert copied == []
     assert "prepare" not in runner.ops()
 
@@ -1306,7 +1449,7 @@ async def test_a_nested_repository_is_refused_by_name(
     (nested / "widget.js").write_text("export default 1;\n")
     runner = FakeRunner(lambda copy: "127.0.0.1:9")
     with pytest.raises(LocalRunError) as caught:
-        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False, untracked=True)
     assert "vendor/widget" in str(caught.value)
     assert "--all-files" in str(caught.value)
     assert "prepare" not in runner.ops()
@@ -1379,7 +1522,7 @@ def test_a_repository_cannot_make_git_run_a_command(tmp_path: Path) -> None:
     folder = tmp_path / "hostile"
     hostile_repository(folder, marker)
     try:
-        listing = local._git_files(folder)
+        listing = local._git_files(folder, untracked=True)  # the listing that reads ignores
     except LocalRunError as error:
         # Some versions of git refuse the folder rather than read it without the object.
         assert "git cannot read the files" in str(error)
@@ -1405,7 +1548,7 @@ def test_git_runs_with_a_bare_environment_and_no_input(
         return real_run(command, **options)
 
     monkeypatch.setattr(subprocess, "run", run)
-    listing = local._git_files(folder)
+    listing = local._git_files(folder, untracked=True)
     assert PurePosixPath("footfall.toml") in listing.names
     # ls-files twice, then rev-parse for the git folder, the common one and a superproject,
     # each run the same safe way.
@@ -1450,7 +1593,8 @@ async def test_a_crafted_index_cannot_copy_the_git_folder(
     folder = two_pages(tmp_path)
     git(folder, "init", "-q")
     git(folder, "config", "remote.origin.url", "https://token-not-real@example.com/app.git")
-    craft_index(folder / ".git" / "index", [spelling, "footfall.toml"])
+    names = [spelling, "footfall.toml", "footfall/briefs/default.md"]
+    craft_index(folder / ".git" / "index", names)
     runner = FakeRunner(lambda copy: "127.0.0.1:9")
     with pytest.raises(LocalRunError, match="git folder"):
         await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
@@ -1484,7 +1628,7 @@ async def test_names_in_errors_are_quoted(
     (nested / "x.js").write_text("1\n")
     runner = FakeRunner(lambda copy: "127.0.0.1:9")
     with pytest.raises(LocalRunError) as caught:
-        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False, untracked=True)
     message = str(caught.value)
     assert "\x1b" not in message
     assert '"evil[2Jname"' in message
@@ -1551,7 +1695,7 @@ async def refused_without_the_token(
 
     runner = Recording(lambda copy: "127.0.0.1:9")
     with pytest.raises(LocalRunError, match="git folder"):
-        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False, untracked=True)
     assert "prepare" not in runner.ops()
     assert not any(b"token-not-real" in data for data in copied)
 
@@ -1696,7 +1840,9 @@ async def test_an_untracked_git_folder_beside_its_worktree_is_left_out(
     serve_two_pages(app_server)
     folder = outer_with_a_nested_repository(tmp_path)
     runner = Copying(lambda copy: f"127.0.0.1:{app_server.port}")
-    reports = await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    reports = await run_folder(
+        folder, runner, connect[0], tmp_path, all_files=False, untracked=True
+    )
     assert [r.status for r in reports] == ["finished"]
     assert not any(b"token-not-real" in data for data in runner.copied)
     assert not any(name.startswith("submeta") for name in runner.workspace_files)
@@ -1718,7 +1864,7 @@ async def test_a_tracked_git_fixture_is_still_copied(
     git(folder, "add", "fixtures")
     (fixture / "untracked-note").write_text("not committed\n")
     runner = Copying(lambda copy: f"127.0.0.1:{app_server.port}")
-    await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    await run_folder(folder, runner, connect[0], tmp_path, all_files=False, untracked=True)
     files = runner.workspace_files
     assert "fixtures/repo/HEAD" in files
     assert "fixtures/repo/config" in files
@@ -1866,10 +2012,14 @@ def test_git_only_copy_warns_once_for_each_folder_it_leaves_out(
     assert not (tmp_path / "workspace" / "vendor").exists()
 
 
+@pytest.mark.parametrize("tracked", [True, False])
 @pytest.mark.parametrize("config", ["config", "config.worktree"])
-def test_a_hard_link_to_the_git_configuration_is_refused(tmp_path: Path, config: str) -> None:
+def test_a_hard_link_to_the_git_configuration_is_refused(
+    tmp_path: Path, config: str, tracked: bool
+) -> None:
     """A hostile archive, once extracted, can leave a hard link to .git/config in the
-    worktree, under any name: it is the same file, token and all, so it is never copied."""
+    worktree, under any name, and an index that tracks it: it is the same file, token and
+    all, so it is never copied."""
     folder = tmp_path / "source"
     app_files(folder)
     git(folder, "init", "-q")
@@ -1877,7 +2027,9 @@ def test_a_hard_link_to_the_git_configuration_is_refused(tmp_path: Path, config:
     if config == "config.worktree":
         (folder / ".git" / "config.worktree").write_text(f"[remote]\n\turl = {TOKEN_URL}\n")
     os.link(folder / ".git" / config, folder / "settings.ini")
-    listing = local._git_files(folder)
+    if tracked:
+        git(folder, "add", "settings.ini")
+    listing = local._git_files(folder, untracked=not tracked)
     assert PurePosixPath("settings.ini") in listing.names
     with pytest.raises(LocalRunError, match="git configuration"):
         local._copy_files(
@@ -1900,7 +2052,7 @@ def test_a_copy_of_the_configuration_that_is_not_the_same_file_is_copied(tmp_pat
     app_files(folder)
     git(folder, "init", "-q")
     shutil.copy(folder / ".git" / "config", folder / "settings.ini")
-    listing = local._git_files(folder)
+    listing = local._git_files(folder, untracked=True)
     local._copy_files(
         folder,
         tmp_path / "workspace",
@@ -1937,7 +2089,7 @@ def test_a_hard_link_to_any_file_of_the_git_folder_is_refused(
                 local._known_linked(folder),
             )
         else:
-            listing = local._git_files(folder)
+            listing = local._git_files(folder, untracked=True)
             local._copy_files(
                 folder,
                 tmp_path / "copy",
@@ -1954,7 +2106,7 @@ def test_files_linked_to_each_other_in_the_worktree_are_copied(tmp_path: Path) -
     app_files(folder)
     git(folder, "init", "-q")
     os.link(folder / "serve.py", folder / "serve-again.py")
-    listing = local._git_files(folder)
+    listing = local._git_files(folder, untracked=True)
     local._copy_files(
         folder,
         tmp_path / "copy",
@@ -2059,7 +2211,7 @@ def test_a_git_folder_that_cannot_be_read_refuses_the_copy_of_a_linked_file(
     locked = folder / ".git" / "modules"
     locked.mkdir()
     os.link(folder / "serve.py", folder / "serve-again.py")
-    listing = local._git_files(folder)
+    listing = local._git_files(folder, untracked=True)
     locked.chmod(0)
     try:
         with pytest.raises(LocalRunError, match="could not be read"):
@@ -2084,7 +2236,7 @@ def test_a_file_with_one_name_needs_no_walk_however_unreadable_the_git_folder(
     git(folder, "init", "-q")
     locked = folder / ".git" / "modules"
     locked.mkdir()
-    listing = local._git_files(folder)
+    listing = local._git_files(folder, untracked=True)
     locked.chmod(0)
     try:
         local._copy_files(
@@ -2117,7 +2269,7 @@ def test_a_link_to_the_superprojects_git_configuration_is_refused(tmp_path: Path
     git(outer, "config", "remote.origin.url", TOKEN_URL)
     folder = outer / "lib"
     os.link(outer / ".git" / "config", folder / "notes.cfg")
-    listing = local._git_files(folder)
+    listing = local._git_files(folder, untracked=True)
     with pytest.raises(LocalRunError, match="git configuration"):
         local._copy_files(
             folder,

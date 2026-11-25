@@ -169,6 +169,7 @@ def test_cli_test_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         "workspaces": tmp_path / "workspaces",
         "proxy_container": "dev-proxy",
         "all_files": False,
+        "untracked": False,
     }
 
 
@@ -201,6 +202,39 @@ def test_all_files_copies_every_file_with_a_warning(
     assert main(["test", "app", "--model", "fake:s.json"]) == 0
     assert recorder.calls[1][1]["all_files"] is False
     assert ALL_FILES_WARNING not in capsys.readouterr().err
+
+
+def test_untracked_copies_untracked_files_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    assert main(["test", "app", "--model", "fake:s.json", "--untracked"]) == 0
+    ((_, options),) = recorder.calls
+    assert options["untracked"] is True
+    assert options["all_files"] is False
+
+
+def test_untracked_and_all_files_together_are_a_setting_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = Recorder()
+    monkeypatch.setattr(cli, "test_folder", recorder)
+    with pytest.raises(SystemExit) as stopped:
+        main(["test", "app", "--model", "fake:s.json", "--untracked", "--all-files"])
+    assert stopped.value.code == 2
+    said = capsys.readouterr().err
+    assert "--untracked" in said
+    assert "--all-files" in said
+    assert recorder.calls == []
+
+
+def test_the_help_says_what_is_copied(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["test", "--help"])
+    assert stopped.value.code == 0
+    shown = " ".join(capsys.readouterr().out.split())
+    assert "Copies only the files git tracks" in shown
+    assert "--untracked" in shown
+    assert "named on standard error" in shown
 
 
 def test_a_real_model_needs_the_api_key(

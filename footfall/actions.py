@@ -27,18 +27,30 @@ import os
 import stat
 from collections.abc import Mapping, Sequence
 
-__all__ = ["MaskError", "mask"]
+__all__ = ["MaskError", "mask", "no_legacy_commands"]
 
 # The workflow command's own escapes, as GitHub's toolkit writes them, so that the runner
 # masks the value itself and not what an escape in it would turn into.
 _ESCAPES = str.maketrans({"%": "%25"})
 # Standard output, then standard error.
 _STREAMS: tuple[int, ...] = (1, 2)
+# The older form of a workflow command, which the runner looks for anywhere in a line.
+_LEGACY_COMMAND = "##["
 
 
 class MaskError(RuntimeError):
     """No stream a GitHub Actions job reads took a mask command, so its secret must not be
     used. The message never holds any part of the secret."""
+
+
+def no_legacy_commands(text: str) -> str:
+    """`text` with every `##[` broken, so that the runner finds no command in the older form.
+
+    The runner looks for `##[` anywhere in a line of a step's output, in a comparison that
+    can skip characters that show nothing, so text that can come from the code under test is
+    stripped of those first, and then passed through this, before Footfall prints it.
+    """
+    return text.replace(_LEGACY_COMMAND, "## [")
 
 
 def _a_pipe_or_terminal(fd: int) -> bool:

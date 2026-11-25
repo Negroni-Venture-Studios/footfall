@@ -1,14 +1,16 @@
 """Footfall's command line.
 
     footfall test <folder> [--personas ids] [--brief name] [--focus text] [--model spec]
-                           [--out dir]
+                           [--out dir] [--untracked | --all-files]
     footfall runner
     footfall proxy
 
-`footfall test` runs the testers against a local folder and writes their results. `footfall
-runner` serves the runner, the one process that holds the Docker socket, on its Unix socket.
-`footfall proxy` serves the egress proxy and its control socket. The development compose
-file, `deploy/dev/compose.yaml`, runs the three together.
+`footfall test` runs the testers against a local folder and writes their results. It copies
+only the files git tracks, unless `--untracked` adds the untracked files git does not ignore
+or `--all-files` copies every file. `footfall runner` serves the runner, the one process that
+holds the Docker socket, on its Unix socket. `footfall proxy` serves the egress proxy and its
+control socket. The development compose file, `deploy/dev/compose.yaml`, runs the three
+together.
 
 Settings come from the environment:
 
@@ -44,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from footfall.actions import MaskError
+from footfall.actions import MaskError, no_legacy_commands
 from footfall.browsers import BrowserConnectError
 from footfall.local import PROXY_PORT, LocalRunError, test_folder
 from footfall.manifest import ManifestError
@@ -83,8 +85,6 @@ _LOG_TAIL_CAP: Final = 20_000
 # What each line of the app's output is printed behind: not white space, which the GitHub
 # Actions runner trims before it looks for a command, and not a character it can skip.
 _QUOTED: Final = "| "
-# The older form of a workflow command, which the runner looks for anywhere in a line.
-_LEGACY_COMMAND: Final = "##["
 _LINE_CAP: Final = 1_000  # the most characters printed of an error message, or of a problem
 _PROBLEMS_CAP: Final = 20_000  # the most characters printed of a manifest's problems
 _STOPPED: Final = 130  # the exit code when a command is stopped by a signal
@@ -236,11 +236,6 @@ def _ids(text: str) -> list[str]:
     return [part.strip() for part in text.split(",") if part.strip()]
 
 
-def _no_legacy_commands(text: str) -> str:
-    """`text` with every `##[` broken, so that the runner finds no command in the older form."""
-    return text.replace(_LEGACY_COMMAND, "## [")
-
-
 def _inert_tail(text: str) -> str:
     """The app's last output, cleaned, made inert for a GitHub Actions job's log.
 
@@ -254,7 +249,7 @@ def _inert_tail(text: str) -> str:
     those steps remove characters, a zero-width space or a carriage return, say, that could
     otherwise stand in front of a `::` and move it to the start of a line.
     """
-    return "\n".join(_QUOTED + _no_legacy_commands(line) for line in text.splitlines())
+    return "\n".join(_QUOTED + no_legacy_commands(line) for line in text.splitlines())
 
 
 def _printable(error: Exception) -> str:
@@ -271,7 +266,7 @@ def _printable(error: Exception) -> str:
         text = clean_text(str(ManifestError(problems)), _PROBLEMS_CAP)
     else:
         text = clean_text(str(error), _LINE_CAP, single_line=True)
-    return _no_legacy_commands(strip_invisible(text))
+    return no_legacy_commands(strip_invisible(text))
 
 
 def _test(args: argparse.Namespace, settings: Settings) -> int:
@@ -297,6 +292,7 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
                 workspaces=settings.workspaces,
                 proxy_container=settings.proxy_container,
                 all_files=args.all_files,
+                untracked=args.untracked,
             )
         )
     except (RunnerError, LocalRunError) as error:
@@ -331,8 +327,10 @@ def _parser() -> argparse.ArgumentParser:
         "test",
         help="test a local folder with AI personas",
         description=(
-            "Test the app in a local folder. Exits with 0 when every persona ran, 1 when "
-            "one failed or the run could not go ahead, and 2 for a setting that is wrong."
+            "Test the app in a local folder. Copies only the files git tracks, unless "
+            "--untracked or --all-files says otherwise. Exits with 0 when every persona ran, "
+            "1 when one failed or the run could not go ahead, and 2 for a setting that is "
+            "wrong."
         ),
     )
     test.add_argument("folder", help="the folder to test, with footfall.toml at its root")
@@ -355,7 +353,17 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_OUT,
         help=f"the folder for the results (default: {DEFAULT_OUT})",
     )
-    test.add_argument(
+    # --all-files already copies every untracked file, so the two together are refused.
+    copied = test.add_mutually_exclusive_group()
+    copied.add_argument(
+        "--untracked",
+        action="store_true",
+        help=(
+            "copy the untracked files git does not ignore as well, each named on standard "
+            "error first; the folder's own .gitignore decides which they are"
+        ),
+    )
+    copied.add_argument(
         "--all-files",
         action="store_true",
         help=(

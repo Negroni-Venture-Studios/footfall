@@ -4,9 +4,12 @@ The orchestrator holds the Anthropic key and drives the browsers; the runner, ov
 holds Docker. Nothing here starts a container or opens the Docker socket (AGENTS.md rule 1).
 A run copies the folder into the workspaces root and asks the runner to prepare it, to start
 one copy of the app for each persona and one browser container, and to stop it all at the end,
-whatever happened in between. It copies only the files git would commit, tracked or untracked
-but not ignored, so that an ignored `.env` never reaches a container (AGENTS.md rule 3); a
-folder outside git is copied only when the caller asks for every file.
+whatever happened in between. It copies only the files git tracks, so that a `.env` the
+developer keeps out of git never reaches a container (AGENTS.md rule 3), whatever the tested
+branch's own `.gitignore` says. Untracked files that git does not ignore are copied only when
+the caller asks for them, and each is named on standard error first, since the branch's
+`.gitignore` decides which they are. A folder outside git is copied only when the caller asks
+for every file.
 
 When the manifest has a `[login]` section, the run makes a throwaway username and password.
 The password reaches a container only through the seed step's environment (AGENTS.md rule 3).
@@ -38,7 +41,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, NoReturn, Protocol, TextIO
@@ -47,7 +50,7 @@ from urllib.parse import quote as url_quote
 from playwright.async_api import Browser, BrowserContext, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
-from footfall.actions import mask
+from footfall.actions import mask, no_legacy_commands
 from footfall.browsers import Engine, SignInError, connect_run_server, open_context, sign_in
 from footfall.manifest import (
     Brief,
@@ -326,7 +329,7 @@ _NO_LINKS: Final = _Linked()
 
 @dataclass(frozen=True)
 class _Listing:
-    """What git would commit from a folder, and the identities of the repository's git
+    """The files git lists for a folder's copy, and the identities of the repository's git
     folder and its common folder, which differ for a linked worktree, and of the
     configuration files in them, with the files in those folders that have other names."""
 
@@ -472,9 +475,14 @@ def _git_folders(
     return frozenset(identities)
 
 
-def _git_files(folder: Path) -> _Listing:
-    """The files git would commit from `folder`, tracked or untracked but not ignored, and
-    the identities of the repository's git folders, which no name may lead into.
+def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
+    """The files git tracks in `folder`, and with `untracked` the untracked files it does not
+    ignore too, and the identities of the repository's git folders, which no name may lead
+    into.
+
+    Which untracked files git ignores is decided by the `.gitignore` files in the folder,
+    which the tested branch writes, and a negation there outranks the developer's own
+    exclude files. So they are listed only when asked for.
 
     Raises LocalRunError when git is missing, hangs, or cannot read the folder.
     """
@@ -485,12 +493,12 @@ def _git_files(folder: Path) -> _Listing:
         return {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
 
     tracked = listed("--cached")
-    untracked = listed("--others", "--exclude-standard") - tracked
+    others = listed("--others", "--exclude-standard") - tracked if untracked else set()
     paths = _git_folder_paths(git, folder)
     return _Listing(
-        sorted(tracked | untracked),
+        sorted(tracked | others),
         _git_folders(git, folder, paths),
-        frozenset(untracked),
+        frozenset(others),
         _Linked([*paths, *_superproject_git_folders(git, folder)]),
     )
 
@@ -627,6 +635,24 @@ def _known_linked(folder: Path) -> _Linked:
     except LocalRunError:  # git is missing, or cannot read the repository
         return _Linked(discovered)
     return _Linked([*own, *_superproject_git_folders(git, folder), *discovered])
+
+
+def _name_untracked(names: Iterable[PurePosixPath]) -> None:
+    """Name each untracked file the copy takes on standard error, before it is copied, so
+    that a person can see a `.env` arrive. Each name is quoted, made one line and cut short,
+    without control or invisible characters and with any `##[` broken, since a name is the
+    tested branch's to choose and could otherwise write to the terminal, forge a line, or
+    give a GitHub Actions job a command."""
+    shown = [no_legacy_commands(strip_invisible(_shown(name))) for name in sorted(names)]
+    if not shown:
+        return
+    print(
+        "footfall test: --untracked copies these files, which git neither tracks nor ignores, "
+        "as the folder's own .gitignore decides:",
+        file=sys.stderr,
+    )
+    for name in shown:
+        print(f"  {name}", file=sys.stderr)
 
 
 def _refuse_a_git_folder(base: Path, git_dirs: frozenset[_Identity]) -> None:
@@ -1176,11 +1202,14 @@ async def test_folder(
     proxy_container: str = DEFAULT_PROXY_CONTAINER,
     stdout: TextIO | None = None,
     all_files: bool = False,
+    untracked: bool = False,
 ) -> list[PersonaReport]:
     """Test a local folder with the named personas (the manifest's, when none are named).
 
-    Only the files git would commit are copied, unless `all_files` is true, which a folder
-    outside git needs.
+    Only the files git tracks are copied. With `untracked`, so are the untracked files git
+    does not ignore, each named on standard error first. With `all_files`, which a folder
+    outside git needs, every file is copied; the two cannot be asked for together, and
+    ValueError says so.
 
     `connect_browser` takes an engine and the run's Playwright endpoint and returns a
     browser; by default it connects to the run's browser container. Writes the results into
@@ -1189,16 +1218,22 @@ async def test_folder(
     RunnerError, BrowserConnectError, or MaskError when a secret could not be masked in a
     GitHub Actions log, when the run cannot go ahead.
     """
+    if all_files and untracked:
+        raise ValueError("untracked and all_files cannot both be asked for")
     manifest = load_manifest(folder)
     brief = load_brief(folder, manifest, brief_name)
     devices = load_devices()
     personas = select(load_personas(devices), list(persona_ids) or list(manifest.test.personas))
     model_from_spec(model_spec)  # a spec that names nothing runnable stops the run here
-    listing = None if all_files else await asyncio.to_thread(_git_files, folder)
-    if listing is not None:
+    listing = None
+    if not all_files:
+        listing = await asyncio.to_thread(
+            functools.partial(_git_files, folder, untracked=untracked)
+        )
         # Both were read from the folder, never through a link; neither is used unless the
         # run would copy it too.
         require_listed(manifest, brief, listing.names)
+        _name_untracked(listing.untracked)
 
     run_id = new_run_id()
     account = None
@@ -1257,7 +1292,7 @@ async def _go(
 ) -> list[PersonaReport]:
     """Prepare the app, start its copies and the browsers, and run every persona.
 
-    `listing` is what git would commit, or None to copy every file in the folder.
+    `listing` is the files git lists to copy, or None to copy every file in the folder.
     """
     manifest = run.manifest
     workspace.parent.mkdir(parents=True, exist_ok=True)

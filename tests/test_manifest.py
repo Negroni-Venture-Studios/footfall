@@ -510,12 +510,14 @@ def test_a_manifest_or_brief_must_be_listed() -> None:
     with pytest.raises(ManifestError) as caught:
         require_listed(manifest, brief, {PurePosixPath("f07/briefs/f07-listed.md")})
     assert caught.value.problems == [
-        "footfall.toml: is not among the files git would commit, the only files a run copies"
+        "footfall.toml: is not among the files the run copies, which git tracks or, with "
+        "--untracked, does not ignore"
     ]
     with pytest.raises(ManifestError) as caught:
         require_listed(manifest, brief, {PurePosixPath("footfall.toml")})
     assert caught.value.problems == [
-        "f07-listed.md: is not among the files git would commit, the only files a run copies"
+        "f07-listed.md: is not among the files the run copies, which git tracks or, with "
+        "--untracked, does not ignore"
     ]
 
 

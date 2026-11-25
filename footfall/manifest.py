@@ -586,17 +586,18 @@ def load_brief(repo: Path, manifest: Manifest, name: str = "default") -> Brief:
 def require_listed(manifest: Manifest, brief: Brief, listed: Collection[PurePosixPath]) -> None:
     """Refuse a manifest or brief that is not in `listed`, git's listing of the folder.
 
-    `footfall test` copies only the files git would commit, unless it is told to copy every
-    file, so a manifest or brief outside that listing, such as a file git ignores, is not
-    one of the app's files. It is refused before its text is used, as the copy would leave
-    it out.
+    `footfall test` copies only the files git tracks, and with --untracked the untracked
+    files it does not ignore, unless it is told to copy every file. A manifest or brief
+    outside that listing, such as an untracked file or one git ignores, is not one of the
+    files the run copies, and is refused before its text is used.
     """
     wanted = {
         MANIFEST_FILE: PurePosixPath(MANIFEST_FILE),
         f"{brief.name}.md": _brief_path(manifest, brief.name),
     }
     problems = [
-        f"{label}: is not among the files git would commit, the only files a run copies"
+        f"{label}: is not among the files the run copies, which git tracks or, with "
+        "--untracked, does not ignore"
         for label, path in wanted.items()
         if path not in listed
     ]

@@ -6,10 +6,27 @@ from pathlib import Path
 
 import pytest
 
-from footfall.actions import MaskError, mask
+from footfall.actions import MaskError, mask, no_legacy_commands
 from tests.conftest import MaskOutput
 
 IN_ACTIONS = {"GITHUB_ACTIONS": "true"}
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("##[error]x", "## [error]x"),
+        ("a ##[add-mask]b ##[c", "a ## [add-mask]b ## [c"),
+        ("###[x", "### [x"),
+        ("##[##[x", "## [## [x"),
+        ("# #[ and ## [ stay", "# #[ and ## [ stay"),
+    ],
+)
+def test_no_command_in_the_older_form_survives(text: str, shown: str) -> None:
+    assert no_legacy_commands(text) == shown
+    assert "##[" not in no_legacy_commands(text)
+
+
 # Not a real secret: the shape of a throwaway password, made up for the tests.
 VALUE = "Qm9vdC1zdHJhcC1vbmx5LXRlc3Q"  # gitleaks:allow
 
