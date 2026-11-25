@@ -45,7 +45,14 @@ from playwright.async_api import Error as PlaywrightError
 
 from footfall.actions import mask
 from footfall.browsers import Engine, SignInError, connect_run_server, open_context, sign_in
-from footfall.manifest import Brief, Manifest, load_brief, load_manifest
+from footfall.manifest import (
+    Brief,
+    Manifest,
+    is_dot_git,
+    load_brief,
+    load_manifest,
+    require_listed,
+)
 from footfall.personas import Device, Persona, PersonaError, load_devices, load_personas, select
 from footfall.runner.service import RunnerError
 from footfall.tester.guard import Guard
@@ -89,10 +96,6 @@ _CHUNK: Final = 1024 * 1024
 _GIT_PASSED: Final = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL")
 # The errors that mean one part of a path is a link or a file, not a folder.
 _NOT_A_FOLDER: Final = frozenset({errno.ELOOP, errno.ENOTDIR, errno.EMLINK})
-# The code points HFS+ ignores in a name, which git's is_hfs_dotgit skips.
-_HFS_IGNORED: Final = frozenset(
-    [*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF]
-)
 
 type ConnectBrowser = Callable[[str, str], Awaitable[Browser]]
 
@@ -626,12 +629,6 @@ def _shown(name: object) -> str:
     return quote(str(name), 120)
 
 
-def _is_dot_git(part: str) -> bool:
-    """Whether a name is `.git` as a case-insensitive file system, or HFS+, would read it."""
-    kept = "".join(ch for ch in part if ord(ch) not in _HFS_IGNORED)
-    return kept.casefold() == ".git"
-
-
 def _kind(name: str, folder: int | None = None) -> int | None:
     """The file type bits of `name`, in the open folder `folder` or as a path, never
     following a link; None for a name that is not there or cannot be read."""
@@ -807,7 +804,7 @@ def _copy_files(
                     raise LocalRunError(
                         f"cannot copy {_shown(name)}: it is not a name inside the folder"
                     )
-                if any(_is_dot_git(part) for part in parts):
+                if any(is_dot_git(part) for part in parts):
                     raise LocalRunError(
                         f"cannot copy {_shown(name)}: it is in the repository's git folder"
                     )
@@ -897,7 +894,7 @@ def _copy_folder(
     results = out.resolve()
 
     def left_out(path: Path, name: str) -> bool:
-        if _is_dot_git(name) or _inside(path.resolve(), results):
+        if is_dot_git(name) or _inside(path.resolve(), results):
             return True
         info = path.lstat()
         if stat.S_ISREG(info.st_mode):
@@ -1116,6 +1113,10 @@ async def test_folder(
     personas = select(load_personas(devices), list(persona_ids) or list(manifest.test.personas))
     model_from_spec(model_spec)  # a spec that names nothing runnable stops the run here
     listing = None if all_files else await asyncio.to_thread(_git_files, folder)
+    if listing is not None:
+        # Both were read from the folder, never through a link; neither is used unless the
+        # run would copy it too.
+        require_listed(manifest, brief, listing.names)
 
     run_id = new_run_id()
     account = None

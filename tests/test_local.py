@@ -875,6 +875,45 @@ async def test_results_inside_a_repository_are_not_copied(
     assert runner.workspace_files == ["footfall.toml", "footfall/briefs/default.md", "serve.py"]
 
 
+@pytest.mark.parametrize(
+    ("ignored", "label"),
+    [("footfall/briefs/default.md", "default.md"), ("footfall.toml", "footfall.toml")],
+)
+async def test_a_manifest_or_brief_git_does_not_list_is_refused(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]], ignored: str, label: str
+) -> None:
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    (folder / ".gitignore").write_text(f"{ignored}\n")
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(ManifestError) as caught:
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
+    assert caught.value.problems == [
+        f"{label}: is not among the files git would commit, the only files a run copies"
+    ]
+    assert runner.calls == []
+    assert not (tmp_path / "workspaces").exists()
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("all_files", [False, True])
+async def test_a_listed_brief_or_one_copied_with_all_files_goes_ahead(
+    tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]], all_files: bool
+) -> None:
+    """The positive control: the run gets as far as preparing the app, which stops it here,
+    with no browser needed. With --all-files an ignored brief is copied, so it is read."""
+    folder = two_pages(tmp_path)
+    git(folder, "init", "-q")
+    if all_files:
+        (folder / ".gitignore").write_text("footfall/briefs/default.md\n")
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    runner.fail["prepare"] = RunnerError("f07-stop-marker")
+    with pytest.raises(RunnerError, match="f07-stop-marker"):
+        await run_folder(folder, runner, connect[0], tmp_path, all_files=all_files)
+    assert runner.ops() == ["prepare", "stop"]
+    assert "footfall/briefs/default.md" in runner.workspace_files
+
+
 async def test_a_folder_outside_git_is_refused_without_all_files(
     tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
 ) -> None:

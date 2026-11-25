@@ -1,16 +1,19 @@
 """The manifest and briefs: strict validation with every problem reported at once."""
 
 import shutil
-from pathlib import Path
+import subprocess
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from footfall.manifest import (
+    Brief,
     Manifest,
     ManifestError,
     load_brief,
     load_manifest,
     parse_manifest,
+    require_listed,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "apps" / "minimal"
@@ -269,8 +272,21 @@ def test_manifest_symlink_out_of_repo_is_refused(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "footfall.toml").symlink_to(outside)
-    with pytest.raises(ManifestError, match="outside the repository"):
+    with pytest.raises(ManifestError, match="is a link"):
         load_manifest(repo)
+
+
+def test_manifest_symlink_inside_repo_is_refused(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config" / "real.toml").write_text(MINIMAL)
+    (repo / "footfall.toml").symlink_to("config/real.toml")
+    with pytest.raises(ManifestError) as caught:
+        load_manifest(repo)
+    assert caught.value.problems == [
+        "footfall.toml: is a link, and Footfall reads a manifest or brief only as a plain "
+        "file, never through a link"
+    ]
 
 
 # ------------------------------------------------------------------ briefs
@@ -391,7 +407,7 @@ def test_brief_symlink_out_of_repo_is_refused(tmp_path: Path) -> None:
     secret = tmp_path / "secret.md"
     secret.write_text("not for the tester\n")
     (repo / "footfall" / "briefs" / "leak.md").symlink_to(secret)
-    with pytest.raises(ManifestError, match="outside the repository"):
+    with pytest.raises(ManifestError, match="is a link"):
         load_brief(repo, manifest, "leak")
 
 
@@ -402,16 +418,105 @@ def test_brief_symlinked_folder_out_of_repo_is_refused(tmp_path: Path) -> None:
     (elsewhere / "default.md").write_text("outside\n")
     shutil.rmtree(repo / "footfall" / "briefs")
     (repo / "footfall" / "briefs").symlink_to(elsewhere)
-    with pytest.raises(ManifestError, match="outside the repository"):
+    with pytest.raises(ManifestError, match="is a link or a file, not a folder"):
         load_brief(repo, manifest)
 
 
-def test_brief_symlink_inside_repo_is_allowed(tmp_path: Path) -> None:
+def test_brief_symlinked_folder_inside_repo_is_refused(tmp_path: Path) -> None:
     repo, manifest = make_repo(tmp_path)
-    (repo / "footfall" / "briefs" / "alias.md").symlink_to(
-        repo / "footfall" / "briefs" / "default.md"
-    )
-    assert load_brief(repo, manifest, "alias").text.startswith("Look around")
+    (repo / "footfall" / "briefs").rename(repo / "footfall" / "real-briefs")
+    (repo / "footfall" / "briefs").symlink_to("real-briefs")
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest)
+    assert caught.value.problems == [
+        "default.md: 'footfall/briefs' is a link or a file, not a folder, and Footfall reads "
+        "nothing through a link"
+    ]
+
+
+GIT = shutil.which("git") or "git"
+CONFIG_MARKER = "f07-config-marker-token"
+IGNORED_MARKER = "F07_IGNORED_MARKER_5c1e"
+TRACKED_MARKER = "F07_TRACKED_MARKER_9a3d"
+
+
+def git(folder: Path, *arguments: str) -> None:
+    subprocess.run([GIT, "-C", str(folder), *arguments], check=True, capture_output=True)
+
+
+def repo_with_secrets(tmp_path: Path) -> tuple[Path, Manifest]:
+    """A repository whose git configuration, ignored file and tracked file each hold a marker
+    that nothing else in the repository, or any default, holds."""
+    repo, manifest = make_repo(tmp_path)
+    git(repo, "init", "-q")
+    git(repo, "config", "remote.origin.url", f"https://{CONFIG_MARKER}@example.invalid/a.git")
+    (repo / ".gitignore").write_text("f07-secret.env\n")
+    (repo / "f07-secret.env").write_text(f"API_KEY={IGNORED_MARKER}\n")
+    (repo / "f07-notes.md").write_text(f"{TRACKED_MARKER}\n")
+    git(repo, "add", ".gitignore", "f07-notes.md", "footfall.toml", "footfall")
+    return repo, manifest
+
+
+@pytest.mark.parametrize(
+    ("target", "marker"),
+    [
+        (".git/config", CONFIG_MARKER),
+        ("f07-secret.env", IGNORED_MARKER),
+        ("f07-notes.md", TRACKED_MARKER),
+    ],
+)
+def test_a_brief_that_is_a_link_inside_the_repo_is_refused(
+    tmp_path: Path, target: str, marker: str
+) -> None:
+    repo, manifest = repo_with_secrets(tmp_path)
+    briefs = repo / "footfall" / "briefs"
+    (briefs / "f07-linked.md").symlink_to(Path("../..") / target)
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest, "f07-linked")
+    assert caught.value.problems == [
+        "f07-linked.md: is a link, and Footfall reads a manifest or brief only as a plain "
+        "file, never through a link"
+    ]
+    assert marker not in str(caught.value)
+    # The same file, copied in as a plain file, would have been read, marker and all.
+    shutil.copyfile(repo / target, briefs / "f07-copied.md")
+    assert marker in load_brief(repo, manifest, "f07-copied").text
+
+
+@pytest.mark.parametrize("folder", [".git", ".GIT/briefs", "x/.g\u200cit"])
+def test_a_brief_in_a_git_folder_is_refused(tmp_path: Path, folder: str) -> None:
+    repo, _ = make_repo(tmp_path)
+    (repo / folder).mkdir(parents=True, exist_ok=True)
+    (repo / folder / "f07-brief.md").write_text("Look in the git folder.\n")
+    manifest = parse_manifest(MINIMAL + f'[test]\nbriefs = "{folder}"\n')
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest, "f07-brief")
+    assert caught.value.problems == ["f07-brief.md: is in the repository's git folder"]
+
+
+def test_a_brief_that_is_a_folder_is_refused(tmp_path: Path) -> None:
+    repo, manifest = make_repo(tmp_path)
+    (repo / "footfall" / "briefs" / "f07-folder.md").mkdir()
+    with pytest.raises(ManifestError) as caught:
+        load_brief(repo, manifest, "f07-folder")
+    assert caught.value.problems == ["f07-folder.md: is not a plain file"]
+
+
+def test_a_manifest_or_brief_must_be_listed() -> None:
+    manifest = parse_manifest(MINIMAL + '[test]\nbriefs = "./f07/briefs/"\n')
+    brief = Brief(name="f07-listed", text="Hi\n", start="signed-out", max_actions=None)
+    listed = {PurePosixPath("footfall.toml"), PurePosixPath("f07/briefs/f07-listed.md")}
+    require_listed(manifest, brief, listed)  # the folder is spelt differently, but the same
+    with pytest.raises(ManifestError) as caught:
+        require_listed(manifest, brief, {PurePosixPath("f07/briefs/f07-listed.md")})
+    assert caught.value.problems == [
+        "footfall.toml: is not among the files git would commit, the only files a run copies"
+    ]
+    with pytest.raises(ManifestError) as caught:
+        require_listed(manifest, brief, {PurePosixPath("footfall.toml")})
+    assert caught.value.problems == [
+        "f07-listed.md: is not among the files git would commit, the only files a run copies"
+    ]
 
 
 def test_brief_missing_oversized_and_undecodable(tmp_path: Path) -> None:
@@ -490,12 +595,12 @@ def test_symlink_loops_are_problems(tmp_path: Path) -> None:
     (repo / "footfall" / "briefs" / "loop.md").symlink_to("loop.md")
     with pytest.raises(ManifestError) as brief:
         load_brief(repo, manifest, "loop")
-    assert brief.value.problems[0].startswith("loop.md: cannot be resolved")
+    assert brief.value.problems[0].startswith("loop.md: is a link")
     (repo / "footfall.toml").unlink()
     (repo / "footfall.toml").symlink_to("footfall.toml")
     with pytest.raises(ManifestError) as caught:
         load_manifest(repo)
-    assert caught.value.problems[0].startswith("footfall.toml: cannot be resolved")
+    assert caught.value.problems[0].startswith("footfall.toml: is a link")
 
 
 @pytest.mark.parametrize("persona", ["1", "-a", "Sven", "a" * 33, "a_b"])

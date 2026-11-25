@@ -3,16 +3,20 @@
 Both come from repositories Footfall does not control, and app authors and their agents
 write them, so reading is strict and fails closed. Every problem is collected and
 reported at once in a `ManifestError`, so an author can fix a manifest in one go. Files
-are read as UTF-8 with a size limit, and a brief is never read from outside the
-repository, even through a symlink.
+are read as UTF-8 with a size limit, and only as plain files: each is opened one name at a
+time from an open folder, as a run copies files, never through a link and never from the
+repository's git folder, so that neither can bring in a file the run would not copy.
 """
 
+import errno
+import os
 import re
+import stat
 import tomllib
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from footfall.hosts import HostError, validate_host_name
@@ -26,9 +30,11 @@ __all__ = [
     "Manifest",
     "ManifestError",
     "TestSection",
+    "is_dot_git",
     "load_brief",
     "load_manifest",
     "parse_manifest",
+    "require_listed",
 ]
 
 RUNTIMES = ("python3.13", "node22")
@@ -58,6 +64,18 @@ _LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t]*\r?\n)+")
 _KEY_CAP = 64  # the most characters of a key a message shows, before any is escaped
 # A key TOML can write without quotes, which shows nothing but itself.
 _PLAIN_KEY = re.compile(rf"[A-Za-z0-9_-]{{1,{_KEY_CAP}}}")
+# The code points HFS+ ignores in a name, which git's is_hfs_dotgit skips.
+_HFS_IGNORED = frozenset(
+    [*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF]
+)
+_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# Never through a link, and never waiting on a FIFO, which could block or never end.
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+# The errors that mean a name is a link, or, where a folder should be, a file.
+_NOT_FOLLOWED = frozenset({errno.ELOOP, errno.ENOTDIR, errno.EMLINK})
+_LINK_PROBLEM = (
+    "is a link, and Footfall reads a manifest or brief only as a plain file, never through a link"
+)
 
 
 class ManifestError(ValueError):
@@ -424,24 +442,74 @@ def _why(error: Exception) -> str:
     return error.strerror or "error" if isinstance(error, OSError) else str(error)
 
 
-def _read_repo_file(repo: Path, path: Path, label: str, limit: int, missing: str) -> str:
-    """Read a UTF-8 file that must lie inside the repository, within a size limit.
+def is_dot_git(part: str) -> bool:
+    """Whether a name is `.git` as a case-insensitive file system, or HFS+, would read it."""
+    kept = "".join(ch for ch in part if ord(ch) not in _HFS_IGNORED)
+    return kept.casefold() == ".git"
+
+
+def _open_in(repo: Path, parts: Sequence[str], label: str, missing: str) -> int:
+    """Open the file `parts` names below the folder `repo`, one name at a time from an open
+    folder and never through a link, and return its descriptor.
+
+    Raises ManifestError for a name that is missing, a link, or a file where a folder should
+    be, or that cannot be opened. `missing` is the problem to report if the file does not
+    exist.
+    """
+    try:
+        current = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
+    except FileNotFoundError as error:
+        raise ManifestError([f"{label}: {missing}"]) from error
+    except OSError as error:
+        raise ManifestError([f"{label}: cannot be read ({_why(error)})"]) from error
+    try:
+        for index, part in enumerate(parts):
+            leaf = index == len(parts) - 1
+            try:
+                inner = os.open(part, _FILE_FLAGS if leaf else _FOLDER_FLAGS, dir_fd=current)
+            except FileNotFoundError as error:
+                raise ManifestError([f"{label}: {missing}"]) from error
+            except OSError as error:
+                if error.errno not in _NOT_FOLLOWED:
+                    raise ManifestError([f"{label}: cannot be read ({_why(error)})"]) from error
+                if leaf:
+                    raise ManifestError([f"{label}: {_LINK_PROBLEM}"]) from error
+                where = "/".join(parts[: index + 1])
+                raise ManifestError(
+                    [
+                        f"{label}: {where!r} is a link or a file, not a folder, and Footfall "
+                        "reads nothing through a link"
+                    ]
+                ) from error
+            os.close(current)
+            current = inner
+    except BaseException:
+        os.close(current)
+        raise
+    return current
+
+
+def _read_repo_file(repo: Path, name: PurePosixPath, label: str, limit: int, missing: str) -> str:
+    """Read a UTF-8 file within a size limit: `name`, a plain file inside the repository,
+    reached through no link and lying in no git folder, however `.git` is spelt.
 
     `missing` is the problem to report if the file does not exist.
     """
-    try:
-        resolved = path.resolve(strict=True)
-    except FileNotFoundError as error:
-        raise ManifestError([f"{label}: {missing}"]) from error
-    except (OSError, RuntimeError) as error:  # RuntimeError: a symlink loop
-        raise ManifestError([f"{label}: cannot be resolved ({_why(error)})"]) from error
-    if not resolved.is_relative_to(repo.resolve()):
+    if not name.parts or name.is_absolute() or ".." in name.parts:
         raise ManifestError([f"{label}: is outside the repository"])
+    if any(is_dot_git(part) for part in name.parts):
+        raise ManifestError([f"{label}: is in the repository's git folder"])
+    handle = _open_in(repo, name.parts, label, missing)
     try:
-        with resolved.open("rb") as handle:
-            data = handle.read(limit + 1)
+        if not stat.S_ISREG(os.fstat(handle).st_mode):
+            raise ManifestError([f"{label}: is not a plain file"])
+        data = b""
+        while len(data) <= limit and (chunk := os.read(handle, limit + 1 - len(data))):
+            data += chunk
     except OSError as error:
-        raise ManifestError([f"{label}: cannot be read ({error.strerror})"]) from error
+        raise ManifestError([f"{label}: cannot be read ({_why(error)})"]) from error
+    finally:
+        os.close(handle)
     if len(data) > limit:
         raise ManifestError([f"{label}: larger than the {limit} byte limit"])
     try:
@@ -452,7 +520,7 @@ def _read_repo_file(repo: Path, path: Path, label: str, limit: int, missing: str
 
 def load_manifest(repo: Path) -> Manifest:
     """Read `footfall.toml` from the root of a repository."""
-    path = repo / MANIFEST_FILE
+    path = PurePosixPath(MANIFEST_FILE)
     missing = "not found at the root of the repository"
     return parse_manifest(_read_repo_file(repo, path, MANIFEST_FILE, MAX_MANIFEST_BYTES, missing))
 
@@ -468,6 +536,11 @@ def _split_front_matter(text: str, label: str) -> tuple[dict[str, Any], str]:
     raise ManifestError([f"{label}: front matter is not closed by a +++ line"])
 
 
+def _brief_path(manifest: Manifest, name: str) -> PurePosixPath:
+    """Where the brief `name` lies in the repository, as git would list it."""
+    return PurePosixPath(manifest.test.briefs) / f"{name}.md"
+
+
 def load_brief(repo: Path, manifest: Manifest, name: str = "default") -> Brief:
     """Read one brief from the manifest's briefs folder."""
     if not _BRIEF_NAME.fullmatch(name):
@@ -479,7 +552,7 @@ def load_brief(repo: Path, manifest: Manifest, name: str = "default") -> Brief:
         )
     label = f"{name}.md"
     folder = manifest.test.briefs
-    path = repo / folder / label
+    path = _brief_path(manifest, name)
     raw = _read_repo_file(repo, path, label, MAX_BRIEF_BYTES, f"not found in {folder}")
     front, body = _split_front_matter(raw, label)
 
@@ -508,3 +581,24 @@ def load_brief(repo: Path, manifest: Manifest, name: str = "default") -> Brief:
         start=start,
         max_actions=max_actions,
     )
+
+
+def require_listed(manifest: Manifest, brief: Brief, listed: Collection[PurePosixPath]) -> None:
+    """Refuse a manifest or brief that is not in `listed`, git's listing of the folder.
+
+    `footfall test` copies only the files git would commit, unless it is told to copy every
+    file, so a manifest or brief outside that listing, such as a file git ignores, is not
+    one of the app's files. It is refused before its text is used, as the copy would leave
+    it out.
+    """
+    wanted = {
+        MANIFEST_FILE: PurePosixPath(MANIFEST_FILE),
+        f"{brief.name}.md": _brief_path(manifest, brief.name),
+    }
+    problems = [
+        f"{label}: is not among the files git would commit, the only files a run copies"
+        for label, path in wanted.items()
+        if path not in listed
+    ]
+    if problems:
+        raise ManifestError(problems)
