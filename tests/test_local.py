@@ -1601,9 +1601,17 @@ def test_a_git_folder_is_known_by_its_shape_whether_its_parts_are_links(
 
 
 def test_an_ordinary_folder_is_not_shaped_like_a_git_folder(tmp_path: Path) -> None:
-    (tmp_path / "objects").symlink_to("nowhere")  # a dangling link to a folder is no folder
+    # Any link counts as `objects`, even a dangling one, so the folder is not git-shaped only
+    # because it has no HEAD: HEAD.md is not HEAD.
+    (tmp_path / "objects").symlink_to("nowhere")
     (tmp_path / "HEAD.md").write_text("a heading\n")
     assert not local._shaped_like_a_git_folder(lambda name: local._kind(str(tmp_path / name)))
+
+
+def test_a_head_beside_a_dangling_objects_link_is_shaped_like_a_git_folder(tmp_path: Path) -> None:
+    (tmp_path / "objects").symlink_to("nowhere")
+    (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")
+    assert local._shaped_like_a_git_folder(lambda name: local._kind(str(tmp_path / name)))
 
 
 def shaped_folder(folder: Path, *names: str) -> Path:
