@@ -26,6 +26,7 @@ the disk watch, can still end the run.
 """
 
 import contextlib
+import errno
 import functools
 import logging
 import os
@@ -52,6 +53,10 @@ DISK_REASON: Final = "disk budget exceeded"
 MEASURE_REASON: Final = "disk usage could not be measured"
 NEVER_PREPARED: Final = "stopped before it was prepared"
 MAX_DEPTH: Final = 100  # folders below a workspace or prepared app
+# How many stopped run ids the runner remembers, to refuse each if it is prepared again, and
+# to say why it was stopped. Run ids are random, so one is reused only by mistake, and a
+# mistake that comes this late is not one the runner needs to catch.
+REMEMBERED_STOPS: Final = 10_000
 BROWSERS_PORT: Final = 3000
 
 # The browser container's port is on the run's internal network, which the app containers
@@ -240,15 +245,6 @@ def _as_runner_error() -> Iterator[None]:
 # ---------------------------------------------------------------- the filesystem
 
 
-def _reraise(error: OSError) -> None:
-    raise error
-
-
-def _reraise_unless_gone(error: OSError) -> None:
-    if not isinstance(error, FileNotFoundError):
-        raise error
-
-
 def _kind(mode: int) -> str:
     if stat.S_ISFIFO(mode):
         return "a FIFO"
@@ -275,40 +271,96 @@ def _open_folder(root: Path, relative: PurePath) -> int:
     return folder
 
 
+class _Changed(Exception):
+    """A folder was not there, or not the same folder, when the walk came to open it."""
+
+    def __init__(self, where: PurePath) -> None:
+        super().__init__(str(where))
+        self.where = where
+
+
+class _Deep(Exception):
+    """A folder lies deeper below the top than the walk goes."""
+
+    def __init__(self, where: PurePath) -> None:
+        super().__init__(str(where))
+        self.where = where
+
+
+_TOP: Final = PurePath()
+
+
+def _walk(
+    folder: int, max_depth: int, *, gone_ok: bool, here: PurePath = _TOP
+) -> Generator[tuple[PurePath, int, str, os.stat_result]]:
+    """Yield (where, its descriptor, name, lstat) for everything below an open folder.
+
+    The walk goes by descriptor, depth first, reading each folder as it goes, so it holds one
+    listing and one descriptor for each folder on the path it is on, and nothing for the
+    folders it has finished or not yet reached. Each folder is yielded before anything in it.
+    A folder is opened by name without following a link, and must then be the folder that was
+    listed, or `_Changed` is raised, so a folder swapped for a link is never walked through,
+    or even opened. A folder more than `max_depth` below the top raises `_Deep`. With
+    `gone_ok`, a name removed while the walk reads is skipped; otherwise the error is raised.
+    """
+    with os.scandir(folder) as listing:
+        for entry in listing:
+            name = entry.name
+            try:
+                info = os.stat(name, dir_fd=folder, follow_symlinks=False)
+            except FileNotFoundError:
+                if gone_ok:
+                    continue
+                raise
+            where = here / name
+            if stat.S_ISDIR(info.st_mode) and len(here.parts) >= max_depth:
+                raise _Deep(where)
+            yield here, folder, name, info
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            try:
+                inner = os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+            except FileNotFoundError:
+                if gone_ok:
+                    continue
+                raise _Changed(where) from None
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise _Changed(where) from None
+                raise
+            try:
+                if not os.path.samestat(info, os.fstat(inner)):
+                    raise _Changed(where)
+                yield from _walk(inner, max_depth, gone_ok=gone_ok, here=where)
+            finally:
+                os.close(inner)
+
+
 def _entries(folder: int, what: str) -> Generator[tuple[PurePath, int, str, os.stat_result]]:
     """Yield (where, its descriptor, name, lstat) for everything below an open folder.
 
-    The walk goes by descriptor, top down, and never into a link. It refuses anything but
-    files, folders and links, a tree more than `MAX_DEPTH` folders deep, and a folder that
-    turns into something else before it is walked. Each folder is yielded before anything in it.
+    The walk goes by descriptor, depth first, and never into or through a link. It refuses
+    anything but files, folders and links, a tree more than `MAX_DEPTH` folders deep, and a
+    folder that turns into something else before it is walked. Each folder is yielded before
+    anything in it.
     """
-    unvisited: set[PurePath] = set()
-    for path, dirs, files, dirfd in os.fwalk(
-        ".", dir_fd=folder, follow_symlinks=False, onerror=_reraise
-    ):
-        here = PurePath(path)
-        unvisited.discard(here)
-        folders: list[str] = []
-        for name in (*dirs, *files):
-            info = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
-            where = here / name
-            if stat.S_ISDIR(info.st_mode):
-                if len(here.parts) >= MAX_DEPTH:
-                    raise RunnerError(
-                        f"{what} is more than {MAX_DEPTH} folders deep at {_show(str(where))}"
-                    )
-                unvisited.add(where)
-                folders.append(name)
-            elif not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+    try:
+        for here, dirfd, name, info in _walk(folder, MAX_DEPTH, gone_ok=False):
+            if not stat.S_ISDIR(info.st_mode) and not (
+                stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            ):
                 raise RunnerError(
-                    f"{what} contains {_kind(info.st_mode)} at {_show(str(where))}; "
+                    f"{what} contains {_kind(info.st_mode)} at {_show(str(here / name))}; "
                     "only files, folders and symbolic links are copied"
                 )
             yield here, dirfd, name, info  # one at a time: a folder may hold millions
-        dirs[:] = folders  # walk on into folders only, never into a link
-    if unvisited:
-        first = str(min(unvisited))
-        raise RunnerError(f"{what} changed while it was read, at {_show(first)}")
+    except _Deep as deep:
+        raise RunnerError(
+            f"{what} is more than {MAX_DEPTH} folders deep at {_show(str(deep.where))}"
+        ) from None
+    except _Changed as changed:
+        where = _show(str(changed.where))
+        raise RunnerError(f"{what} changed while it was read, at {where}") from None
 
 
 def _copy_file(folder: int, name: str, target: Path, allowed: int) -> int:
@@ -357,15 +409,16 @@ def _copy_tree(
     """Copy the folder `relative` below `root` to a new `target` in one pass; return the bytes.
 
     Links stay links. Every entry made is passed to `chown`. Each entry is charged as the
-    measure charges it, at least one 4 KiB block, and _OverBudget is raised once the charges
-    come to more than `limit`.
+    measure charges it, at least one 4 KiB block and a folder at its size, and _OverBudget is
+    raised once the charges come to more than `limit`.
     """
     source = _open_folder(root, relative)
     try:
-        folders = [(target, os.fstat(source).st_mode)]
+        top = os.fstat(source)
+        folders = [(target, top.st_mode)]
         target.mkdir(mode=0o700)
         chown(target)
-        written = _PAGE
+        written = _size(top)
         for here, dirfd, name, info in _entries(source, what):
             if written > limit:
                 raise _OverBudget
@@ -373,7 +426,7 @@ def _copy_tree(
             if stat.S_ISDIR(info.st_mode):
                 destination.mkdir(mode=0o700)
                 folders.append((destination, info.st_mode))
-                written += _PAGE
+                written += _size(info)  # a folder of many names is larger than a block
             elif stat.S_ISLNK(info.st_mode):
                 link = os.readlink(name, dir_fd=dirfd)
                 destination.symlink_to(link)
@@ -417,32 +470,31 @@ def _disk_usage(top: Path, max_depth: int = MAX_DEPTH) -> int:
     counts again, as a copy writes them, and the budget bounds how many entries a run holds.
     Entries removed during the walk are skipped and a missing `top` measures 0. A folder more
     than `max_depth` below `top` raises _TooDeep, so the walk never holds more descriptors than
-    that. Any other failure is raised.
+    that. A folder swapped for a link while it is measured is never opened through the link.
+    Any other failure is raised.
     """
-    base = os.fspath(top).count(os.sep)
     try:
-        total = _size(top.lstat())
-        for path, dirs, files, dirfd in os.fwalk(
-            top, follow_symlinks=False, onerror=_reraise_unless_gone
-        ):
-            depth = path.count(os.sep) - base
-            folders: list[str] = []
-            for name in (*dirs, *files):
-                try:
-                    info = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue  # removed while being measured
-                total += _size(info)
-                if stat.S_ISDIR(info.st_mode):
-                    if depth >= max_depth:
-                        where = str(PurePath(path, name).relative_to(top))
-                        raise _TooDeep(f"more than {max_depth} folders deep at {_show(where)}")
-                    folders.append(name)
-            dirs[:] = folders  # never open a link, even to compare it
+        info = top.lstat()
     except FileNotFoundError:
-        if top.is_symlink() or top.exists():
-            raise
         return 0
+    total = _size(info)
+    if not stat.S_ISDIR(info.st_mode):
+        return total
+    try:
+        folder = os.open(top, _FOLDER_FLAGS)
+    except FileNotFoundError:
+        return 0
+    try:
+        if not os.path.samestat(info, os.fstat(folder)):
+            return 0  # replaced while being measured
+        for _, _, _, entry in _walk(folder, max_depth, gone_ok=True):
+            total += _size(entry)
+    except _Deep as deep:
+        raise _TooDeep(f"more than {max_depth} folders deep at {_show(str(deep.where))}") from None
+    except _Changed:
+        pass  # a folder swapped for something else is not measured through
+    finally:
+        os.close(folder)
     return total
 
 
@@ -511,7 +563,8 @@ class RunnerService:
         self._lock = threading.Lock()  # guards the three below; never held while taking a run's
         self._runs: dict[str, _Run] = {}
         self._reasons: dict[str, str] = {}
-        self._stopped: set[str] = set()  # every run id ever stopped, so none is used twice
+        # The latest run ids stopped, oldest first, so that none of them is used twice.
+        self._stopped: dict[str, None] = {}
 
     # ------------------------------------------------------------ operations
 
@@ -638,18 +691,18 @@ class RunnerService:
         """Remove everything the run has, and its folder. Stopping a run twice is harmless.
 
         A run the runner has no record of, perhaps from before a restart, is found by its
-        label and its names, and is recorded as stopped before it was prepared. A run id that
-        has been stopped is never prepared again. RunnerError lists anything that could not be
-        removed; the run then keeps its network and folder, and the watch tries again.
+        label and its names, and is recorded as stopped before it was prepared. A run id among
+        the latest `REMEMBERED_STOPS` stopped is never prepared again. RunnerError lists anything
+        that could not be removed; the run then keeps its network and folder, and the watch
+        tries again.
         """
         with _as_runner_error():
             _check_run_id(run_id)
             with self._lock:
                 run = self._runs.get(run_id)
-                if run is None and run_id not in self._stopped:
-                    # A stop can overtake its own prepare; recording it makes that prepare refuse.
-                    self._reasons.setdefault(run_id, NEVER_PREPARED)
-                self._stopped.add(run_id)
+                # A stop can overtake its own prepare; recording it makes that prepare refuse.
+                never = run is None and run_id not in self._stopped
+                self._remember_stop_locked(run_id, NEVER_PREPARED if never else None)
             if run is None:
                 run = _Run(run_id, "", self._runs_root / run_id, ())
             with run.lock:
@@ -966,9 +1019,21 @@ class RunnerService:
 
     def _stop_for_locked(self, run: _Run, reason: str) -> None:
         with self._lock:
-            self._reasons.setdefault(run.run_id, reason)
-            self._stopped.add(run.run_id)
+            self._remember_stop_locked(run.run_id, reason)
         self._teardown_locked(run)
+
+    def _remember_stop_locked(self, run_id: str, reason: str | None) -> None:
+        """Record a stop, and its reason if it has one, forgetting the oldest stops past
+        `REMEMBERED_STOPS`, apart from a run still on record; the caller holds the lock."""
+        if reason is not None:
+            self._reasons.setdefault(run_id, reason)
+        self._stopped.setdefault(run_id, None)
+        excess = len(self._stopped) - REMEMBERED_STOPS
+        if excess > 0:
+            forgotten = [old for old in self._stopped if old not in self._runs][:excess]
+            for old in forgotten:
+                del self._stopped[old]
+                self._reasons.pop(old, None)
 
     def _teardown_locked(self, run: _Run) -> list[str]:
         """Remove everything the run has, failing closed; return what could not be done.

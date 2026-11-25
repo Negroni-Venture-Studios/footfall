@@ -4,8 +4,10 @@ import inspect
 import os
 import re
 import shutil
+import stat
 import threading
 import time
+import tracemalloc
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePath
 from typing import Any
@@ -26,6 +28,7 @@ from footfall.runner.service import (
     _disk_usage,
     _entries,
     _OverBudget,
+    _size,
     _TooDeep,
 )
 from footfall.runner.spec import container_config, network_config
@@ -1564,3 +1567,120 @@ def test_status_is_none_while_live_and_for_unknown_runs(h: Harness) -> None:
     assert h.service.status(RUN) is None
     h.service.stop(RUN)
     assert h.service.status(RUN) is None
+
+
+# ---------------------------------------------------------------- cleanup pass
+
+
+def test_a_copy_is_charged_what_the_measure_of_the_copy_finds(tmp_path: Path) -> None:
+    """A folder with many names is larger than a block, and the copy charges it as the
+    measure does, at its size, not at one block."""
+    source = tmp_path / "source"
+    (source / "wide").mkdir(parents=True)
+    for index in range(1500):
+        (source / "wide" / f"entry-{index:05d}").touch()
+    (source / "small.txt").write_bytes(b"x" * 5000)
+    (source / "link").symlink_to("small.txt")
+    assert _size(os.lstat(source / "wide")) > PAGE  # the case that matters
+    written = _copy_tree(
+        tmp_path, PurePath("source"), tmp_path / "copy", limit=10**9, chown=noop, what="it"
+    )
+    assert written == _disk_usage(tmp_path / "copy")
+
+
+def test_every_folder_is_opened_without_following_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder swapped for a link between its listing and its opening is never opened
+    through the link, whatever it leads to, by the copy's walk or by the measure."""
+    top = tmp_path / "top"
+    (top / "a" / "b").mkdir(parents=True)
+    (top / "a" / "b" / "file").touch()
+    opened: list[int] = []
+    real_open = os.open
+
+    def recording(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(path, flags, *args, **kwargs)
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            opened.append(flags)
+        return fd
+
+    monkeypatch.setattr(os, "open", recording)
+    folder = open_folder(top)
+    try:
+        assert len(list(_entries(folder, "it"))) == 3
+    finally:
+        os.close(folder)
+    _disk_usage(top)
+    assert len(opened) >= 5  # every folder below the top, by both walks
+    assert all(flags & os.O_NOFOLLOW for flags in opened[1:])  # the first is the test's own
+
+
+def test_a_folder_swapped_for_a_link_is_named_and_not_walked(tmp_path: Path) -> None:
+    top = tmp_path / "top"
+    (top / "a" / "b").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").touch()
+    folder = open_folder(top)
+    seen: list[str] = []
+    try:
+        with pytest.raises(RunnerError, match="changed while it was read, at 'a/b'"):
+            for here, _, name, _ in _entries(folder, "it"):
+                seen.append(str(here / name))
+                if name == "b":  # listed as a folder, not yet opened
+                    (top / "a" / "b").rename(top / "a" / "moved")
+                    (top / "a" / "b").symlink_to(outside)
+    finally:
+        os.close(folder)
+    assert "secret.txt" not in "".join(seen)
+
+
+def test_a_wide_tree_is_walked_without_a_record_of_every_folder(tmp_path: Path) -> None:
+    """The walk holds what one path down the tree needs, not every folder it has seen."""
+    top = tmp_path / "top"
+    for index in range(3000):
+        (top / f"folder-{index:05d}").mkdir(parents=True)
+    folder = open_folder(top)
+    try:
+        tracemalloc.start()
+        try:
+            count = sum(1 for _ in _entries(folder, "it"))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    finally:
+        os.close(folder)
+    assert count == 3000
+    assert peak < 100_000, peak
+
+
+def test_only_the_latest_stopped_run_ids_are_remembered(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("footfall.runner.service.REMEMBERED_STOPS", 3)
+    ids = [f"r_{letter * 26}" for letter in "bcdef"]
+    for run_id in ids:
+        h.service.stop(run_id)
+    # The two oldest are forgotten, reason and all; the three latest are still refused.
+    assert [h.service.status(run_id) for run_id in ids] == [None, None, *[NEVER_PREPARED] * 3]
+    assert len(h.service._stopped) == 3
+    assert len(h.service._reasons) == 3
+    h.workspace()
+    with pytest.raises(RunnerError, match=NEVER_PREPARED):
+        prepare(h, run_id=ids[-1])
+
+
+def test_a_run_still_on_record_keeps_its_reason_however_many_others_stop(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("footfall.runner.service.REMEMBERED_STOPS", 2)
+    prepare(h)
+    h.engine.fail("remove_network", EngineError("still in use"))
+    with pytest.raises(RunnerError, match="still in use"):
+        h.service.stop(RUN)
+    h.engine.failures.clear()  # every other run stops cleanly
+    for letter in "bcd":
+        h.service.stop(f"r_{letter * 26}")
+    assert RUN in h.service._stopped  # it is still on record, so it is not forgotten
+    assert "still in use" in (h.service.status(RUN) or "")
