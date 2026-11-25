@@ -135,9 +135,14 @@ def clean_text(text: str, cap: int, *, single_line: bool = False) -> str:
     kept = "".join(ch for ch in text.translate(_SEPARATORS) if not _drop(ch))
     if single_line:
         kept = " ".join(kept.split())
-    if len(kept) <= cap:
-        return kept
-    return kept[: cap - 1] + ELLIPSIS
+    return cut_text(kept, cap)
+
+
+def cut_text(text: str, cap: int) -> str:
+    """`text` cut to `cap` characters, the last of them an ellipsis when anything was cut."""
+    if len(text) <= cap:
+        return text
+    return text[: cap - 1] + ELLIPSIS
 
 
 def _shown(ch: str) -> bool:

@@ -34,10 +34,11 @@ off. A persona's model calls therefore end within the time limit, plus `MIN_TURN
 A run never raises, except to be cancelled. Its report says why it ended, and a failure
 is given by a fixed reason or the exception's class alone, because an exception's message
 may hold page text, the API's reply or the password the tester typed (AGENTS.md rule 7).
-The report's free text is redacted with the executor's secrets after it is cleaned and
-stripped of characters that show nothing, so that a password split by them is caught too.
-The match is otherwise exact, as the executor's is: a password written in another case, or
-with other characters between its own, is not found.
+The report's free text is redacted with the executor's `Redactor` after it is cleaned and
+stripped of characters that show nothing, so that a password split by them is caught too,
+and again before and after a field is made one line, so that no change to its whitespace
+hides one. The match is otherwise exact: a password written in another case, or with other
+characters between its own, is not found.
 """
 
 import asyncio
@@ -73,10 +74,9 @@ from footfall.tester.report import (
     clean_text,
     map_report_text,
     parse_finish,
-    strip_invisible,
 )
 from footfall.tester.screen import CaptureError, quote
-from footfall.tester.tools import REDACTED, TOOLS, Executor, ToolOutcome
+from footfall.tester.tools import TOOLS, Executor, ToolOutcome
 
 __all__ = [
     "ACCOUNT",
@@ -420,22 +420,17 @@ class _Run:
 
     # ------------------------------------------------------------------ the report
 
-    def _redact(self, text: str) -> str:
-        for secret in self.executor.secrets:
-            text = text.replace(secret, REDACTED)
-        return text
-
     def _bare(self, text: str) -> str:
         """`text` without the characters the report strips, then, when there is something to
-        redact, without characters that show nothing, then redacted.
+        redact, without characters that show nothing, then redacted, before `parse_finish`
+        makes any field one line or cuts it.
         """
-        text = clean_text(text, _UNCAPPED)
-        if not self.executor.secrets:
-            return text
-        return self._redact(strip_invisible(text))
+        return self.executor.redactor(clean_text(text, _UNCAPPED))
 
     def _field(self, text: str, cap: int, *, single_line: bool = False) -> str:
-        return clean_text(self._redact(text), cap, single_line=single_line)
+        """A field of the report, redacted again, before and after it is made one line, and
+        cut, as the executor does it for the trace."""
+        return self.executor.redactor.fit(text, cap, single_line=single_line)
 
     def _finished(self, finish: dict[str, Any]) -> PersonaReport:
         summary, score, reached, findings = parse_finish(

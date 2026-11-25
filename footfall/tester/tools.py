@@ -20,7 +20,7 @@ import logging
 import re
 import sys
 import unicodedata
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -32,11 +32,11 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from footfall.tester.guard import Guard, GuardEvent
 from footfall.tester.report import (
     CAPS,
-    ELLIPSIS,
     MAX_SCREENSHOTS,
     PAGE_CAP,
     ToolError,
     clean_text,
+    cut_text,
     map_report_text,
     parse_finish,
     strip_invisible,
@@ -59,6 +59,7 @@ __all__ = [
     "MAX_TYPE_LENGTH",
     "TOOLS",
     "Executor",
+    "Redactor",
     "ToolOutcome",
     "screenshot_id",
     "validate_path",
@@ -441,6 +442,49 @@ def _element_at(screen: Screen, x: int, y: int) -> Element | None:
     return best
 
 
+# ------------------------------------------------------------------ redaction
+
+
+class Redactor:
+    """Replaces each secret, such as the throwaway password, with "[password]".
+
+    The text is first stripped of the characters that show nothing, as each secret is, so
+    that a secret split by one is still found. Where a secret has whitespace, any run of
+    whitespace in the text matches it, so that a password is found whether the text keeps
+    its spaces, tabs and new lines or has them changed, as making a field one line changes
+    them. Otherwise the match is exact: a secret in another case, or with other characters
+    between its own, is not found. Secrets are tried longest first, so that one holding
+    another is replaced whole. A secret made only of characters that show nothing, or of
+    whitespace, would match nothing sensible, and goes.
+    """
+
+    def __init__(self, secrets: Iterable[str] = ()) -> None:
+        visible = {strip_invisible(secret) for secret in secrets}
+        self.secrets = tuple(sorted((x for x in visible if x.strip()), key=len, reverse=True))
+        self._patterns = tuple(
+            re.compile(r"\s+".join(re.escape(part) for part in secret.split()))
+            for secret in self.secrets
+        )
+
+    def __call__(self, text: str) -> str:
+        if not self.secrets:
+            return text
+        text = strip_invisible(text)
+        for pattern in self._patterns:
+            text = pattern.sub(REDACTED, text)
+        return text
+
+    def fit(self, text: str, cap: int, *, single_line: bool = False) -> str:
+        """`text` cleaned and redacted, then, for a one-line field, made one line and redacted
+        again, then cut to `cap`. Redaction comes both before and after the text is made one
+        line, so that neither form of its whitespace hides a secret, and before the cut, so
+        that no cut leaves part of one."""
+        text = self(clean_text(text, _UNCAPPED))
+        if single_line:
+            text = self(clean_text(text, _UNCAPPED, single_line=True))
+        return cut_text(text, cap)
+
+
 # ------------------------------------------------------------------ the executor
 
 
@@ -471,9 +515,10 @@ class Executor:
     `touch` says whether taps use the touchscreen, as the device does. Each string in
     `redact`, such as the throwaway password the tester types to sign in, is replaced by
     "[password]" in the trace, the free text of the report from `finish` and any
-    `CaptureError`, wherever it appears whole once characters that show nothing are taken
-    out. The match is exact, so the same text split across two calls, or in another case,
-    or with other characters between its own, is not found. The log holds no error's
+    `CaptureError`, wherever it appears whole, as `Redactor` finds it: once characters that
+    show nothing are taken out, and with any whitespace where the secret has whitespace.
+    Otherwise the match is exact, so the same text split across two calls, or in another
+    case, or with other characters between its own, is not found. The log holds no error's
     message at all, only its class.
     """
 
@@ -492,12 +537,7 @@ class Executor:
         self._trace = trace
         self._dir = screenshots
         self._touch = touch
-        # Stripped as the text they are looked for in is, so that a secret holding a
-        # character that shows nothing still matches; one made only of such characters
-        # would match nothing and goes. Longest first, so that a secret holding another is
-        # replaced whole.
-        visible = {strip_invisible(secret) for secret in redact}
-        self._secrets = tuple(sorted((x for x in visible if x), key=len, reverse=True))
+        self._redactor = Redactor(redact)
         self._screen: Screen | None = None
         self._shot: str | None = None
         self._shots: list[str] = []
@@ -509,9 +549,14 @@ class Executor:
     @property
     def secrets(self) -> tuple[str, ...]:
         """The strings this executor redacts, without characters that show nothing and
-        longest first, so that others can redact the same.
+        longest first.
         """
-        return self._secrets
+        return self._redactor.secrets
+
+    @property
+    def redactor(self) -> Redactor:
+        """What this executor redacts with, so that others can redact the same."""
+        return self._redactor
 
     @property
     def screenshot_ids(self) -> set[str]:
@@ -653,7 +698,7 @@ class Executor:
             _check_finish(data)
             # Checked as the loop will read it, so that free text made only of characters
             # that show nothing is refused here, where the model can try again.
-            visible = map_report_text(data, strip_invisible) if self._secrets else data
+            visible = map_report_text(data, strip_invisible) if self.secrets else data
             parse_finish(visible, source="", device="", screenshots=self.screenshot_ids)
             return _Action(finish=dict(data))
         # The name is the model's own text, so none of it is echoed into the trace.
@@ -896,23 +941,11 @@ class Executor:
     # ------------------------------------------------------------------ secrets
 
     def _redact(self, text: str) -> str:
-        """`text` with every secret replaced, after the characters that show nothing are
-        removed, so that a password split by them is found too.
-        """
-        if not self._secrets:
-            return text
-        text = strip_invisible(text)
-        for secret in self._secrets:
-            text = text.replace(secret, REDACTED)
-        return text
+        """`text` with every secret replaced, as `Redactor` does it."""
+        return self._redactor(text)
 
     def _fit(self, text: str, cap: int, *, single_line: bool = False) -> str:
-        """`text` cleaned and made one line where the field is, then redacted, then cut to
-        `cap`. Every change to the text comes before redaction, so that none can make a
-        password whole after it, as joining a line it was split over would; and the cut comes
-        after, so that none leaves part of one."""
-        redacted = self._redact(clean_text(text, _UNCAPPED, single_line=single_line))
-        return redacted if len(redacted) <= cap else redacted[: cap - 1] + ELLIPSIS
+        return self._redactor.fit(text, cap, single_line=single_line)
 
     def _record(self, name: str, data: object) -> dict[str, Any]:
         """A tool input as the trace keeps it: the fields the tool has, each string cleaned,
@@ -975,7 +1008,7 @@ class Executor:
 
     def _scrub(self, value: Any) -> Any:
         """`value` with every secret replaced, through lists and objects, keys included."""
-        if not self._secrets:
+        if not self.secrets:
             return value
         if isinstance(value, str):
             return self._redact(value)

@@ -980,27 +980,31 @@ async def test_the_trace_strips_invisible_characters_before_redacting(world: Mak
     no_run_of(SECRET, w.trace.path.read_text(encoding="utf-8"), str(steps))
 
 
-async def test_the_report_never_makes_a_password_whole_after_redacting(world: MakeWorld) -> None:
-    spaced = "Kp7 q-vN3x-Rz4w"
-    w = await world(redact=frozenset({spaced}))
-    for gap in ("\n", "  "):
-        split = spaced.replace(" ", gap)
-        found = {
-            "title": f"Typed {split}",
-            "severity": "minor",
-            "page": "/",
-            "steps": [f"Type {split}"],
-            "expected": "e",
-            "actual": "a",
-            "screenshots": [],
-        }
-        model = FakeModel([finish(summary=f"I typed {split}.", findings=[found])])
-        report = await run(w, model)
-        (finding,) = report.findings
-        assert finding.title == "Typed [password]"
-        assert finding.steps == ("Type [password]",)
-        assert spaced not in json.dumps(report.to_json(), ensure_ascii=False)
-    assert spaced not in w.trace.path.read_text(encoding="utf-8")
+@pytest.mark.parametrize("secret", ["Kp7  q-vN3x-Rz4w", "Kp7\tq-vN3x-Rz4w", "Kp7\nq-vN3x-Rz4w"])
+async def test_no_form_of_a_password_with_whitespace_survives_in_the_report(
+    world: MakeWorld, secret: str
+) -> None:
+    w = await world(redact=frozenset({secret}))
+    for gap in ("  ", "\t", "\n", " ", "\n \t"):
+        for form in (secret, "Kp7" + gap + "q-vN3x-Rz4w"):
+            found = {
+                "title": f"Typed {form}",  # one line
+                "severity": "minor",
+                "page": "/",
+                "steps": [f"Type {form}"],  # one line
+                "expected": "e",
+                "actual": f"It showed {form}",  # many lines
+                "screenshots": [],
+            }
+            model = FakeModel([finish(summary=f"I typed {form}.", findings=[found])])
+            report = await run(w, model)
+            (finding,) = report.findings
+            assert finding.title == "Typed [password]"
+            assert finding.steps == ("Type [password]",)
+            assert finding.actual == "It showed [password]"
+            assert report.summary == "I typed [password]."
+            assert "q-vN3x" not in json.dumps(report.to_json(), ensure_ascii=False)
+    assert "q-vN3x" not in w.trace.path.read_text(encoding="utf-8")
 
 
 class Hung:
