@@ -1,5 +1,6 @@
 """Shared fixtures."""
 
+import ipaddress
 import os
 import socket
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -12,6 +13,8 @@ from tests.app_server import AppServer
 from tests.fake_api import Api
 
 LOOPBACK = {"127.0.0.1", "::1"}
+# The names a test may look up, which the system answers from its hosts file.
+LOOPBACK_NAMES = {"", "localhost"}
 # Host names the browser tests use for "somewhere else". The browser resolves them to the
 # second server, and every other name to nothing, so a browser test reaches no network
 # even when the code under test lets a request through.
@@ -27,16 +30,37 @@ def _check(sock: socket.socket, address: Any) -> None:
         raise OSError(f"network blocked in tests: {host}")
 
 
+def _check_name(host: Any) -> None:
+    """Raise unless looking up `host` needs no resolver: no name at all, localhost, or an
+    address written out, which is checked again when it is connected or sent to."""
+    name = host.decode("ascii", "replace") if isinstance(host, bytes) else str(host or "")
+    if name.rstrip(".").lower() in LOOPBACK_NAMES:
+        return
+    try:
+        ipaddress.ip_address(name.split("%", 1)[0])
+    except ValueError:
+        raise socket.gaierror(socket.EAI_NONAME, f"name lookups blocked in tests: {name}") from None
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test reaches the internet: only loopback and Unix sockets may be connected to.
+    """No test reaches the internet from the test process: only loopback and Unix sockets
+    may be connected or sent to, and only localhost and written-out addresses looked up.
 
-    Both ways a socket connects are guarded: `connect`, and `connect_ex`, which returns an
-    error number instead of raising. A refused `connect_ex` raises all the same, so that
-    no caller mistakes the refusal for an ordinary failure to connect.
+    Four ways a socket reaches another are guarded: `connect`, and `connect_ex`, which
+    returns an error number instead of raising, and `sendto` and `sendmsg`, which send a
+    datagram without connecting. A refused `connect_ex` raises all the same, so that no
+    caller mistakes the refusal for an ordinary failure to connect. Of the ways to look a
+    name up, `getaddrinfo` is guarded, which asyncio and `socket.create_connection` use; a
+    refused lookup raises `socket.gaierror`, as a name that does not resolve would. The
+    older `gethostbyname` and its kin are not guarded, and nor are the programs the tests
+    start, such as git and the browsers; the browsers are given name rules of their own.
     """
     real_connect: Callable[[socket.socket, Any], None] = socket.socket.connect
     real_connect_ex: Callable[[socket.socket, Any], int] = socket.socket.connect_ex
+    real_sendto: Callable[..., int] = socket.socket.sendto
+    real_sendmsg: Callable[..., int] = socket.socket.sendmsg
+    real_getaddrinfo: Callable[..., Any] = socket.getaddrinfo
 
     def guarded(self: socket.socket, address: Any) -> None:
         _check(self, address)
@@ -46,8 +70,26 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         _check(self, address)
         return real_connect_ex(self, address)
 
+    def guarded_sendto(self: socket.socket, data: Any, *rest: Any) -> int:
+        if rest:  # sendto(data, address) or sendto(data, flags, address)
+            _check(self, rest[-1])
+        return real_sendto(self, data, *rest)
+
+    def guarded_sendmsg(self: socket.socket, *arguments: Any, **options: Any) -> int:
+        address = options.get("address", arguments[3] if len(arguments) > 3 else None)
+        if address is not None:
+            _check(self, address)
+        return real_sendmsg(self, *arguments, **options)
+
+    def guarded_getaddrinfo(host: Any, *arguments: Any, **options: Any) -> Any:
+        _check_name(host)
+        return real_getaddrinfo(host, *arguments, **options)
+
     monkeypatch.setattr(socket.socket, "connect", guarded)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_ex)
+    monkeypatch.setattr(socket.socket, "sendto", guarded_sendto)
+    monkeypatch.setattr(socket.socket, "sendmsg", guarded_sendmsg)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
 
 
 @pytest.fixture
