@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import pytest
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
@@ -361,25 +361,57 @@ async def test_a_redirect_hop_off_the_list_is_refused_by_the_proxy(
 
 
 @pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("guarded", [False, True], ids=["bare", "guarded"])
 async def test_an_unload_beacon_and_a_keepalive_fetch_are_refused_by_the_proxy(
-    browsers: Browsers, proxy_log: ProxyLog, engine: str
+    browsers: Browsers, proxy_log: ProxyLog, engine: str, guarded: bool
 ) -> None:
+    """Off the list, both are refused by the proxy, with the guard installed or not.
+
+    Controls: a beacon and a keepalive fetch to the app itself, which the context sends
+    straight there, show the browser sent them at all; and a pair to a second server on the
+    run's network, by address and not bypassed, must reach the proxy, never that server.
+    """
     beacon, keepalive = "unload-beacon.example.com", "keepalive-fetch.example.com"
+    sink, _ = await browsers.run.serve("sink", "pages", 8000)
     browser = await browsers.connect(engine)
+    events: list[GuardEvent] = []
     try:
         context = await browsers.context(browser, engine)
         guard = Guard(browsers.app, frozenset(ASSETS))
-        await guard.install(context)
+        if guarded:
+            await guard.install(context)
         page = await context.new_page()
-        leaving = f"/leaving?beacon=https://{beacon}/b&keepalive=https://{keepalive}/k"
-        assert await _goto(page, browsers.app + leaving) == 200
-        assert await _goto(page, browsers.app + "/") == 200  # pagehide sends both
-        await proxy_log.wait_for(browsers.address, beacon, NOT_LISTED, timeout=30)
-        await proxy_log.wait_for(browsers.address, keepalive, NOT_LISTED, timeout=30)
+        targets = {
+            "beacon": [f"https://{beacon}/b", "/to-app-beacon", f"http://{sink}/to-sink-beacon"],
+            "keepalive": [
+                f"https://{keepalive}/k",
+                "/to-app-keepalive",
+                f"http://{sink}/to-sink-keepalive",
+            ],
+        }
+        query = "&".join(f"{k}={quote(u, safe='')}" for k, urls in targets.items() for u in urls)
+        assert await _goto(page, f"{browsers.app}/leaving?{query}") == 200
+        # The page itself goes, as an app's own link or script would take it away, and
+        # its pagehide sends them all.
+        async with page.expect_navigation(timeout=30_000):
+            await page.evaluate("location.assign('/')")
+        for host in (beacon, keepalive):
+            with contextlib.suppress(TimeoutError):
+                await proxy_log.wait_for(browsers.address, host, NOT_LISTED, timeout=20)
+        await asyncio.sleep(2)
         events = guard.drain()
     finally:
         await browser.close()
+    to_app = {h["path"] for h in lines(await browsers.run.logs("pages"), HIT)}
+    to_sink = {h["path"] for h in lines(await browsers.run.logs("sink"), HIT)}
+    decisions = proxy_log.decisions(browsers.address)
+    seen = (sorted(to_app), sorted(to_sink), decisions, events)
+    # The controls: the browser sent them, and nothing not bypassed went around the proxy.
+    assert {"/to-app-beacon", "/to-app-keepalive"} <= to_app, seen
+    assert to_sink == set(), seen
+    for host in (beacon, keepalive):
+        refused = [d for d in proxy_log.decisions(browsers.address, host) if NOT_LISTED in d]
+        allowed = [d for d in proxy_log.decisions(browsers.address, host) if "allowed" in d]
+        assert (bool(refused), allowed) == (True, []), (host, seen)
     # The guard never saw them: the proxy is the wall.
     assert [e for e in events if {beacon, keepalive} & set(_hosts(e))] == []
-    for host in (beacon, keepalive):
-        assert [d for d in proxy_log.decisions(browsers.address, host) if "allowed" in d] == []

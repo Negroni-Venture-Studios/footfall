@@ -459,13 +459,15 @@ REDIRECTS: Final = {
 _PAGES: Final[dict[str, str]] = {
     "/": "<!doctype html><title>Probe</title><h1>Probe</h1>",
     # Sends a beacon and a keepalive fetch as the page goes, when no route handler sees them.
+    # Each `beacon` gets a sendBeacon and each `keepalive` a keepalive fetch, both sent as
+    # the page goes, when no route handler sees them.
     "/leaving": (
         "<!doctype html><title>Leaving</title><h1>Leaving</h1><script>\n"
         "const params = new URLSearchParams(location.search);\n"
         "addEventListener('pagehide', () => {\n"
-        "  navigator.sendBeacon(params.get('beacon'), 'gone');\n"
-        "  fetch(params.get('keepalive'), {method: 'POST', body: 'gone', keepalive: true,"
-        " mode: 'no-cors'});\n"
+        "  for (const url of params.getAll('beacon')) navigator.sendBeacon(url, 'gone');\n"
+        "  for (const url of params.getAll('keepalive')) fetch(url, {method: 'POST',"
+        " body: 'gone', keepalive: true, mode: 'no-cors'});\n"
         "});\n</script>"
     ),
     "/asset": (
