@@ -15,7 +15,7 @@ import secrets
 import shutil
 import socket
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -32,6 +32,9 @@ READY: Final = "FOOTFALL-READY"
 HELLO: Final = "FOOTFALL-HELLO"
 HIT: Final = "FOOTFALL-HIT"
 POLL: Final = 0.5
+
+
+type NewRun = Callable[..., Awaitable["LiveRun"]]
 
 
 def setting(name: str, default: str) -> str:

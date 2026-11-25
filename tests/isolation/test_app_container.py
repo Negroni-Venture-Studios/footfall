@@ -16,12 +16,12 @@ import pytest
 
 from footfall.local import wait_ready
 from footfall.runner.client import RunnerClient
-from tests.isolation.conftest import NewRun
 from tests.isolation.live import (
     MARK,
     PROBE,
     RUNNER_SOCKET,
     LiveRun,
+    NewRun,
     finish,
     lines,
     local_address_towards,

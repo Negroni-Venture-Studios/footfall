@@ -9,8 +9,7 @@ import json
 
 import pytest
 
-from tests.isolation.conftest import NewRun
-from tests.isolation.live import PROBE, LiveRun, ProxyLog
+from tests.isolation.live import PROBE, LiveRun, NewRun, ProxyLog
 
 pytestmark = pytest.mark.isolation
 

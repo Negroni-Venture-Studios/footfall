@@ -14,18 +14,24 @@ Unix sockets.
 
 import os
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from footfall.runner.client import RunnerClient
-from tests.isolation.live import RUNNER_SOCKET, LiveRun, ProxyLog, finish, is_private, prepare
+from tests.isolation.live import (
+    RUNNER_SOCKET,
+    LiveRun,
+    NewRun,
+    ProxyLog,
+    finish,
+    is_private,
+    prepare,
+)
 
 HERE = Path(__file__).resolve().parent
-
-type NewRun = Callable[..., Awaitable[LiveRun]]
 
 
 def refusal(env: Mapping[str, str]) -> str | None:

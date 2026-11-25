@@ -13,8 +13,7 @@ import pytest
 from footfall.local import new_run_id
 from footfall.runner.client import RunnerClient
 from footfall.runner.service import DISK_REASON, RunnerError
-from tests.isolation.conftest import NewRun
-from tests.isolation.live import PROBE, RUNNER_SOCKET
+from tests.isolation.live import PROBE, RUNNER_SOCKET, NewRun
 
 pytestmark = pytest.mark.isolation
 
