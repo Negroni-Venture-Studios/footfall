@@ -225,12 +225,20 @@ def _container_name(run_id: str, role: str, copy: str) -> str:
     return f"footfall-{run_id}-{role}-{copy}"
 
 
-def _without(error: Exception, secret: str, shown: str) -> RunnerError:
+def _without(error: BaseException, secret: str, shown: str) -> RunnerError:
     """A RunnerError saying what `error` said, with `secret` shown as `shown` instead, in its
     message and log tail alike, and with no chain back to `error`."""
-    message = (str(error) or type(error).__name__).replace(secret, shown)
+    return _redacted(error, {secret: shown})
+
+
+def _redacted(error: BaseException, secrets: Mapping[str, str]) -> RunnerError:
+    """A RunnerError saying what `error` said, each secret replaced as `secrets` says, in its
+    message and log tail alike, and with no chain back to `error`."""
+    message = str(error) or type(error).__name__
     tail = error.log_tail if isinstance(error, RunnerError) else ""
-    return RunnerError(message, tail.replace(secret, shown))
+    for secret, shown in secrets.items():
+        message, tail = message.replace(secret, shown), tail.replace(secret, shown)
+    return RunnerError(message, tail)
 
 
 def _check_run_id(run_id: str) -> None:
@@ -899,15 +907,25 @@ class RunnerService:
                 raise RunnerError(f"run {run_id} already exists")
             secrets = tuple(v for k, v in env.items() if k == "FOOTFALL_PASSWORD" and v)
             run = _Run(run_id, image, directory, secrets, deadline=self._clock() + self._lifetime)
+            failure: RunnerError | None = None
             with run.lock:
                 # Registered only once locked, so that a stop arriving now waits for prepare.
                 self._register(run)
                 try:
                     self._prepare_locked(run, relative, install, seed, hosts, seed_env)
+                except (RunnerError, EngineError, OSError, ValueError, RecursionError) as error:
+                    # Docker's own words may quote the seed's environment, so the error goes
+                    # on without the password, and with no chain back to what it replaces.
+                    failure = _redacted(error, dict.fromkeys(run.secrets, _REDACTED))
                 except BaseException:
-                    # Even if a stop has closed the run meanwhile, sweep up whatever was made.
                     self._teardown_locked(run)
                     raise
+                if failure is not None:
+                    # Even if a stop has closed the run meanwhile, sweep up whatever was made.
+                    # This is outside the handler, so that a clean-up that fails too logs no
+                    # traceback that leads back to the error, and so to the password.
+                    self._teardown_locked(run)
+                    raise failure
 
     def start_app(
         self, run_id: str, copy: str, start: str, port: int, egress: Sequence[str]
@@ -1316,9 +1334,10 @@ class RunnerService:
             problems,
             f"revoke the allow list of {name}",
             functools.partial(self._proxy.revoke, address),
+            run.secrets,
         )
         removed = self._attempt(
-            problems, f"remove {name}", functools.partial(self._engine.remove, name)
+            problems, f"remove {name}", functools.partial(self._engine.remove, name), run.secrets
         )
         if revoked and removed:
             run.containers.pop(name, None)
@@ -1478,16 +1497,22 @@ class RunnerService:
             self._remove_strays_locked(run, problems)
         if not problems:
             revoke_run = functools.partial(self._proxy.revoke_run, run.run_id)
-            self._attempt(problems, f"revoke the allow lists of run {run.run_id}", revoke_run)
+            self._attempt(
+                problems, f"revoke the allow lists of run {run.run_id}", revoke_run, run.secrets
+            )
         if not problems:
             network = run.network
             for container in (self._proxy_container, self._orchestrator_container):
                 disconnect = functools.partial(self._engine.disconnect, network, container)
-                self._attempt(problems, f"disconnect {container} from {network}", disconnect)
+                self._attempt(
+                    problems, f"disconnect {container} from {network}", disconnect, run.secrets
+                )
             remove_network = functools.partial(self._engine.remove_network, network)
-            self._attempt(problems, f"remove the network {network}", remove_network)
+            self._attempt(problems, f"remove the network {network}", remove_network, run.secrets)
             remove_folder = functools.partial(_remove_in, self._runs_fd, run.run_id)
-            self._attempt(problems, f"delete the folder of run {run.run_id}", remove_folder)
+            self._attempt(
+                problems, f"delete the folder of run {run.run_id}", remove_folder, run.secrets
+            )
         with self._lock:
             run.problems = problems
             if problems:
@@ -1518,12 +1543,20 @@ class RunnerService:
             self._remove_container_locked(run, container, problems)
 
     @staticmethod
-    def _attempt(problems: list[str], what: str, action: Callable[[], object]) -> bool:
-        """Do one cleanup step; log and record a failure rather than stop the cleanup."""
+    def _attempt(
+        problems: list[str], what: str, action: Callable[[], object], secrets: Sequence[str] = ()
+    ) -> bool:
+        """Do one cleanup step; log and record a failure rather than stop the cleanup.
+
+        The failure is logged by its kind and its words, with `secrets` taken out, and with no
+        traceback: Docker's words may quote what a container was given, and a traceback would
+        carry an error the step failed while handling.
+        """
         try:
             action()
-        except Exception as error:
-            logger.exception("could not %s", what)
-            problems.append(f"could not {what}: {error}")
+        except Exception as error:  # noqa: BLE001  # any kind is recorded, and none is lost
+            said = _redacted(error, dict.fromkeys(secrets, _REDACTED))
+            logger.error("could not %s: %s: %s", what, type(error).__name__, said)
+            problems.append(f"could not {what}: {said}")
             return False
         return True

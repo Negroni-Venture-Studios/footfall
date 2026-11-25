@@ -1961,3 +1961,30 @@ def test_when_both_measures_skip_the_larger_is_held_to_the_budget(
     monkeypatch.setattr("footfall.runner.service._measure_in", measure)
     h.service.check_runs()
     assert h.service.status(RUN) == DISK_REASON
+
+
+def test_a_docker_error_that_echoes_the_password_reaches_neither_the_caller_nor_the_log(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit N-02: if Docker's error for the seed step quoted its environment, and the clean-up
+    after it failed as well, the password would reach the caller's terminal, and the runner's
+    log through a chained traceback. The isolation workflow prints that log in public."""
+    echoed = f"create failed for env FOOTFALL_PASSWORD={PASSWORD} FOOTFALL_USERNAME=tester"
+    h.engine.fail("start", EngineError(echoed), role="seed")
+    h.engine.fail("remove", EngineError(f"removal failed, still holding {PASSWORD}"), role="seed")
+    with caplog.at_level("DEBUG"), pytest.raises(RunnerError) as caught:
+        prepare(
+            h,
+            seed="python3 seed.py",
+            env={"FOOTFALL_USERNAME": "tester", "FOOTFALL_PASSWORD": PASSWORD},
+        )
+    shown = traceback.format_exception(caught.value)
+    assert PASSWORD not in "".join(shown) + caught.value.log_tail
+    assert "create failed" in str(caught.value)  # what went wrong is still said
+    logged = "\n".join(
+        record.getMessage()
+        + "".join(traceback.format_exception(*record.exc_info) if record.exc_info else [])
+        for record in caplog.records
+    )
+    assert "removal failed" in logged  # the clean-up's failure is still logged
+    assert PASSWORD not in logged
