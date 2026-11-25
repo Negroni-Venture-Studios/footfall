@@ -277,6 +277,7 @@ async def test_dropping_a_client_closes_its_open_tunnels(live: Live) -> None:
         async with asyncio.timeout(TIMEOUT):
             await t.reader.readexactly(len(SERVER_HELLO))
         assert live.proxy.drop("10.89.0.99") == 0  # another client's connections are its own
+        assert live.proxy.drop("not an address") == 0
         assert live.proxy.connections == 1
         assert live.proxy.drop(f"::ffff:{CLIENT}") == 1  # the same address, mapped
         assert await read_to_end(t.reader) == b""

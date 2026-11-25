@@ -345,6 +345,12 @@ def test_the_peers_user_id_comes_from_the_kernel() -> None:
         assert footfall.proxy.control._peer_uid(first) == os.getuid()
 
 
+def test_a_socket_the_kernel_cannot_describe_has_no_peer_user() -> None:
+    closed = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    closed.close()
+    assert footfall.proxy.control._peer_uid(closed) is None
+
+
 def test_unreachable_proxy_raises_os_error() -> None:
     with short_directory() as directory:
         client = ProxyControlClient(directory / "missing.sock")
