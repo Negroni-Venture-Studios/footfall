@@ -206,7 +206,8 @@ class ProxyLog:
         found = []
         for line in self.read():
             words = line.split()
-            if client not in words:
+            # The server's decisions alone, never the control socket's record of an allow.
+            if "footfall.proxy.server:" not in words or client not in words:
                 continue
             if host is not None and f"host={host}" not in words:
                 continue
