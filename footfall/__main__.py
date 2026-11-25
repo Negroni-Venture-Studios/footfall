@@ -363,7 +363,8 @@ def _parser() -> argparse.ArgumentParser:
         help="test a local folder with AI personas",
         description=(
             "Test the app in a local folder. Copies only the files git tracks, unless "
-            "--untracked or --all-files says otherwise. Exits with 0 when every persona ran, "
+            "--untracked or --all-files says otherwise, and refuses a sparse checkout "
+            "without --all-files. Exits with 0 when every persona ran, "
             "1 when one failed or the run could not go ahead, and 2 for a setting that is "
             "wrong."
         ),

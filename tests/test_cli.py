@@ -277,6 +277,7 @@ def test_the_help_says_what_is_copied(capsys: pytest.CaptureFixture[str]) -> Non
     assert "Copies only the files git tracks" in shown
     assert "--untracked" in shown
     assert "named on standard error" in shown
+    assert "refuses a sparse checkout without --all-files" in shown
 
 
 def test_a_real_model_needs_the_api_key(

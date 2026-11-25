@@ -1145,6 +1145,58 @@ def git_output(folder: Path, *arguments: str) -> str:
     return done.stdout
 
 
+DEVELOPERS_SECRET = "DEVELOPERS_SECRET_5e1f\n"
+
+
+def sparse_repository(tmp_path: Path) -> Path:
+    """Part B's Minor 1, as the reviewer reproduced it with git 2.54.0: a sparse checkout of
+    `app`, the developer's own secrets/prod.env kept out by .git/info/exclude, and a branch
+    that tracks secrets/prod.env. Checking the branch out succeeds without a word and leaves
+    the developer's file as it was, under a name git now lists as tracked."""
+    folder = tmp_path / "repository"
+    (folder / "app").mkdir(parents=True)
+    git(folder, "init", "-q", "-b", "main")
+    (folder / "app" / "serve.py").write_text("print('hi')\n")
+    commit_all(folder)
+    git(folder, "checkout", "-q", "-b", "tracks-it")
+    (folder / "secrets").mkdir()
+    (folder / "secrets" / "prod.env").write_text("FROM_THE_BRANCH=1\n")
+    commit_all(folder)
+    git(folder, "checkout", "-q", "main")
+    git(folder, "sparse-checkout", "set", "--cone", "app")
+    (folder / "secrets").mkdir()
+    (folder / "secrets" / "prod.env").write_text(DEVELOPERS_SECRET)
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("secrets/\n")
+    git(folder, "checkout", "-q", "tracks-it")
+    return folder
+
+
+def test_a_sparse_checkout_is_refused_without_all_files(tmp_path: Path) -> None:
+    """Ruling R76: a sparse checkout can leave the developer's file under a name the branch
+    tracks, which would then be copied, so outside --all-files it is refused."""
+    folder = sparse_repository(tmp_path)
+    # The reviewer's finding, as it stands: the developer's content, listed as tracked.
+    assert (folder / "secrets" / "prod.env").read_text() == DEVELOPERS_SECRET
+    assert "secrets/prod.env" in git_output(folder, "ls-files").splitlines()
+    with pytest.raises(LocalRunError, match="sparse checkout") as refused:
+        local._git_files(folder)
+    assert "--all-files" in str(refused.value)
+    assert "full checkout" in str(refused.value)
+
+
+def test_a_file_git_skips_in_the_working_tree_is_refused_without_all_files(
+    tmp_path: Path,
+) -> None:
+    """A file marked skip-worktree by hand, with no sparse checkout, is the same hazard."""
+    folder = tracked_two_pages(tmp_path)
+    commit_all(folder)
+    local._git_files(folder)  # the control: a full checkout is read as before
+    git(folder, "update-index", "--skip-worktree", "serve.py")
+    with pytest.raises(LocalRunError, match="--all-files"):
+        local._git_files(folder)
+
+
 @pytest.mark.parametrize("untracked", [False, True])
 async def test_only_the_files_git_tracks_are_copied(
     tmp_path: Path,
@@ -1700,13 +1752,19 @@ def test_a_repository_cannot_make_git_run_a_command(tmp_path: Path) -> None:
     marker = tmp_path / "marker"
     folder = tmp_path / "hostile"
     hostile_repository(folder, marker)
+    # Footfall refuses the folder before it lists the untracked files, since git skips a file
+    # in its working tree (ruling R76)...
+    with pytest.raises(LocalRunError, match="--all-files"):
+        local._git_files(folder, untracked=True)
+    # ...and the listing that reads ignores, run as Footfall runs git, runs no command either.
+    asked = ["ls-files", "-z", "--others", "--exclude-standard"]
     try:
-        listing = local._git_files(folder, untracked=True)  # the listing that reads ignores
+        listed = local._run_git(local._git(), folder, asked)
     except LocalRunError as error:
         # Some versions of git refuse the folder rather than read it without the object.
         assert "git cannot read the files" in str(error)
     else:
-        assert PurePosixPath("notes.txt") in listing.names  # git ran, and read the folder
+        assert b"notes.txt" in listed.split(b"\0")  # git ran, and read the folder
     assert not marker.exists()
 
 
@@ -1729,9 +1787,10 @@ def test_git_runs_with_a_bare_environment_and_no_input(
     monkeypatch.setattr(subprocess, "run", run)
     listing = local._git_files(folder, untracked=True)
     assert PurePosixPath("footfall.toml") in listing.names
-    # ls-files twice, then rev-parse for the git folder, the common one and a superproject,
+    # ls-files with each name's status, the sparse-checkout setting, ls-files for the
+    # untracked files, then rev-parse for the git folder, the common one and a superproject,
     # each run the same safe way.
-    assert len(calls) == 5
+    assert len(calls) == 6
     assert "--show-superproject-working-tree" in calls[-1][0]
     allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL"}
     for command, options in calls:

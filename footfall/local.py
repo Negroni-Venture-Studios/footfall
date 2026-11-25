@@ -513,6 +513,10 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
     which the tested branch writes, and a negation there outranks the developer's own
     exclude files. So they are listed only when asked for.
 
+    A sparse checkout is refused, as is any file git skips in the working tree: there, a
+    checkout leaves a file of the developer's in place under a name the branch tracks, and
+    that file would be copied as the branch's.
+
     No file to copy may be another name for a file in the git folders git names, in its
     superprojects' when it is a submodule, or in those found as git finds them, as
     `_discovered_git_folders` does. git names no superproject for a nested repository that
@@ -527,7 +531,18 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
         output = _run_git(git, folder, ["ls-files", "-z", *which])
         return {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
 
-    tracked = listed("--cached")
+    # Each name behind its status tag, "S " for a file git skips in the working tree.
+    tagged = _run_git(git, folder, ["ls-files", "-z", "-t", "--cached"])
+    entries = [entry for entry in tagged.split(b"\0") if entry]
+    asked = ["config", "--bool", "--default", "false", "--get", "core.sparseCheckout"]
+    sparse = _run_git(git, folder, asked).strip() == b"true"
+    if sparse or any(entry.startswith(b"S ") for entry in entries):
+        raise LocalRunError(
+            f"{_shown(folder)} is a sparse checkout, or git skips some of its files in the "
+            "working tree, so a file there may be one of yours under a name the branch "
+            "tracks rather than the branch's own; test a full checkout, or pass --all-files"
+        )
+    tracked = {PurePosixPath(os.fsdecode(entry[2:])) for entry in entries}
     others = listed("--others", "--exclude-standard") - tracked if untracked else set()
     paths = _git_folder_paths(git, folder)
     named = [*paths, *_superproject_git_folders(git, folder)]
