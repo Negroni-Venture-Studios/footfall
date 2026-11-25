@@ -277,6 +277,13 @@ async def test_name_that_forges_a_line_stays_on_its_line(make_page: MakePage) ->
 # ------------------------------------------------- a page that lies or hangs
 
 
+async def test_the_screen_says_which_address_it_read(make_page: MakePage) -> None:
+    page = await make_page("<title>Here</title><button>One</button>")
+    screen = await capture(page)
+    assert screen.address == page.url
+    assert screen.title == "Here"
+
+
 async def test_a_page_that_never_answers_raises_a_clear_error(make_page: MakePage) -> None:
     page = await make_page(
         "<body><button>x</button><script>"
@@ -289,6 +296,7 @@ async def test_a_page_that_never_answers_raises_a_clear_error(make_page: MakePag
 
 def snapshot_of(*entries: object, **changes: Any) -> Callable[[Page], Awaitable[object]]:
     data: dict[str, Any] = {
+        "href": "http://127.0.0.1:8000/",
         "title": "Fake",
         "width": 390,
         "height": 664,
@@ -348,7 +356,15 @@ async def test_malformed_entries_are_dropped_and_counted(make_page: MakePage) ->
 
 @pytest.mark.parametrize(
     "bad",
-    [None, [], "text", {"entries": "no"}, {"entries": [], "total": "many"}],
+    [
+        None,
+        [],
+        "text",
+        {"entries": "no"},
+        {"entries": [], "total": "many"},
+        {"entries": [], "title": "No address", "total": 0},
+        {"entries": [], "title": "Address of the wrong kind", "total": 0, "href": 7},
+    ],
 )
 async def test_a_snapshot_of_the_wrong_shape_is_an_error(make_page: MakePage, bad: object) -> None:
     page = await make_page("<body></body>")

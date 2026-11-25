@@ -54,6 +54,7 @@ MAX_SIZE: Final = 1_000_000
 MAX_VIEWPORT: Final = 100_000
 MAX_ENTRIES: Final = 1000  # the most snapshot.js ever sends; anything beyond is a lie
 MAX_STRING: Final = 4096  # snapshot.js cuts every string at 400, so a longer one is tampered with
+MAX_ADDRESS: Final = 65_536  # a page's address, only ever compared, never shown
 LOG = logging.getLogger(__name__)
 SNAPSHOT_JS: Final = (Path(__file__).parent / "snapshot.js").read_text(encoding="utf-8")
 
@@ -96,6 +97,9 @@ class Screen:
     jpeg: bytes
     # Things worth knowing that are not accessibility findings: skipped frames, dropped entries.
     notes: list[str] = field(default_factory=list)
+    # The address of the document the snapshot read, as the page itself gave it. Never shown
+    # to the model; the executor compares it with the page's address before and after.
+    address: str = ""
 
 
 @dataclass(frozen=True)
@@ -270,6 +274,9 @@ async def capture(
     entries, title, total = data.get("entries"), data.get("title"), data.get("total")
     if not isinstance(entries, list) or not isinstance(title, str):
         raise _unexpected("`entries` or `title` is missing or of the wrong type")
+    address = data.get("href")
+    if not isinstance(address, str) or len(address) > MAX_ADDRESS:
+        raise _unexpected("`href` is missing, of the wrong type or too long")
     listed_total = _count(total, 10**9)
     if listed_total is None:
         raise _unexpected("`total` is not a count")
@@ -339,6 +346,7 @@ async def capture(
         warnings=warnings,
         jpeg=jpeg,
         notes=notes,
+        address=address,
     )
 
 

@@ -20,12 +20,13 @@ from footfall.tester import tools
 from footfall.tester.guard import Guard
 from footfall.tester.prompt import system_prompt
 from footfall.tester.report import CAPS, ToolError, parse_finish
-from footfall.tester.screen import CaptureError, Screen, capture, describe
+from footfall.tester.screen import SNAPSHOT_JS, CaptureError, Screen, capture, describe
 from footfall.tester.tools import (
     EVENTS_HEADING,
     MAX_PATH_LENGTH,
     MAX_TYPE_LENGTH,
     TOOLS,
+    UNSTEADY,
     Executor,
     ToolOutcome,
     screenshot_id,
@@ -638,7 +639,7 @@ async def test_a_screen_read_after_the_page_left_the_app_is_never_shown(
     assert sorted(p.name for p in s.shots.iterdir()) == ["01.jpg", "02.jpg"]
 
 
-async def test_a_page_that_leaves_the_app_each_time_it_is_read_ends_the_persona(
+async def test_a_page_that_leaves_the_app_each_time_it_is_read_is_an_error_result(
     session: MakeSession,
     app_server: AppServer,
     other_server: AppServer,
@@ -648,9 +649,106 @@ async def test_a_page_that_leaves_the_app_each_time_it_is_read_ends_the_persona(
     app_server.redirect("/away", "http://evil.test/foreign")
     s = await session()
     monkeypatch.setattr(tools, "capture", leaving_capture(app_server, 2))
-    with pytest.raises(CaptureError, match="left the app each time"):
-        await s.executor.run("look", {})
+    outcome = await s.executor.run("look", {})
+    assert (outcome.error, outcome.screen, outcome.finish) == (True, None, None)
+    assert outcome.text.endswith(UNSTEADY)
+    assert "Foreign" not in outcome.text and "Elsewhere only" not in outcome.text
     assert sorted(p.name for p in s.shots.iterdir()) == ["01.jpg"]
+    (step,) = s.trace.steps()
+    assert (step.error, step.screenshot_after) == (UNSTEADY, None)
+
+
+Meddle = Callable[[Page], Awaitable[object]]
+
+
+def reading(
+    *, before: Meddle | None = None, between: Meddle | None = None, times: int = 1
+) -> tuple[Callable[..., Awaitable[Screen]], list[str]]:
+    """A capture that, in its first `times` reads, does `before` just before the snapshot and
+    `between` between the snapshot and the screenshot, and notes the address of each read."""
+    reads: list[str] = []
+
+    async def read(page: Page, *, timeout: float) -> Screen:
+        reads.append(page.url)
+        meddle = len(reads) <= times
+
+        async def evaluate(page: Page) -> object:
+            if meddle and before is not None:
+                await before(page)
+            data = await page.evaluate(SNAPSHOT_JS)
+            if meddle and between is not None:
+                await between(page)
+            return data
+
+        return await capture(page, evaluate=evaluate, timeout=timeout)
+
+    return read, reads
+
+
+async def test_a_page_that_leaves_the_app_between_snapshot_and_screenshot_is_not_shown(
+    session: MakeSession,
+    app_server: AppServer,
+    other_server: AppServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other_server.page("/foreign", FOREIGN)
+    app_server.redirect("/away", "http://evil.test/foreign")
+    s = await session()
+    read, reads = reading(between=lambda page: page.goto(app_server.origin + "/away"))
+    monkeypatch.setattr(tools, "capture", read)
+    outcome = await s.executor.run("look", {})
+    assert outcome.screen is not None and outcome.screen.title == "Buttons"
+    assert outcome.screen.address == app_server.origin + "/buttons"
+    assert len(reads) == 2
+    assert sorted(p.name for p in s.shots.iterdir()) == ["01.jpg", "02.jpg"]
+
+
+async def test_a_read_of_another_host_is_not_shown_when_the_page_comes_back_to_the_app(
+    session: MakeSession,
+    app_server: AppServer,
+    other_server: AppServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Off the app for the snapshot, and back on it for the screenshot: the page's address is
+    # on the app both before and after, and only the snapshot's own address tells.
+    other_server.page("/foreign", FOREIGN)
+    app_server.redirect("/away", "http://evil.test/foreign")
+    s = await session()
+    read, reads = reading(
+        before=lambda page: page.goto(app_server.origin + "/away"),
+        between=lambda page: page.goto(app_server.origin + "/buttons"),
+    )
+    monkeypatch.setattr(tools, "capture", read)
+    outcome = await s.executor.run("look", {})
+    assert outcome.screen is not None and outcome.screen.title == "Buttons"
+    assert "Foreign" not in outcome.text and "Elsewhere only" not in outcome.text
+    assert len(reads) == 2
+
+
+async def test_a_steady_page_is_read_once(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = await session()
+    read, reads = reading()
+    monkeypatch.setattr(tools, "capture", read)
+    outcome = await s.executor.run("look", {})
+    assert outcome.screen is not None and outcome.screen.title == "Buttons"
+    assert len(reads) == 1
+
+
+async def test_a_first_look_at_a_page_that_will_not_keep_still_ends_the_persona(
+    session: MakeSession,
+    app_server: AppServer,
+    other_server: AppServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other_server.page("/foreign", FOREIGN)
+    app_server.redirect("/away", "http://evil.test/foreign")
+    read, reads = reading(between=lambda page: page.goto(app_server.origin + "/away"), times=2)
+    monkeypatch.setattr(tools, "capture", read)
+    with pytest.raises(CaptureError, match="would not keep still"):
+        await session()
+    assert len(reads) == 2
 
 
 # ------------------------------------------------------------------ results and records

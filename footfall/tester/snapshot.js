@@ -265,6 +265,8 @@
 
   visit(document);
   return {
+    // The address of the document read, so that Footfall can tell which page this was.
+    href: String(location.href),
     title: squash(document.title, MAX_TEXT),
     width, height, total, scanned_all: scannedAll, frames, entries,
   };
