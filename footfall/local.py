@@ -649,12 +649,13 @@ def _known_linked(folder: Path) -> _Linked:
     """The linked files of the git folders of the repository `folder` is in, and of its
     superproject's when it is in a submodule, for a copy of every file in the folder.
 
-    Footfall looks for `.git` in the folder and each folder above it, as git does. Finding
-    none is the one case that adds nothing: `folder` is in no repository. Otherwise git is
-    asked too. When git cannot read the repository at all, as when another user owns it,
-    which is what --all-files is for, or git is not installed, the folders Footfall found
-    stand in; when git reads it but cannot say whether it is a submodule, the copy is refused.
-    When Footfall cannot find them, a file with another name is refused, and no other.
+    Footfall looks in the folder and each folder above it for a `.git`, or for a folder that
+    is itself shaped like a git folder, as git does. Finding neither is the one case that
+    adds nothing: `folder` is in no repository. Otherwise git is asked too. When git cannot
+    read the repository at all, as when another user owns it, which is what --all-files is
+    for, or git is not installed, the folders Footfall found stand in; when git reads it but
+    cannot say whether it is a submodule, the copy is refused. When Footfall cannot find
+    them, a file with another name is refused, and no other.
     """
     try:
         discovered = _discovered_git_folders(folder)
@@ -961,11 +962,12 @@ def _copy_folder(
     any `.git`, however it is spelt, any folder `git_dirs` identifies, whatever it is
     called, and any folder shaped like a git folder, with a warning for each, since a
     repository's configuration can hold a token. A file with another name that is a file
-    of the repository's git folders, as `linked` finds them, is refused. Which folders are
-    left out is decided without git's help, so there a git folder is known only by its
-    name or its shape: a nested repository's moved git folder, or one git cannot read, is
-    named by nothing. The hard-link check does not depend on git, since `linked` finds the
-    git folders as git would when git cannot."""
+    of the repository's git folders, as `linked` finds them, is refused. A folder is left
+    out by its name, by its shape, or because `git_dirs`, git's own answer when it can read
+    the repository, names it. So a git folder git does not name, such as a nested
+    repository's moved one, or any git folder when git cannot read the repository, is left
+    out by its name or its shape alone. The hard-link check does not depend on git, since
+    `linked` finds the git folders as git would when git cannot."""
     base = folder.resolve()
     _refuse_a_git_folder(base, git_dirs)
     if _shaped_like_a_git_folder(lambda name: _kind(str(base / name))):
