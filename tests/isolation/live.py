@@ -72,10 +72,13 @@ def local_address_towards(address: str) -> str:
 
 
 def is_private(host: str) -> bool:
+    """Whether the isolation tests may connect to `host`: a private address, but never a
+    link-local one, such as the cloud's metadata service, nor the unspecified address."""
     try:
-        return ipaddress.ip_address(host).is_private
+        address = ipaddress.ip_address(host)
     except ValueError:
         return False
+    return address.is_private and not (address.is_link_local or address.is_unspecified)
 
 
 @dataclass
