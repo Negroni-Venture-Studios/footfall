@@ -80,10 +80,19 @@ _TRANSLATED = tuple(
 )
 _GLOBAL_UNICAST = ipaddress.ip_network("2000::/3")
 # Special-purpose ranges that `is_global` passes but where no public host lives: the
-# deprecated 6to4 relay anycast (RFC 7526), the Port Control Protocol anycast address
-# (RFC 7723) and ORCHIDv2 identifiers (RFC 7343), which are not routable.
+# deprecated 6to4 relay anycast (RFC 7526), the Port Control Protocol anycast addresses
+# (RFC 7723), the TURN anycast addresses (RFC 8155) and ORCHIDv2 identifiers (RFC 7343),
+# which are not routable.
 _NOT_PUBLIC = tuple(
-    ipaddress.ip_network(network) for network in ("192.88.99.0/24", "192.0.0.9/32", "2001:20::/28")
+    ipaddress.ip_network(network)
+    for network in (
+        "192.88.99.0/24",
+        "192.0.0.9/32",
+        "192.0.0.10/32",
+        "2001:1::1/128",
+        "2001:1::2/128",
+        "2001:20::/28",
+    )
 )
 
 

@@ -100,6 +100,10 @@ def test_invalid_names(name: str) -> None:
         ("::ffff:192.88.99.1", False),
         ("192.0.0.9", False),  # Port Control Protocol anycast
         ("192.0.0.8", False),
+        ("192.0.0.10", False),  # TURN anycast
+        ("2001:1::1", False),  # Port Control Protocol anycast
+        ("2001:1::2", False),  # TURN anycast
+        ("::ffff:192.0.0.10", False),
         ("2001:20::1", False),  # ORCHIDv2
         ("2001:2f:ffff:ffff::1", False),
         # Their neighbours stay public.
