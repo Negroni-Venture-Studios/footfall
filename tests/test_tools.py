@@ -18,7 +18,7 @@ from footfall.personas import DEVICES, PERSONAS, load_devices, load_personas
 from footfall.tester import tools
 from footfall.tester.guard import Guard
 from footfall.tester.prompt import system_prompt
-from footfall.tester.report import ToolError, parse_finish
+from footfall.tester.report import CAPS, ToolError, parse_finish
 from footfall.tester.screen import CaptureError, Screen, capture, describe
 from footfall.tester.tools import (
     EVENTS_HEADING,
@@ -790,6 +790,123 @@ async def test_an_invalid_finish_is_an_error(
     assert outcome.error is True
     assert outcome.finish is None
     assert message in outcome.text
+
+
+def strings(value: Any) -> list[str]:
+    """Every string in a JSON value, keys included."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [s for item in value for s in strings(item)]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in [k, *strings(v)]]
+    return []
+
+
+def test_the_trace_keeps_the_fields_each_tool_has() -> None:
+    for definition in TOOLS:
+        kept = tools._SHAPES[definition["name"]]
+        assert set(kept.fields) == set(definition["input_schema"]["properties"])
+    (finish,) = [t for t in TOOLS if t["name"] == "finish"]
+    findings = tools._SHAPES["finish"].fields["findings"]
+    assert isinstance(findings, tools._List)
+    assert isinstance(findings.item, tools._Fields)
+    finding = finish["input_schema"]["properties"]["findings"]["items"]
+    assert set(findings.item.fields) == set(finding["properties"])
+
+
+FLIPPED = "\u202e" + "q" * 99  # 100 characters, the first a right-to-left override
+
+
+async def test_the_trace_keeps_no_more_of_an_input_than_the_tool_takes(
+    session: MakeSession,
+) -> None:
+    s = await session()
+    typed = await s.executor.run("type", {"text": FLIPPED * 90})  # 9,000 characters
+    assert typed.error is True
+    long_one = {
+        **FINISH_EXAMPLE["findings"][0],
+        "title": FLIPPED * 5,
+        "steps": [FLIPPED * 4] * (CAPS["steps"] + 2),
+        "actual": FLIPPED * 7,
+    }
+    findings = [long_one, *FINISH_EXAMPLE["findings"] * (CAPS["findings"] + 2)]
+    report = {**FINISH_EXAMPLE, "summary": FLIPPED * 300, "findings": findings}
+    finished = await s.executor.run("finish", report)  # 30,000 characters of summary
+    assert finished.finish is not None
+    raw = s.trace.path.read_text(encoding="utf-8")
+    assert "\\u202e" not in raw.lower()
+    typed_step, finish_step = (json.loads(line) for line in raw.splitlines())
+    assert len(typed_step["input"]["text"]) == MAX_TYPE_LENGTH
+    assert all(len(text) <= MAX_TYPE_LENGTH for text in strings(typed_step))
+    recorded = finish_step["input"]
+    assert len(recorded["summary"]) == CAPS["summary"]
+    assert len(recorded["findings"]) == CAPS["findings"] + 1  # and a note of the rest
+    assert recorded["findings"][-1] == {"unrecorded": "3 more items, not recorded"}
+    first = recorded["findings"][0]
+    assert len(first["title"]) == CAPS["title"]
+    assert len(first["actual"]) == CAPS["actual"]
+    assert len(first["steps"]) == CAPS["steps"] + 1
+    assert all(len(step) == CAPS["step"] for step in first["steps"][:-1])
+    assert first["steps"][-1] == {"unrecorded": "2 more items, not recorded"}
+    assert all(len(text) <= CAPS["summary"] for text in strings(finish_step))
+    assert all("\u202e" not in text for text in strings([typed_step, finish_step]))
+
+
+async def test_the_trace_names_fields_the_tool_does_not_have_without_their_values(
+    session: MakeSession,
+) -> None:
+    s = await session()
+    finding = {**FINISH_EXAMPLE["findings"][0], "colour": "red " * 2000}
+    extra = {"mood": "glum " * 1400, "x" * 300: 1, **{f"spare{n}": n for n in range(6)}}
+    outcome = await s.executor.run("finish", {**FINISH_EXAMPLE, **extra, "findings": [finding]})
+    assert outcome.error is True
+    (step,) = s.trace.steps()
+    assert step.input["unrecorded"] == (
+        "fields the tool does not have, named only: `mood`, "
+        f"`{'x' * 39}…`, `spare0`, `spare1`, `spare2` and 3 more"
+    )
+    assert step.input["findings"][0]["unrecorded"] == (
+        "fields the tool does not have, named only: `colour`"
+    )
+    assert step.input["summary"] == FINISH_EXAMPLE["summary"]
+    raw = s.trace.path.read_text(encoding="utf-8")
+    assert "glum" not in raw and "red red" not in raw
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "recorded"),
+    [
+        ({"text": ["one", "two"]}, {"text": {"unrecorded": "a list of 2 items, not taken here"}}),
+        ({"text": {"a": "b"}}, {"text": {"unrecorded": "an object of 1 field, not taken here"}}),
+        (
+            {"text": "y" * 100_001},
+            {
+                "unrecorded": "the input was 100,013 characters as JSON, "
+                "more than the 100,000 the trace keeps"
+            },
+        ),
+    ],
+)
+async def test_the_trace_records_an_input_of_the_wrong_shape_by_its_shape(
+    session: MakeSession, tool_input: dict[str, Any], recorded: dict[str, Any]
+) -> None:
+    s = await session()
+    outcome = await s.executor.run("type", tool_input)
+    assert outcome.error is True
+    (step,) = s.trace.steps()
+    assert step.input == recorded
+
+
+async def test_the_trace_redacts_before_it_cuts(session: MakeSession) -> None:
+    s = await session(redact=frozenset({SECRET}))
+    # The password straddles the cap: cut first, its first characters would be kept.
+    text = "a" * (MAX_TYPE_LENGTH - 5) + SECRET + "b" * 600
+    await s.executor.run("type", {"text": text})
+    (step,) = s.trace.steps()
+    assert step.input["text"] == "a" * (MAX_TYPE_LENGTH - 5) + "[pas…"
+    raw = s.trace.path.read_text(encoding="utf-8")
+    assert all(SECRET[i : i + 4] not in raw for i in range(len(SECRET) - 3))
 
 
 @pytest.mark.parametrize(
