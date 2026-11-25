@@ -34,7 +34,7 @@ LABEL org.opencontainers.image.source="https://github.com/Negroni-Venture-Studio
       org.opencontainers.image.licenses="MIT"
 
 # git, from the base image's own Debian release (trixie) and its security
-# updates: footfall test copies only the files git would commit. git reads a
+# updates: footfall test copies only the files git tracks. git reads a
 # repository someone else owns only where it is told to trust it; the dev
 # stack mounts the repository under test at /repo, and nowhere else is trusted.
 # libatomic1, without which the Node that Playwright bundles cannot start.

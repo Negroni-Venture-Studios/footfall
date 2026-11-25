@@ -9,8 +9,8 @@
 #
 # FOOTFALL_REPO defaults to this repository, whose demo app is tested with
 # `footfall test /repo/demo-app`. The repository is mounted read-only with its
-# .git, so that footfall test copies only the files git would commit, and an
-# ignored .env stays behind. The results land in
+# .git, so that footfall test copies only the files git tracks, and an
+# untracked .env stays behind. The results land in
 # /var/lib/footfall/footfall-results on the host.
 #
 # Each run's files are in /var/lib/footfall-runs, which must be root's alone:

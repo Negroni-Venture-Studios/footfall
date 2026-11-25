@@ -164,7 +164,7 @@ def test_footfall_image_has_what_playwrights_driver_needs() -> None:
 
 
 def test_footfall_image_installs_git_from_its_own_release() -> None:
-    # footfall test lists the files git would commit; the base image's Debian release
+    # footfall test lists the files git tracks; the base image's Debian release
     # supplies git, with its security updates, and nothing it merely recommends.
     text = (ROOT / "images" / "footfall" / "Dockerfile").read_text()
     runtime = text.split(
