@@ -229,6 +229,10 @@ class ProxyLog:
             log.seek(self._start)
             return log.read().decode("utf-8", "replace").splitlines()
 
+    def all_decisions(self) -> list[str]:
+        """Every decision the proxy has logged since this was made, for any client."""
+        return [line for line in self.read() if "footfall.proxy.server:" in line.split()]
+
     def decisions(self, client: str, host: str | None = None) -> list[str]:
         """The proxy's decisions for one client address, and one host if given."""
         found = []

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.isolation.live import DEMO_APP, HERE, WORKSPACES, record_result
+from tests.isolation.live import DEMO_APP, HERE, WORKSPACES, ProxyLog, record_result
 
 pytestmark = pytest.mark.isolation
 
@@ -23,7 +23,7 @@ SCRIPT = HERE.parent / "fixtures" / "scripts" / "demo-walkthrough.json"
 PERSONAS = ("sven", "grace")
 
 
-def test_footfall_test_runs_the_demo_app_end_to_end(tmp_path: Path) -> None:
+def test_footfall_test_runs_the_demo_app_end_to_end(tmp_path: Path, proxy_log: ProxyLog) -> None:
     out = tmp_path / "results"
     done = subprocess.run(
         [
@@ -71,3 +71,6 @@ def test_footfall_test_runs_the_demo_app_end_to_end(tmp_path: Path) -> None:
         assert len(shots) >= 3, shots
     # The run's workspace is gone too.
     assert not (WORKSPACES / summary["run_id"]).exists()
+    # The demo app names no egress and no assets, so nothing in the run asked the proxy for
+    # anything: not the app, and not the browsers, whose calls to Google the policy stops.
+    assert proxy_log.all_decisions() == []
