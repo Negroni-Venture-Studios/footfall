@@ -21,7 +21,7 @@ from footfall.runner.client import RunnerClient
 from footfall.runner.service import RunnerError, RunnerService
 from footfall.tester.loop import Budget
 from footfall.tester.model import DEFAULT_MODEL
-from footfall.tester.report import PersonaReport
+from footfall.tester.report import PersonaReport, strip_invisible
 
 ENV_NAMES = (
     "FOOTFALL_RUNNER_SOCKET",
@@ -238,6 +238,36 @@ def test_a_run_that_cannot_go_ahead_says_why(
     if tail:
         assert tail.splitlines()[-1].replace("\x1b[2J", "") in printed
     assert "\x1b" not in printed
+
+
+def test_the_apps_last_output_cannot_give_a_github_actions_job_a_command(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The Actions runner reads a line as a workflow command when it starts with `::` once
+    leading white space is trimmed, and the older `##[` form anywhere in a line, comparing
+    in a way that can skip characters that show nothing. Cleaning removes some characters,
+    so a `::` behind one of them must still not lead a line."""
+    lines = [
+        "::stop-commands::tail-marker-stop",
+        "::add-mask::tail-marker-mask",
+        "##[error]tail-marker-legacy",
+        "text then ##[warning]tail-marker-inline",
+        "#\u00ad#[error]tail-marker-soft-hyphen",
+        "   ::warning::tail-marker-indented",
+        "\u200b::notice::tail-marker-zero-width",
+        "\r::group::tail-marker-return",
+        "before\u2028::debug::tail-marker-separator",
+        "\x1b[2J::error::tail-marker-escape",
+    ]
+    tail = "\n".join(lines)
+    monkeypatch.setattr(cli, "test_folder", Recorder(error=RunnerError("install failed", tail)))
+    assert main(["test", "app", "--model", "fake:s.json"]) == 1
+    printed = strip_invisible(capsys.readouterr().err)
+    for line in printed.splitlines():
+        assert not line.lstrip().startswith("::"), line
+    assert "##[" not in printed
+    for line in lines:  # still all there to read
+        assert "tail-marker-" + line.rsplit("tail-marker-", 1)[1] in printed
 
 
 def test_a_missing_folder_fails_cleanly(

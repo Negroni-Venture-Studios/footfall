@@ -54,7 +54,7 @@ from footfall.runner.server import serve
 from footfall.runner.service import RunnerError, RunnerService
 from footfall.tester.loop import Budget
 from footfall.tester.model import DEFAULT_MODEL, ModelSpecError
-from footfall.tester.report import clean_text
+from footfall.tester.report import clean_text, strip_invisible
 
 __all__ = ["ALL_FILES_WARNING", "RUNC_WARNING", "Settings", "main", "run_proxy", "run_runner"]
 
@@ -75,6 +75,11 @@ _CONTAINER_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 _MIB: Final = 1024**2
 _MOST_MIB: Final = 16 * 1024**2  # 16 TiB, far beyond any disk a run could have
 _LOG_TAIL_CAP: Final = 20_000
+# What each line of the app's output is printed behind: not white space, which the GitHub
+# Actions runner trims before it looks for a command, and not a character it can skip.
+_QUOTED: Final = "| "
+# The older form of a workflow command, which the runner looks for anywhere in a line.
+_LEGACY_COMMAND: Final = "##["
 _STOPPED: Final = 130  # the exit code when a command is stopped by a signal
 
 _DEFAULTS: Final = {
@@ -214,6 +219,27 @@ def _ids(text: str) -> list[str]:
     return [part.strip() for part in text.split(",") if part.strip()]
 
 
+def _no_legacy_commands(text: str) -> str:
+    """`text` with every `##[` broken, so that the runner finds no command in the older form."""
+    return text.replace(_LEGACY_COMMAND, "## [")
+
+
+def _inert_tail(text: str) -> str:
+    """The app's last output, cleaned, made inert for a GitHub Actions job's log.
+
+    `footfall test` can run in a job, where the runner reads a step's output for workflow
+    commands: a line that starts with `::` once leading white space is trimmed, and `##[`
+    anywhere in a line, in a comparison that can skip characters that show nothing. The
+    output is written by the code under test, so each line is put behind a bar and every
+    `##[` is broken, and only Footfall's own writes, such as its masks, are read as commands.
+
+    This comes after the tail is cleaned and its invisible characters are stripped, since
+    those steps remove characters, a zero-width space or a carriage return, say, that could
+    otherwise stand in front of a `::` and move it to the start of a line.
+    """
+    return "\n".join(_QUOTED + _no_legacy_commands(line) for line in text.splitlines())
+
+
 def _test(args: argparse.Namespace, settings: Settings) -> int:
     def say(message: str) -> None:
         print(f"footfall test: {message}", file=sys.stderr)
@@ -242,7 +268,7 @@ def _test(args: argparse.Namespace, settings: Settings) -> int:
     except (RunnerError, LocalRunError) as error:
         say(str(error))
         if error.log_tail:
-            tail = clean_text(error.log_tail, _LOG_TAIL_CAP)
+            tail = _inert_tail(strip_invisible(clean_text(error.log_tail, _LOG_TAIL_CAP)))
             print(f"The app's last output:\n{tail}", file=sys.stderr)
         return 1
     except (
