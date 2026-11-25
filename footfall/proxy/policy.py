@@ -21,6 +21,7 @@ from footfall.hosts import HostError, validate_host_name
 
 __all__ = [
     "ALLOWED_PORTS",
+    "NOT_ON_LIST",
     "UNKNOWN_CLIENT",
     "Decision",
     "Policy",
@@ -30,6 +31,7 @@ __all__ = [
 
 ALLOWED_PORTS: Final = frozenset({80, 443})
 UNKNOWN_CLIENT: Final = "unknown client"
+NOT_ON_LIST: Final = "is not on this client's allow list"  # the end of the reason, after the host
 ALLOWED: Final = "allowed"
 INVALID_HOST: Final = "not a valid host name"
 
@@ -135,7 +137,7 @@ class Policy:
         except HostError:
             return Decision(False, INVALID_HOST, run_id)
         if name not in names:
-            return Decision(False, f"{name} is not on this client's allow list", run_id)
+            return Decision(False, f"{name} {NOT_ON_LIST}", run_id)
         return Decision(True, ALLOWED, run_id)
 
     def record(self, run_id: str, host: str) -> None:
