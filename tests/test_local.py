@@ -2389,7 +2389,8 @@ def test_a_commondir_that_is_a_fifo_is_refused_without_waiting(tmp_path: Path) -
         ("gitdir-root", "not shaped like a git folder"),
         ("gitdir-elsewhere", "not shaped like a git folder"),
         ("no-gitdir-line", "cannot tell where"),
-        ("git-link", "link"),
+        # Not "link" alone: the advice's "the hard links" holds that whatever the reason.
+        ("git-link", "is a link or another kind"),
         ("unreadable", "cannot read"),
         ("huge-line", "not shaped like a git folder"),
     ],
@@ -2426,6 +2427,22 @@ def test_a_git_entry_footfall_cannot_follow_refuses_a_linked_file(
     finally:
         if git_file.exists() and not git_file.is_symlink():
             git_file.chmod(0o644)
+
+
+def test_only_the_start_of_a_git_file_is_read(tmp_path: Path) -> None:
+    """A .git file is read only as far as `_SMALL_FILE`, so a huge one, sparse or not, costs
+    nothing. Its line names one folder in its first bytes and another in the whole line, so
+    which one is found says how much was read."""
+    folder = tmp_path / "source"
+    app_files(folder)
+    first = shaped_folder(folder / "first")
+    shaped_folder(first / "whole")
+    # "first/./././...": however much of the dots is read, it names first; only the whole
+    # line, ending in "whole", names the folder inside it.
+    dots = "./" * local._SMALL_FILE
+    (folder / ".git").write_text(f"gitdir: first/{dots}whole\n")
+    found = local._discovered_git_folders(folder)
+    assert found[0] == first, found[0]
 
 
 def test_a_file_with_one_name_is_copied_however_odd_the_git_entry(tmp_path: Path) -> None:
