@@ -1811,6 +1811,29 @@ def test_a_name_git_does_not_compose_is_not_composed_before_the_match(
     assert '"Key.env"' in str(refused.value)
 
 
+@pytest.mark.usefixtures("own_git_home")
+def test_a_folder_that_cannot_be_listed_is_named_with_the_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass 6, item 4: a folder that can be searched but not listed holds no name that
+    "differs"; the refusal names the folder and the error."""
+    folder = tracked_two_pages(tmp_path)
+    real = os.listdir
+
+    def unlistable(where: Any) -> list[Any]:
+        if os.fsdecode(where).endswith("briefs"):
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real(where)
+
+    monkeypatch.setattr(os, "listdir", unlistable)
+    with pytest.raises(LocalRunError, match="cannot list") as refused:
+        local._git_files(folder)
+    said = str(refused.value)
+    assert '"footfall/briefs"' in said
+    assert "Permission denied" in said
+    assert "differs from the name on disk" not in said
+
+
 @pytest.mark.parametrize(("tracked", "on_disk"), ALIASES)
 @pytest.mark.usefixtures("own_git_home")
 def test_a_tracked_name_that_opens_your_file_by_another_name_is_refused(

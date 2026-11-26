@@ -611,8 +611,15 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
         if inside not in listings:
             try:
                 found = os.listdir(os.fsencode(folder / inside))  # noqa: PTH208  # as bytes
-            except OSError:
-                found = []  # not a folder that can be listed, so nothing in it is as tracked
+            except NotADirectoryError:
+                found = []  # a file where the branch tracks a folder: nothing is as tracked
+            except OSError as error:
+                why = error.strerror or type(error).__name__
+                raise LocalRunError(
+                    f"cannot list {_shown(inside)} in {_shown(folder)} ({why}), so Footfall "
+                    "cannot tell whether the changed files the branch tracks there are "
+                    "under their own names on disk; let it be listed, or pass --all-files"
+                ) from None
             if composes:
                 found = [_composed(n) for n in found]
             listings[inside] = frozenset(found)
