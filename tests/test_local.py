@@ -1552,14 +1552,19 @@ def test_a_changed_tracked_file_the_global_excludes_name_is_refused(tmp_path: Pa
     local._git_files(folder)  # the control: changed, but nobody's excludes name it
 
 
+@pytest.mark.parametrize("flags", [["--skip-worktree"], ["--skip-worktree", "--assume-unchanged"]])
 def test_a_file_git_skips_in_the_working_tree_is_refused_without_all_files(
-    tmp_path: Path,
+    tmp_path: Path, flags: list[str]
 ) -> None:
-    """A file marked skip-worktree by hand, with no sparse checkout, is the same hazard."""
+    """A file marked skip-worktree by hand, with no sparse checkout, is the same hazard,
+    and marking it assume-unchanged as well, which no exclude names here, does not hide it."""
     folder = tracked_two_pages(tmp_path)
     commit_all(folder)
     local._git_files(folder)  # the control: a full checkout is read as before
-    git(folder, "update-index", "--skip-worktree", "serve.py")
+    for flag in flags:
+        git(folder, "update-index", flag, "serve.py")
+    tag = "s" if len(flags) > 1 else "S"
+    assert f"{tag} serve.py" in git_output(folder, "ls-files", "-v").splitlines()
     with pytest.raises(LocalRunError, match="--all-files"):
         local._git_files(folder)
 
