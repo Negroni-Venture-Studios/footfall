@@ -200,7 +200,7 @@ def _finding(
     source: str,
     device: str,
     screenshots: set[str],
-    redact: Callable[[str], str],
+    shown: Callable[[str], str],
 ) -> Finding:
     where = f"finding {index + 1}: "
     if not isinstance(item, Mapping):
@@ -215,10 +215,7 @@ def _finding(
     shots = _strings(item, "screenshots", where)
     for shot in shots:
         if shot not in screenshots:
-            raise ToolError(
-                f"{where}`screenshots` names {clean_text(redact(shot), 40)!r}, which was "
-                "never taken"
-            )
+            raise ToolError(f"{where}`screenshots` names {shown(shot)!r}, which was never taken")
     shots = list(dict.fromkeys(shots))[:MAX_SCREENSHOTS]
     return Finding(
         title=_text(item, "title", CAPS["title"], where, required=True, single_line=True),
@@ -272,12 +269,13 @@ def parse_finish(
     source: str,
     device: str,
     screenshots: set[str],
-    redact: Callable[[str], str] = lambda text: text,
+    shown: Callable[[str], str] = lambda text: clean_text(text, 40, single_line=True),
 ) -> tuple[str, int, str, list[Finding]]:
     """Check a `finish` input and return the summary, score, goal reached and findings.
 
-    An error that quotes the model's text quotes it through `redact` before it is cut, so
-    that no cut leaves part of a secret for a later redaction to miss."""
+    An error that quotes the model's text quotes it as `shown` shows it, which must clean,
+    redact and then cut it, as `Redactor.fit` does, so that no cut leaves part of a secret
+    for a later redaction to miss and no cleaning joins one that redaction missed."""
     summary = _text(data, "summary", CAPS["summary"], "", required=True)
     score = _get(data, "score", "")
     if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 10:
@@ -290,7 +288,7 @@ def parse_finish(
         raise ToolError("`findings` must be a list")
     # Every finding is checked, including any that will be dropped.
     found = [
-        _finding(item, i, source=source, device=device, screenshots=screenshots, redact=redact)
+        _finding(item, i, source=source, device=device, screenshots=screenshots, shown=shown)
         for i, item in enumerate(raw)
     ]
     dropped = len(found) - CAPS["findings"]

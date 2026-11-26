@@ -1590,6 +1590,9 @@ def no_browser_executor(tmp_path: Path) -> tuple[Executor, Trace]:
         ("finish", {**FINISH_EXAMPLE, f"123456789{SECRET_32}": 1}),
         ("finish", finding_with(**{f"123456789{SECRET_32}": 1})),
         ("finish", finding_with(screenshots=[f"123456789{SECRET_32}"])),
+        # Split by a control character, which cleaning drops and redaction alone does not.
+        ("look", {f"123456789{SECRET_32[:7]}\x01{SECRET_32[7:]}": 1}),
+        ("finish", finding_with(screenshots=[f"123456789{SECRET_32[:7]}\x01{SECRET_32[7:]}"])),
     ],
 )
 async def test_an_error_that_echoes_the_model_is_redacted_before_it_is_cut(
@@ -1604,3 +1607,21 @@ async def test_an_error_that_echoes_the_model_is_redacted_before_it_is_cut(
     written = trace.path.read_text(encoding="utf-8")
     assert "[password]" in written
     assert SECRET_32[:20] not in written
+
+
+async def test_a_failure_that_quotes_the_secret_is_redacted_before_it_is_cut(
+    tmp_path: Path,
+) -> None:
+    """The same order for an exception that ends a step: its message, which can quote the
+    page or what was typed, was cut to 300 characters before the trace redacted it."""
+    executor, trace = no_browser_executor(tmp_path)
+
+    async def fails(name: str, data: Any) -> Any:
+        raise RuntimeError("x" * 290 + SECRET_32[:7] + "\x01" + SECRET_32[7:])
+
+    executor._perform = fails  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await executor.run("look", {})
+    written = trace.path.read_text(encoding="utf-8")
+    assert "RuntimeError" in written
+    assert SECRET_32[:7] not in written

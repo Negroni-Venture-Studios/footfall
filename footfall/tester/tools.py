@@ -440,11 +440,12 @@ def _check_finish(data: Mapping[str, Any], shown: Callable[[str], str] = _cut_ke
                     raise ToolError(f"finding {index}: unexpected field `{shown(str(key))}`")
 
 
-def _failure(error: BaseException) -> str:
-    """What the trace says about an exception that ended a step."""
+def _failure(error: BaseException, fit: Callable[[str, int], str]) -> str:
+    """What the trace says about an exception that ended a step, its message as `fit` makes
+    it one line, redacts and cuts it."""
     if isinstance(error, CaptureError):
-        return str(error)
-    message = clean_text(str(error), 300, single_line=True)
+        return fit(str(error), 300)
+    message = fit(str(error), 300)
     return f"{type(error).__name__}: {message}" if message else type(error).__name__
 
 
@@ -624,7 +625,7 @@ class Executor:
         self._attempt = _Action()
         draft = Step(
             number=self._steps,
-            tool=clean_text(str(name), _KEY_CAP, single_line=True),
+            tool=self._key(str(name)),
             input=self._record(name, tool_input),
             target_role=None,
             target_name=None,
@@ -681,7 +682,7 @@ class Executor:
         except BaseException as error:
             # Whatever ended the step, the trace says so, unless writing it is what failed.
             if not traced:
-                failure = _failure(error)
+                failure = _failure(error, self._line)
                 self._append(
                     draft, events + self._guard.drain(), error=failure, action=self._attempt
                 )
@@ -744,7 +745,7 @@ class Executor:
                 source="",
                 device="",
                 screenshots=self.screenshot_ids,
-                redact=self._redact,
+                shown=lambda shot: self._fit(shot, 40, single_line=True),
             )
             return _Action(finish=dict(data))
         # The name is the model's own text, so none of it is echoed into the trace.
@@ -992,6 +993,10 @@ class Executor:
 
     def _fit(self, text: str, cap: int, *, single_line: bool = False) -> str:
         return self._redactor.fit(text, cap, single_line=single_line)
+
+    def _line(self, text: str, cap: int) -> str:
+        """Text a model or a page wrote, made one line, redacted, then cut to `cap`."""
+        return self._fit(text, cap, single_line=True)
 
     def _key(self, key: str) -> str:
         """A field name the model wrote, as an error shows it: redacted, then cut."""
