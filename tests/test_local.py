@@ -1408,6 +1408,24 @@ def test_a_tracked_file_your_own_excludes_name_is_refused_once_changed(tmp_path:
         local._git_files(folder)
 
 
+def test_a_tracked_file_marked_assume_unchanged_counts_as_changed(tmp_path: Path) -> None:
+    """Ruling R78, the reviewer's sequence on git 2.54.0: a repository tracks prod.env, which
+    .git/info/exclude names; marked assume-unchanged and given new content, it is listed by
+    neither `ls-files -m` nor as skip-worktree, so it was copied. An assume-unchanged entry
+    counts as changed."""
+    folder = tracked_two_pages(tmp_path)
+    (folder / "prod.env").write_text("FROM_THE_BRANCH=1\n")
+    commit_all(folder)
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("prod.env\n")
+    git(folder, "update-index", "--assume-unchanged", "prod.env")
+    (folder / "prod.env").write_text(DEVELOPERS_SECRET)
+    assert git_output(folder, "ls-files", "-m") == ""
+    assert "H prod.env" in git_output(folder, "ls-files", "-t").splitlines()
+    with pytest.raises(LocalRunError, match=r'"prod\.env"'):
+        local._git_files(folder)
+
+
 def test_a_changed_tracked_file_the_global_excludes_name_is_refused(tmp_path: Path) -> None:
     folder = tracked_two_pages(tmp_path)
     commit_all(folder)

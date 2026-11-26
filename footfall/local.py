@@ -42,7 +42,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, NoReturn, Protocol, TextIO
@@ -535,19 +535,21 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
         output = _run_git(git, folder, ["ls-files", "-z", *which])
         return {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
 
-    # Each name behind its status tag, "S " for a file git skips in the working tree.
-    tagged = _run_git(git, folder, ["ls-files", "-z", "-t", "--cached"])
+    # Each name behind its status tag: "S " for a file git skips in the working tree, and a
+    # lower-case tag for one marked assume-unchanged, "s " for both.
+    tagged = _run_git(git, folder, ["ls-files", "-z", "-v", "--cached"])
     entries = [entry for entry in tagged.split(b"\0") if entry]
     asked = ["config", "--bool", "--default", "false", "--get", "core.sparseCheckout"]
     sparse = _run_git(git, folder, asked).strip() == b"true"
-    if sparse or any(entry.startswith(b"S ") for entry in entries):
+    if sparse or any(entry[:2] in (b"S ", b"s ") for entry in entries):
         raise LocalRunError(
             f"{_shown(folder)} is a sparse checkout, or git skips some of its files in the "
             "working tree, so a file there may be one of yours under a name the branch "
             "tracks rather than the branch's own; test a full checkout, or pass --all-files"
         )
     tracked = {PurePosixPath(os.fsdecode(entry[2:])) for entry in entries}
-    _refuse_yours(git, folder, listed)
+    assumed = {PurePosixPath(os.fsdecode(entry[2:])) for entry in entries if entry[:1].islower()}
+    _refuse_yours(git, folder, listed, assumed)
     others = listed("--others", "--exclude-standard") - tracked if untracked else set()
     paths = _git_folder_paths(git, folder)
     named = [*paths, *_superproject_git_folders(git, folder)]
@@ -560,13 +562,21 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
     )
 
 
-def _refuse_yours(git: str, folder: Path, listed: Callable[..., set[PurePosixPath]]) -> None:
+def _refuse_yours(
+    git: str,
+    folder: Path,
+    listed: Callable[..., set[PurePosixPath]],
+    assumed: Collection[PurePosixPath],
+) -> None:
     """Refuse a tracked file that is changed in the checkout and that the developer's own
     excludes name: the repository's info/exclude and core.excludesFile, never the tree's
     .gitignore, which the branch writes. A branch can track the name of a file the developer
     keeps out of git, and a checkout can leave the developer's file there, as one does once a
-    sparse checkout is disabled; it would then be copied as the branch's."""
-    changed = listed("-m")
+    sparse checkout is disabled; it would then be copied as the branch's.
+
+    A file marked assume-unchanged (`assumed`) counts as changed, since git does not look at
+    it to say."""
+    changed = {name for name in assumed if os.path.lexists(folder / name)} | listed("-m")
     if not changed:
         return
     where = _run_git(
