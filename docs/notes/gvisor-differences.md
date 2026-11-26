@@ -10,7 +10,7 @@ The browsers are given the egress proxy by its name, so the runner now writes th
 
 ## A fork bomb runs out of memory before it reaches the process limit
 
-On Linux, a container with a limit of 256 processes is refused the next one with `EAGAIN`. Under gVisor the probe's processes were refused after 109 with `ENOMEM`, well below the limit, because each process in the sandbox also costs host memory, which the container's 512 MiB limit bounds. The test accepts either refusal, and still requires that the bomb stops below 256 and that the probe which set it off survives. Alasdair ruled on 25 November 2026 that the test passes on `ENOMEM`. Whether gVisor enforces the process limit itself is not shown, since memory runs out first.
+On Linux, a container with a limit of 256 processes is refused the next one with `EAGAIN`. Under gVisor the probe's processes were refused after 109 with `ENOMEM`, well below the limit, because each process in the sandbox also costs host memory, which the container's 512 MiB limit bounds. The test accepts either refusal. It still requires the bomb to stop below 256, and the probe that set it off to survive. I ruled on 25 November 2026 that the test passes on `ENOMEM`. Whether gVisor enforces the process limit itself is not shown, since memory runs out first.
 
 ## A browser cannot read /proc through file://
 

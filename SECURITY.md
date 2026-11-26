@@ -21,7 +21,7 @@ You will get a response within 72 hours. We will work with you on a fix and agre
 
 In scope:
 
-- Footfall's own code: the runner and its container settings, the egress proxy, the tester's tools and the guard that keeps the browser on the app, how a run's results reach a calling agent, and anything that handles an API key, a token or a password.
+- Footfall's own code: the runner and its container settings, the egress proxy, the tester's tools and its guard, how a run's results reach a calling agent, and any code handling an API key, a token or a password.
 - The deployment files we ship: Footfall's container images, the Compose files, and the scripts that set a server up.
 
 Out of scope:
