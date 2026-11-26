@@ -645,8 +645,11 @@ def _refuse_yours(
     (`assumed`) counts as changed too, since git does not look at it to say. A file that is
     gone does not: the copy skips a tracked file that is missing.
 
-    The excludes are matched without regard to case, whatever core.ignoreCase says: on a
-    volume that ignores case, a name that differs only by case opens the same file.
+    The excludes are matched with core.ignoreCase true, whatever the repository says, so
+    that git folds the case of ASCII letters; it folds no other. A changed file whose
+    tracked name is not the name on disk, by case of any kind or by the form of an accented
+    letter, is refused before that, by `_refuse_other_names`, so the match is exact for
+    every file that reaches it.
     """
 
     def present(names: Collection[PurePosixPath]) -> set[PurePosixPath]:
