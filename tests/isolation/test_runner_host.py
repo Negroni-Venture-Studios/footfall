@@ -219,8 +219,15 @@ const stun = Buffer.concat([
 function send(target, payload) {
   const at = target.lastIndexOf(":");
   const host = target.slice(0, at), port = Number(target.slice(at + 1));
+  const v6 = host.startsWith("[");
   return new Promise((resolve) => {
-    const sock = dgram.createSocket("udp4");
+    let sock;
+    try {
+      sock = dgram.createSocket(v6 ? "udp6" : "udp4");
+    } catch (error) {
+      resolve(error.code || String(error));
+      return;
+    }
     let timer;
     const done = (outcome) => {
       clearTimeout(timer);
@@ -230,7 +237,21 @@ function send(target, payload) {
     timer = setTimeout(() => done("no answer"), 5000);
     sock.on("message", (message) => done(`answered ${message.length} bytes`));
     sock.on("error", (error) => done(error.code || String(error)));
-    sock.send(payload, port, host, (error) => { if (error) done(error.code || String(error)); });
+    const address = v6 ? host.slice(1, -1) : host;
+    sock.send(payload, port, address, (error) => { if (error) done(error.code || String(error)); });
+  });
+}
+// The control for IPv6: an echo on the container's own IPv6 loopback, which shows the probe
+// can send by udp6 when the container has IPv6 at all, and the error when it has none.
+function loopback6() {
+  return new Promise((resolve) => {
+    const server = dgram.createSocket("udp6");
+    server.on("error", (error) => {
+      try { server.close(); } catch (closing) {}
+      resolve({ error: error.code || String(error) });
+    });
+    server.on("message", (message, peer) => server.send(message, peer.port, peer.address));
+    server.bind(0, "::1", () => resolve({ server, port: server.address().port }));
   });
 }
 function look(name) {
@@ -241,7 +262,14 @@ function look(name) {
   ]);
 }
 (async () => {
-  const result = { dns: {}, stun: {}, names: {} };
+  const result = { dns: {}, stun: {}, names: {}, loopback6: null };
+  const echo6 = await loopback6();
+  if (echo6.server) {
+    result.loopback6 = await send(`[::1]:${echo6.port}`, stun);
+    echo6.server.close();
+  } else {
+    result.loopback6 = echo6.error;
+  }
   await Promise.all([
     ...datagrams.map(async (t) => { result.dns[t] = await send(t, question); }),
     ...datagrams.map(async (t) => { result.stun[t] = await send(t, stun); }),
@@ -252,14 +280,20 @@ function look(name) {
 })();
 """
 # Docker's resolver, public resolvers, and STUN servers a page's WebRTC might use: Google's
-# and Cloudflare's, by address, since no outside name resolves.
+# and Cloudflare's, by address, since no outside name resolves; and Google's and Cloudflare's
+# resolvers by IPv6, should a run's network ever have it.
 _OUTSIDE: Final = (
     "127.0.0.11:53",
     "8.8.8.8:53",
     "1.1.1.1:53",
     "74.125.250.129:19302",
     "162.159.207.0:3478",
+    "[2001:4860:4860::8888]:53",
+    "[2606:4700:4700::1111]:3478",
 )
+# What the IPv6 control may say when the container has no IPv6 at all, so that nothing can
+# be sent by udp6 to begin with.
+_NO_IPV6: Final = frozenset({"EADDRNOTAVAIL", "EAFNOSUPPORT", "EPROTONOSUPPORT", "ENETUNREACH"})
 
 
 def test_the_browser_container_sends_no_datagram_or_lookup_out_of_the_run(
@@ -270,7 +304,9 @@ def test_the_browser_container_sends_no_datagram_or_lookup_out_of_the_run(
     from inside it. No DNS question or STUN binding request by datagram is answered, by
     Docker's resolver, a public resolver or a STUN server, and no outside name resolves. The
     controls: an echo server on the run's network answers both datagrams, and the proxy's
-    name, which the container's hosts file holds, resolves."""
+    name, which the container's hosts file holds, resolves. Public resolvers are tried by
+    IPv6 too, should a run's network ever have it, with an echo on the container's own IPv6
+    loopback as their control, or the error that says the container has no IPv6."""
     run_id = new_run_id()
     container = f"footfall-{run_id}-browsers-browsers"
     try:
@@ -290,6 +326,10 @@ def test_the_browser_container_sends_no_datagram_or_lookup_out_of_the_run(
     for kind in ("dns", "stun"):
         assert found[kind].pop(echo["address"]).startswith("answered"), found  # the control
         assert not any(outcome.startswith("answered") for outcome in found[kind].values())
+    # The IPv6 control: the probe sends by udp6 on the container's loopback, or the container
+    # has no IPv6, and either way nothing outside answered by IPv6 above.
+    loopback6 = found["loopback6"]
+    assert loopback6.startswith("answered") or loopback6 in _NO_IPV6, found
     assert isinstance(found["names"].pop(PROXY), list), found  # the control: its hosts file
     assert not any(isinstance(outcome, list) for outcome in found["names"].values()), found
 
