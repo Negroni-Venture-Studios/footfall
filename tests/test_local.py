@@ -1788,6 +1788,29 @@ def test_a_tracked_folder_the_disk_lists_differently_is_refused(
     assert local._shown(PurePosixPath("CAF\u00c9/prod.env")) in str(refused.value)
 
 
+KELVIN_NAME = "\u212aey.env"  # KELVIN SIGN, which NFC makes a plain K and git leaves alone
+
+
+@pytest.mark.usefixtures("own_git_home")
+def test_a_name_git_does_not_compose_is_not_composed_before_the_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass 6, item 1: NFC also swaps a singleton for its equivalent, as the KELVIN SIGN
+    for K, where git's precompose only joins a letter to its accent. A volume that holds
+    both spellings as one file lists the developer's excluded file by the sign; the branch
+    tracks the plain K. Composed by NFC the two looked alike, and the file was copied."""
+    folder = tracked_two_pages(tmp_path)
+    git(folder, "config", "core.precomposeUnicode", "true")
+    (folder / "Key.env").write_text(DEVELOPERS_SECRET)
+    tracked_under(folder, "Key.env")
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write(f"{KELVIN_NAME}\n")
+    listed_as(monkeypatch, "Key.env", KELVIN_NAME)
+    with pytest.raises(LocalRunError, match="differs from the name on disk") as refused:
+        local._git_files(folder)
+    assert '"Key.env"' in str(refused.value)
+
+
 @pytest.mark.parametrize(("tracked", "on_disk"), ALIASES)
 @pytest.mark.usefixtures("own_git_home")
 def test_a_tracked_name_that_opens_your_file_by_another_name_is_refused(
