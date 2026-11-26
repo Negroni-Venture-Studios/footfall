@@ -365,6 +365,34 @@ def test_a_socket_the_kernel_cannot_describe_has_no_peer_user() -> None:
     assert footfall.proxy.control._peer_uid(closed) is None
 
 
+def test_a_refusal_sent_before_the_request_is_read_still_reaches_the_client() -> None:
+    """The proxy refuses a peer that is not root before it reads the request, and closes, so
+    the client's write can fail with a broken pipe while the refusal waits to be read (seen
+    in CI on 972b4e0). The client reads what the proxy said all the same. A request larger
+    than the socket's buffers, which the stand-in never reads, makes the write fail."""
+    with short_directory() as directory:
+        path = directory / "r.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen()
+
+        def refuse() -> None:
+            connection, _ = listener.accept()
+            with connection:
+                connection.sendall(b'{"ok": false, "error": "the proxy answers only user 0"}\n')
+
+        thread = threading.Thread(target=refuse)
+        thread.start()
+        try:
+            client = ProxyControlClient(path, timeout=10)
+            hosts = [f"host-{n}.example.com" for n in range(200_000)]
+            with pytest.raises(ProxyRefused, match="answers only user 0"):
+                client.allow(APP, RUN, hosts)
+        finally:
+            thread.join(timeout=10)
+            listener.close()
+
+
 def test_unreachable_proxy_raises_os_error() -> None:
     with short_directory() as directory:
         client = ProxyControlClient(directory / "missing.sock")

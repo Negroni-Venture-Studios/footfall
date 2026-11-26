@@ -338,7 +338,10 @@ class ProxyControlClient:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(self._timeout)
             sock.connect(str(self._socket_path))
-            sock.sendall(request)
+            # The proxy refuses a peer it will not answer before it reads the request, and
+            # closes, so the write can break while its refusal is still there to read.
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                sock.sendall(request)
             while not reply.endswith(b"\n"):
                 chunk = sock.recv(65536)
                 if not chunk:
