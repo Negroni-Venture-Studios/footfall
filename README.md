@@ -25,9 +25,11 @@ Footfall is at phase 1 of the [design](docs/design.md). That is the sandbox and 
 
 ## Trying phase 1
 
-`footfall test <folder>` sends the testers at an app in a local folder. It runs in the development stack in [deploy/dev/compose.yaml](deploy/dev/compose.yaml). The stack needs an Anthropic API key and Docker with gVisor. Docker has gVisor on Linux. Build the images as [images/README.md](images/README.md) describes. Then follow the commands at the top of the Compose file. `footfall test /repo/demo-app` tests the demo app, [Tiny Tasks](demo-app/README.md). It has planted bugs.
+`footfall test <folder>` sends the testers at an app in a folder on your own machine. You'll need an Anthropic API key and a Linux machine with Docker and gVisor.
 
-Docker Desktop on a Mac has no gVisor. `FOOTFALL_RUNTIME=runc` starts the containers under test without it and every command prints a warning. Never set it on a server.
+Build the images as [images/README.md](images/README.md) describes. Then start the development stack in [deploy/dev/compose.yaml](deploy/dev/compose.yaml) with the commands at the top of that file. The demo app [Tiny Tasks](demo-app/README.md) is a small to-do list with twelve bugs planted for the testers to find. `footfall test /repo/demo-app` tests it.
+
+Docker Desktop on a Mac has no gVisor. To develop on a Mac set `FOOTFALL_RUNTIME=runc`. The containers under test then start without gVisor and every command prints a warning. Never set it on a server.
 
 ## Contributing and security
 
