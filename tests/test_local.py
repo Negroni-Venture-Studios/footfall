@@ -1376,6 +1376,52 @@ def test_a_sparse_checkout_is_refused_without_all_files(tmp_path: Path) -> None:
     assert "full checkout" in str(refused.value)
 
 
+def test_a_tracked_file_your_own_excludes_name_is_refused_once_changed(tmp_path: Path) -> None:
+    """Ruling R77, after the reviewer's sequence: with the sparse checkout disabled, git
+    leaves the developer's excluded secrets/prod.env in place under the branch's tracked
+    name, as a changed file, with no skip-worktree left to refuse. A changed tracked file
+    that the developer's own excludes name is refused, by name, whatever the tree's own
+    .gitignore says."""
+    folder = sparse_repository(tmp_path)
+    git(folder, "sparse-checkout", "disable")
+    assert (folder / "secrets" / "prod.env").read_text() == DEVELOPERS_SECRET
+    assert git_output(folder, "status", "--porcelain").splitlines() == [" M secrets/prod.env"]
+    with pytest.raises(LocalRunError) as refused:
+        local._git_files(folder)
+    said = str(refused.value)
+    assert '"secrets/prod.env"' in said
+    assert "remove or rename" in said
+    # The branch cannot undo it with a negation in its own .gitignore.
+    (folder / ".gitignore").write_text("!secrets/prod.env\n")
+    git(folder, "add", ".gitignore")
+    git(
+        folder,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "x",
+    )
+    with pytest.raises(LocalRunError, match="remove or rename"):
+        local._git_files(folder)
+
+
+def test_a_changed_tracked_file_the_global_excludes_name_is_refused(tmp_path: Path) -> None:
+    folder = tracked_two_pages(tmp_path)
+    commit_all(folder)
+    excludes = tmp_path / "global-ignore"
+    excludes.write_text("serve.py\n")
+    git(folder, "config", "core.excludesFile", str(excludes))
+    local._git_files(folder)  # the control: unchanged, it is the branch's own
+    (folder / "serve.py").write_text("print('mine')\n")
+    with pytest.raises(LocalRunError, match=r'"serve\.py"'):
+        local._git_files(folder)
+    excludes.write_text("")
+    local._git_files(folder)  # the control: changed, but nobody's excludes name it
+
+
 def test_a_file_git_skips_in_the_working_tree_is_refused_without_all_files(
     tmp_path: Path,
 ) -> None:
@@ -2006,10 +2052,10 @@ def test_git_runs_with_a_bare_environment_and_no_input(
     monkeypatch.setattr(subprocess, "run", run)
     listing = local._git_files(folder, untracked=True)
     assert PurePosixPath("footfall.toml") in listing.names
-    # ls-files with each name's status, the sparse-checkout setting, ls-files for the
-    # untracked files, then rev-parse for the git folder, the common one and a superproject,
-    # each run the same safe way.
-    assert len(calls) == 6
+    # ls-files with each name's status, the sparse-checkout setting, ls-files for changed
+    # files, ls-files for the untracked files, then rev-parse for the git folder, the common
+    # one and a superproject, each run the same safe way.
+    assert len(calls) == 7
     assert "--show-superproject-working-tree" in calls[-1][0]
     allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL"}
     for command, options in calls:

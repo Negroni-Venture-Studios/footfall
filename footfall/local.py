@@ -369,6 +369,7 @@ _LINK_ADVICE: Final = (
     "readable where Footfall runs, for example by mounting them as well as the folder"
 )
 _SMALL_FILE: Final = 4096  # the most read of a .git file or a commondir file
+_NAMED: Final = 5  # the most files a refusal names one by one
 _MOST_SUPERPROJECTS: Final = 32
 
 
@@ -546,6 +547,7 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
             "tracks rather than the branch's own; test a full checkout, or pass --all-files"
         )
     tracked = {PurePosixPath(os.fsdecode(entry[2:])) for entry in entries}
+    _refuse_yours(git, folder, listed)
     others = listed("--others", "--exclude-standard") - tracked if untracked else set()
     paths = _git_folder_paths(git, folder)
     named = [*paths, *_superproject_git_folders(git, folder)]
@@ -556,6 +558,38 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
     return _Listing(
         sorted(tracked | others), _git_folders(git, folder, paths), frozenset(others), linked
     )
+
+
+def _refuse_yours(git: str, folder: Path, listed: Callable[..., set[PurePosixPath]]) -> None:
+    """Refuse a tracked file that is changed in the checkout and that the developer's own
+    excludes name: the repository's info/exclude and core.excludesFile, never the tree's
+    .gitignore, which the branch writes. A branch can track the name of a file the developer
+    keeps out of git, and a checkout can leave the developer's file there, as one does once a
+    sparse checkout is disabled; it would then be copied as the branch's."""
+    changed = listed("-m")
+    if not changed:
+        return
+    where = _run_git(
+        git, folder, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
+    )
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    default = f"{xdg}/git/ignore" if xdg else "~/.config/git/ignore"
+    asked = ["config", "--type=path", f"--default={default}", "--get", "core.excludesFile"]
+    configured = _run_git(git, folder, asked)
+    sources = [Path(os.fsdecode(path.removesuffix(b"\n"))) for path in (where, configured)]
+    readable = [path for path in sources if path.is_file()]
+    if not readable:
+        return
+    excluded = listed("--cached", "--ignored", *(f"--exclude-from={path}" for path in readable))
+    yours = sorted(changed & excluded)
+    if yours:
+        names = ", ".join(_shown(name) for name in yours[:_NAMED])
+        more = f" and {len(yours) - _NAMED} more" if len(yours) > _NAMED else ""
+        raise LocalRunError(
+            f"{names}{more}: tracked by the branch, changed in this checkout, and named by "
+            "your own git excludes, so a file of yours may be under the branch's name; "
+            "remove or rename it, and check the branch out again"
+        )
 
 
 def _worktree_top(folder: Path) -> Path:
