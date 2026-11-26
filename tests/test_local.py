@@ -720,10 +720,10 @@ async def test_a_page_that_stops_answering_ends_only_its_persona(
             await context.add_init_script("window.__hang = true;")
         return context
 
-    async def hanging_capture(page: Any, *, timeout: float) -> Any:
+    async def hanging_capture(page: Any, *, timeout: float, **options: Any) -> Any:
         if await page.evaluate("Boolean(window.__hang)"):
             raise CaptureError("the page did not answer")
-        return await capture(page, timeout=timeout)
+        return await capture(page, timeout=timeout, **options)
 
     monkeypatch.setattr(tools, "capture", hanging_capture)
     monkeypatch.setattr(local, "open_context", tracking_open)

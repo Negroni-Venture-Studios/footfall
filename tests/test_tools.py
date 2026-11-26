@@ -611,11 +611,11 @@ def leaving_capture(app_server: AppServer, times: int) -> Callable[..., Awaitabl
     after Footfall checked that it was on the app, by a redirect hop the guard never routes."""
     left: list[str] = []
 
-    async def leaving(page: Page, *, timeout: float) -> Screen:
+    async def leaving(page: Page, *, timeout: float, **options: Any) -> Screen:
         if len(left) < times:
             left.append(page.url)
             await page.goto(app_server.origin + "/away")
-        return await capture(page, timeout=timeout)
+        return await capture(page, timeout=timeout, **options)
 
     return leaving
 
@@ -669,7 +669,7 @@ def reading(
     `between` between the snapshot and the screenshot, and notes the address of each read."""
     reads: list[str] = []
 
-    async def read(page: Page, *, timeout: float) -> Screen:
+    async def read(page: Page, *, timeout: float, **options: Any) -> Screen:
         reads.append(page.url)
         meddle = len(reads) <= times
 
@@ -681,7 +681,7 @@ def reading(
                 await between(page)
             return data
 
-        return await capture(page, evaluate=evaluate, timeout=timeout)
+        return await capture(page, evaluate=evaluate, timeout=timeout, **options)
 
     return read, reads
 
