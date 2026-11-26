@@ -1738,7 +1738,7 @@ def tracked_under(folder: Path, tracked: str, sub: str = "") -> None:
 def test_a_tracked_name_the_folder_lists_differently_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracked: str, on_disk: str, sub: str
 ) -> None:
-    """Ruling R80: on a volume that folds case or the form of an accented letter, the
+    """Ruling R80: on a volume that folds case or the form of a letter, the
     developer's file answers to the branch's tracked name, and git's excludes, which fold
     ASCII case at most, do not match the two. A changed tracked name that its folder does
     not list byte for byte is refused. The folder's listing is stood in for here, so that
@@ -1761,6 +1761,7 @@ def test_a_tracked_name_the_folder_lists_differently_is_refused(
     assert local._shown(PurePosixPath(sub + tracked)) in str(refused.value)
     # Pass 6, item 5: a clone of a branch that tracks both names would be refused the same
     # way, and checking it out again would not help, so the refusal says what would.
+    assert "by case or by the form of a letter," in str(refused.value)
     assert "two names that this volume holds as one" in str(refused.value)
     assert "a volume that keeps them apart" in str(refused.value)
 
@@ -1853,17 +1854,19 @@ def test_a_name_git_may_compose_some_other_way_matches_no_tracked_name(
     assert local._shown(PurePosixPath(raw)) in str(refused.value)
 
 
+@pytest.mark.parametrize("which", ["footfall/briefs", ""])
 @pytest.mark.usefixtures("own_git_home")
 def test_a_folder_that_cannot_be_listed_is_named_with_the_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
 ) -> None:
     """Pass 6, item 4: a folder that can be searched but not listed holds no name that
-    "differs"; the refusal names the folder and the error."""
+    "differs"; the refusal names the folder, the tested one by its own name, and the
+    error."""
     folder = tracked_two_pages(tmp_path)
     real = os.listdir
 
     def unlistable(where: Any) -> list[Any]:
-        if os.fsdecode(where).endswith("briefs"):
+        if Path(os.fsdecode(where)) == folder / which:
             raise PermissionError(errno.EACCES, "Permission denied")
         return real(where)
 
@@ -1871,8 +1874,12 @@ def test_a_folder_that_cannot_be_listed_is_named_with_the_reason(
     with pytest.raises(LocalRunError, match="cannot list") as refused:
         local._git_files(folder)
     said = str(refused.value)
-    assert '"footfall/briefs"' in said
+    if which:
+        assert said.startswith(f'cannot list "{which}" in {local._shown(folder)} (')
+    else:
+        assert said.startswith(f"cannot list {local._shown(folder)} (")
     assert "Permission denied" in said
+    assert "the changed, staged or assume-unchanged files" in said
     assert "differs from the name on disk" not in said
 
 

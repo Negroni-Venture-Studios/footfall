@@ -599,7 +599,7 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
     """Refuse each of `names`, tracked files in `folder`, that the disk holds under another
     name: one whose path has a part its folder does not list byte for byte.
 
-    On a volume that folds case, or the form of an accented letter, a file of the
+    On a volume that folds case, or the form of a letter, a file of the
     developer's answers to a name the branch tracks that differs from its own, and git's
     excludes, which fold ASCII case at most, do not match the two. With every part listed as
     it is tracked, the excludes are matched against the names the disk holds. Each folder is
@@ -622,9 +622,10 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
                 found = []  # a file where the branch tracks a folder: nothing is as tracked
             except OSError as error:
                 why = error.strerror or type(error).__name__
+                where = f"{_shown(inside)} in {_shown(folder)}" if inside.parts else _shown(folder)
                 raise LocalRunError(
-                    f"cannot list {_shown(inside)} in {_shown(folder)} ({why}), so Footfall "
-                    "cannot tell whether the changed files the branch tracks there are "
+                    f"cannot list {where} ({why}), so Footfall cannot tell whether the "
+                    "changed, staged or assume-unchanged files the branch tracks there are "
                     "under their own names on disk; let it be listed, or pass --all-files"
                 ) from None
             if composes:
@@ -645,8 +646,8 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
         raise LocalRunError(
             f"{shown}{more}: tracked by the branch and changed, staged or marked "
             "assume-unchanged in this checkout, under a name that differs from the name on "
-            "disk, by case or by the form of an accented letter, so your own git excludes "
-            "cannot be matched to it and a file of yours may be under the branch's name; "
+            "disk, by case or by the form of a letter, so your own git excludes cannot be "
+            "matched to it and a file of yours may be under the branch's name; "
             "remove or rename it, and check the branch out again. If a fresh checkout is "
             "refused the same way, the branch tracks two names that this volume holds as "
             "one: fix that on the branch, or test from a volume that keeps them apart"
