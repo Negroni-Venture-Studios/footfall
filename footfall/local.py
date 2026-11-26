@@ -586,11 +586,11 @@ def _refuse_yours(
     The excludes are matched without regard to case, whatever core.ignoreCase says: on a
     volume that ignores case, a name that differs only by case opens the same file.
     """
-    changed = {name for name in assumed if os.path.lexists(folder / name)}
+
     modified = listed("-m")
-    if modified:
-        changed |= modified - listed("-d")
-    if not changed:
+    changed = modified - listed("-d") if modified else set()
+    marked = {name for name in assumed if os.path.lexists(folder / name)} - changed
+    if not changed and not marked:
         return
     where = _run_git(
         git, folder, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
@@ -611,15 +611,29 @@ def _refuse_yours(
     asked = ["-c", "core.ignoreCase=true", "ls-files", "-z", "--cached", "--ignored"]
     output = _run_git(git, folder, [*asked, *(f"--exclude-from={path}" for path in readable)])
     excluded = {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
+
+    def named(yours: list[PurePosixPath]) -> str:
+        names = ", ".join(_shown(name) for name in yours[:_NAMED])
+        return names + (f" and {len(yours) - _NAMED} more" if len(yours) > _NAMED else "")
+
+    refusals = []
     yours = sorted(changed & excluded)
     if yours:
-        names = ", ".join(_shown(name) for name in yours[:_NAMED])
-        more = f" and {len(yours) - _NAMED} more" if len(yours) > _NAMED else ""
-        raise LocalRunError(
-            f"{names}{more}: tracked by the branch, changed in this checkout, and named by "
+        refusals.append(
+            f"{named(yours)}: tracked by the branch, changed in this checkout, and named by "
             "your own git excludes, so a file of yours may be under the branch's name; "
             "remove or rename it, and check the branch out again"
         )
+    yours = sorted(marked & excluded)
+    if yours:
+        refusals.append(
+            f"{named(yours)}: tracked by the branch, marked assume-unchanged, so git does "
+            "not say whether it has changed, and named by your own git excludes, so a file "
+            "of yours may be under the branch's name; remove or rename it, or if it is the "
+            "branch's own, clear the mark with git update-index --no-assume-unchanged"
+        )
+    if refusals:
+        raise LocalRunError("; also ".join(refusals))
 
 
 def _refuse_a_link_into(folder: Path) -> None:

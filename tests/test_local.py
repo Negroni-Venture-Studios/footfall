@@ -1544,8 +1544,34 @@ def test_a_tracked_file_marked_assume_unchanged_counts_as_changed(tmp_path: Path
     (folder / "prod.env").write_text(DEVELOPERS_SECRET)
     assert git_output(folder, "ls-files", "-m") == ""
     assert "H prod.env" in git_output(folder, "ls-files", "-t").splitlines()
-    with pytest.raises(LocalRunError, match=r'"prod\.env"'):
+    with pytest.raises(LocalRunError, match=r'"prod\.env"') as refused:
         local._git_files(folder)
+    # Fix round 4, item 4: Footfall cannot know the file changed, and says how to clear the
+    # mark if the file is the branch's own.
+    said = str(refused.value)
+    assert "marked assume-unchanged" in said
+    assert "changed in this checkout" not in said
+    assert "git update-index --no-assume-unchanged" in said
+    assert "remove or rename" in said
+
+
+def test_a_refusal_tells_a_changed_file_from_one_marked_assume_unchanged(tmp_path: Path) -> None:
+    """One refusal names both kinds, each with its own reason."""
+    folder = tracked_two_pages(tmp_path)
+    (folder / "prod.env").write_text("FROM_THE_BRANCH=1\n")
+    commit_all(folder)
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("prod.env\nserve.py\n")
+    git(folder, "update-index", "--assume-unchanged", "prod.env")
+    (folder / "serve.py").write_text("print('mine')\n")
+    with pytest.raises(LocalRunError) as refused:
+        local._git_files(folder)
+    changed, _, marked = str(refused.value).partition("; also ")
+    assert '"serve.py"' in changed
+    assert '"prod.env"' not in changed
+    assert "in this checkout" in changed
+    assert '"prod.env"' in marked
+    assert "--no-assume-unchanged" in marked
 
 
 def test_a_case_variant_of_an_excluded_name_is_refused_on_any_volume(tmp_path: Path) -> None:
