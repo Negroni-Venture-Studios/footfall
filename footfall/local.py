@@ -370,6 +370,7 @@ _LINK_ADVICE: Final = (
 )
 _SMALL_FILE: Final = 4096  # the most read of a .git file or a commondir file
 _NAMED: Final = 5  # the most files a refusal names one by one
+_MOST_LINKS: Final = 40  # the most links followed on the way to the tested folder, as Linux
 _MOST_SUPERPROJECTS: Final = 32
 
 
@@ -623,28 +624,52 @@ def _refuse_a_link_into(folder: Path) -> None:
     the checkout, and with it the folders where a link is refused. So the path is walked as
     it was given, from the root, one name at a time with lstat: once a folder on the way
     holds a `.git`, a link below it is refused. Links above any checkout, such as /tmp on a
-    Mac, are the operator's own. Raises LocalRunError.
+    Mac or a link of the operator's to a checkout, are the operator's own: each is followed
+    to where it leads, as the kernel follows it, by the same rules, so a checkout reached
+    through one is still seen. Raises LocalRunError.
     """
-    here = Path(folder.absolute().anchor)
+    given = folder.absolute()
+    here = Path(given.anchor)
     inside: Path | None = None
-    for part in folder.absolute().parts[1:]:
+    ahead = list(given.parts[1:])
+    followed = 0
+    while ahead:
+        part = ahead.pop(0)
+        if part == "..":
+            if here == inside:
+                inside = None  # out of the checkout again, by the way in
+            here = here.parent
+            continue
         here = here / part
         try:
             linked = stat.S_ISLNK(here.lstat().st_mode)
+            led = here.readlink() if linked else Path()
         except FileNotFoundError:
             return  # a folder that is not there; reading the manifest says so
         except OSError as error:
             why = error.strerror or type(error).__name__
             raise LocalRunError(f"cannot look at {_shown(here)} ({why})") from None
-        if linked and inside is not None:
+        if not linked:
+            if inside is None and os.path.lexists(here / ".git"):
+                inside = here
+            continue
+        if inside is not None:
             raise LocalRunError(
                 f"{_shown(here.relative_to(inside))} in the checkout at {_shown(inside)} is a "
                 f"link, and the folder to test, {_shown(folder)}, is reached through it; a "
                 "branch's link could lead the run out of its checkout, so name the folder by "
                 "its own path, if it is one to test at all"
             )
-        if inside is None and not linked and os.path.lexists(here / ".git"):
-            inside = here
+        followed += 1
+        if followed > _MOST_LINKS:
+            raise LocalRunError(
+                f"the folder to test, {_shown(folder)}, is reached through more than "
+                f"{_MOST_LINKS} links; name it by its own path"
+            )
+        # The operator's own link: its target is walked from the folder that holds it, or
+        # from the root, before the names that came after it.
+        ahead[:0] = led.parts[1:] if led.is_absolute() else led.parts
+        here = Path(led.anchor) if led.is_absolute() else here.parent
 
 
 def _default_excludes() -> list[Path]:

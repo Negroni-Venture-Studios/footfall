@@ -928,6 +928,68 @@ def test_a_tested_folder_reached_through_a_link_above_its_checkout_is_accepted(
         local._refuse_a_link_into(tmp_path / name / "checkout" / "app")
 
 
+def link_in_a_checkout(tmp_path: Path) -> Path:
+    """A checkout whose branch commits `app` as a link out of it, to a folder that holds an
+    app, and the checkout's top."""
+    outside = tmp_path / "outside"
+    two_pages(outside)
+    top = tmp_path / "code" / "checkout"
+    (top / "sub").mkdir(parents=True)
+    (top / "app").symlink_to(outside / "app")
+    (top / "sub" / "app").symlink_to(outside / "app")
+    git(top, "init", "-q")
+    commit_all(top)
+    return top
+
+
+@pytest.mark.parametrize(
+    ("link", "target", "named"),
+    [
+        ("to-top", "code/checkout", "to-top/app"),
+        ("to-top", "{tmp}/code/checkout", "to-top/app"),
+        ("into", "code/checkout/sub", "into/app"),
+        ("above", "code", "above/checkout/app"),
+        ("chain", "to-top", "chain/app"),
+    ],
+)
+def test_a_branchs_link_is_refused_when_the_operator_names_the_checkout_by_a_link(
+    tmp_path: Path, link: str, target: str, named: str
+) -> None:
+    """Fix round 4, item 1: the operator names the folder through a link of their own, to
+    the checkout's top, into a folder of it, or above it, by a relative or an absolute
+    target or through a second link. The walk follows the operator's link to where the
+    kernel would, finds the checkout there, and refuses the branch's link below it."""
+    link_in_a_checkout(tmp_path)
+    (tmp_path / "to-top").symlink_to("code/checkout")
+    if link != "to-top" or "{tmp}" in target:
+        (tmp_path / link).unlink(missing_ok=True)
+        (tmp_path / link).symlink_to(target.format(tmp=tmp_path))
+    with pytest.raises(LocalRunError, match="is a link") as refused:
+        local._refuse_a_link_into(tmp_path / named)
+    assert 'app" in the checkout at' in str(refused.value)
+
+
+def test_a_link_that_leads_back_to_itself_is_refused_not_followed_for_ever(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "one").symlink_to("two")
+    (tmp_path / "two").symlink_to("one")
+    with pytest.raises(LocalRunError, match="more than 40 links"):
+        local._refuse_a_link_into(tmp_path / "one" / "app")
+
+
+def test_a_path_that_climbs_out_of_a_checkout_leaves_it(tmp_path: Path) -> None:
+    """`..` is followed as the kernel follows it: a path that goes into a checkout and out
+    again is above it, where a link is the operator's own."""
+    top = link_in_a_checkout(tmp_path)
+    real = tmp_path / "real"
+    two_pages(real)
+    (tmp_path / "code" / "mine").symlink_to(real)
+    local._refuse_a_link_into(top / ".." / "mine" / "app")
+    with pytest.raises(LocalRunError, match="is a link"):
+        local._refuse_a_link_into(top / "sub" / ".." / "app")
+
+
 @pytest.fixture
 def search_only(tmp_path: Path) -> Iterator[Path]:
     """A folder its owner may search and write in but not read, mode 0o311, as a shared
