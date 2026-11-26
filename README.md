@@ -1,6 +1,6 @@
 # Footfall
 
-Coding agents now build and change web apps in minutes. But most of the code they write is never read by a person. While tests check what the app is expected to do they won't show whether someone with their text at its largest can still sign up on a small phone, or whether the arrows point the right way for a pharmacist who reads Arabic.
+Coding agents now build and change web apps in minutes. But most of the code they write is never read by a person. While tests check what the app is expected to do they won't show whether someone with their text at its largest can still sign up on a small phone, or whether the arrows point the right way for someone who reads Arabic.
 
 Developers have always found those problems by watching someone use the app. The cheapest version is hallway testing. You grab whoever is walking past, hand them your phone and watch where they get stuck. Larger teams pay for QA, usability studies and beta testers. All of it assumes people write the code at the speed people work and that somebody remembers to ask.
 
