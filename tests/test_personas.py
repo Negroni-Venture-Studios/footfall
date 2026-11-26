@@ -101,23 +101,26 @@ async def test_coverage() -> None:
 
 def test_shipped_data_details() -> None:
     personas = load_personas(load_devices())
-    assert personas["clara"].allow_location is False
-    assert all(p.allow_location for p in personas.values() if p.id != "clara")
+    assert personas["less-motion"].allow_location is False
+    assert all(p.allow_location for p in personas.values() if p.id != "less-motion")
     assert all(p.geolocation is not None for p in personas.values())
-    assert personas["layla"].text_scale == 1.15
-    assert personas["sven"].device == "iPhone SE"
-    assert [p.id for p in personas.values() if p.reduced_motion] == ["clara"]
+    assert personas["right-to-left"].text_scale == 1.15
+    assert personas["largest-text"].device == "iPhone SE"
+    assert [p.id for p in personas.values() if p.reduced_motion] == ["less-motion"]
 
 
 def test_select_unknown_id() -> None:
     personas = load_personas(load_devices())
     with pytest.raises(PersonaError, match="nobody"):
-        select(personas, ["sven", "nobody"])
+        select(personas, ["largest-text", "nobody"])
 
 
 def test_select_orders_by_ids_and_empty_selects_all() -> None:
     personas = load_personas(load_devices())
-    assert [p.id for p in select(personas, ["olga", "anna"])] == ["olga", "anna"]
+    assert [p.id for p in select(personas, ["long-labels", "first-visit"])] == [
+        "long-labels",
+        "first-visit",
+    ]
     assert [p.id for p in select(personas, [])] == list(personas)
 
 
@@ -145,7 +148,7 @@ def test_a_profile_that_promises_large_text_has_it() -> None:
     """The profile is what the model reads, so it must not claim a text size the browser lacks."""
     personas = load_personas(load_devices()).values()
     large = [p for p in personas if re.search(r"\blarge(st)? text|text at its largest", p.profile)]
-    assert {p.id for p in large} == {"sven", "grace", "anna"}
+    assert {p.id for p in large} == {"largest-text", "low-vision", "first-visit"}
     assert all(p.text_scale > 1.0 for p in large)
 
 

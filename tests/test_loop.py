@@ -62,7 +62,7 @@ SECOND = "<!doctype html><title>Second</title><h1>Second page</h1>"
 
 _DEVICES = load_devices(DEVICES)
 _PERSONAS = load_personas(_DEVICES, PERSONAS)
-PERSONA: Persona = _PERSONAS["sven"]
+PERSONA: Persona = _PERSONAS["largest-text"]
 DEVICE: Device = _DEVICES[PERSONA.device]
 
 
@@ -563,11 +563,11 @@ async def test_the_runs_cost_ceiling_stops_every_persona_starting_another_turn()
     assert report.cost_usd == pytest.approx(1.20)
     assert spend.spent_usd == pytest.approx(1.20)
     second = FakeModel([LOOK] * 10, usage=THIRTY_CENTS)
-    other = await spend_run(second, spend, _PERSONAS["grace"])
+    other = await spend_run(second, spend, _PERSONAS["low-vision"])
     assert second.calls == []
     assert (other.status, other.cost_usd, other.reason) == ("incomplete", 0.0, report.reason)
     assert spend.spent_by(PERSONA.id) == pytest.approx(1.20)
-    assert spend.spent_by("grace") == 0.0
+    assert spend.spent_by("low-vision") == 0.0
 
 
 async def test_a_run_under_its_cost_ceiling_is_not_stopped_by_it() -> None:

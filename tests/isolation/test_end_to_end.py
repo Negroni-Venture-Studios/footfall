@@ -20,7 +20,7 @@ from tests.isolation.live import DEMO_APP, HERE, WORKSPACES, ProxyLog, record_re
 pytestmark = pytest.mark.isolation
 
 SCRIPT = HERE.parent / "fixtures" / "scripts" / "demo-walkthrough.json"
-PERSONAS = ("sven", "grace")
+PERSONAS = ("largest-text", "low-vision")
 
 
 def test_footfall_test_runs_the_demo_app_end_to_end(tmp_path: Path, proxy_log: ProxyLog) -> None:

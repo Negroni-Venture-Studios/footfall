@@ -87,7 +87,7 @@ egress = ["api.example.com"]
 [browser]
 assets = ["fonts.example.com"]
 """
-CHROMIUM_PERSONAS = ["grace", "kenji"]  # both on Chromium devices, so one local browser
+CHROMIUM_PERSONAS = ["low-vision", "one-handed"]  # both on Chromium devices, so one local browser
 
 
 # ---------------------------------------------------------------- fakes
@@ -203,7 +203,7 @@ async def run_folder(
     connect_browser: Connect,
     tmp_path: Path,
     *,
-    personas: Sequence[str] = ("grace",),
+    personas: Sequence[str] = ("low-vision",),
     model: str = FINISHES,
     brief: str = "default",
     all_files: bool = True,
@@ -268,17 +268,17 @@ async def test_wait_ready_gives_up_after_the_timeout(app_server: AppServer) -> N
 
 
 def test_the_table_has_a_line_for_each_persona_and_a_total() -> None:
-    finding = Finding("t", "minor", "/", (), "e", "a", (), "grace", "Pixel 7")
+    finding = Finding("t", "minor", "/", (), "e", "a", (), "low-vision", "Pixel 7")
     reports = [
         PersonaReport(
-            "grace", "Pixel 7", "finished", "x", 7, "yes", "", [finding] * 2, 5, 0.1234, 9.0
+            "low-vision", "Pixel 7", "finished", "x", 7, "yes", "", [finding] * 2, 5, 0.1234, 9.0
         ),
-        PersonaReport("kenji", "Pixel 5", "failed", "y", None, None, "", [], 0, 0.0, 1.0),
+        PersonaReport("one-handed", "Pixel 5", "failed", "y", None, None, "", [], 0, 0.0, 1.0),
     ]
     lines = format_table(reports).splitlines()
     assert re.split(r"\s{2,}", lines[0]) == ["persona", "status", "findings", "actions", "cost"]
-    assert re.split(r"\s{2,}", lines[1]) == ["grace", "finished", "2", "5", "$0.12"]
-    assert re.split(r"\s{2,}", lines[2]) == ["kenji", "failed", "0", "0", "$0.00"]
+    assert re.split(r"\s{2,}", lines[1]) == ["low-vision", "finished", "2", "5", "$0.12"]
+    assert re.split(r"\s{2,}", lines[2]) == ["one-handed", "failed", "0", "0", "$0.00"]
     assert re.split(r"\s{2,}", lines[3].strip()) == ["total", "2", "5", "$0.12"]
     assert lines[4:] == ["", OBSERVATIONS]
 
@@ -299,8 +299,8 @@ async def test_test_folder_writes_results(
     reports = await run_folder(folder, runner, launch, tmp_path, personas=CHROMIUM_PERSONAS)
 
     assert [(r.persona, r.status) for r in reports] == [
-        ("grace", "finished"),
-        ("kenji", "finished"),
+        ("low-vision", "finished"),
+        ("one-handed", "finished"),
     ]
     out = tmp_path / "out"
     for persona in CHROMIUM_PERSONAS:
@@ -356,7 +356,13 @@ async def test_test_folder_writes_results(
         "actions",
         "cost",
     ]
-    assert re.split(r"\s{2,}", printed.splitlines()[1]) == ["grace", "finished", "1", "1", "$0.00"]
+    assert re.split(r"\s{2,}", printed.splitlines()[1]) == [
+        "low-vision",
+        "finished",
+        "1",
+        "1",
+        "$0.00",
+    ]
     assert printed.splitlines()[-1] == OBSERVATIONS
     assert ENDPOINT not in printed
 
@@ -387,7 +393,7 @@ async def test_contexts_use_the_proxy_container_and_the_device(
     runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
     reports = await test_folder(
         two_pages(tmp_path),
-        persona_ids=["olga", "kenji"],  # a laptop without touch, and a phone with it
+        persona_ids=["long-labels", "one-handed"],  # a laptop without touch, and a phone with it
         brief_name="default",
         focus=None,
         model_spec=FINISHES,
@@ -402,8 +408,8 @@ async def test_contexts_use_the_proxy_container_and_the_device(
     assert [r.status for r in reports] == ["finished", "finished"]
     origin = f"http://127.0.0.1:{app_server.port}"
     assert sorted(opened) == [
-        ("kenji", origin, "http://proxy-for-tests:3128"),
-        ("olga", origin, "http://proxy-for-tests:3128"),
+        ("long-labels", origin, "http://proxy-for-tests:3128"),
+        ("one-handed", origin, "http://proxy-for-tests:3128"),
     ]
     assert sorted(executors) == [False, True]
 
@@ -420,11 +426,11 @@ async def test_unready_app_fails_with_logs_and_cleans_up(
     with pytest.raises(NotReadyError) as caught:
         await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
     assert time.monotonic() - started < 10
-    assert "grace" in str(caught.value)
+    assert "low-vision" in str(caught.value)
     assert "/healthz" in str(caught.value)
     assert "OSError: port in use" in caught.value.log_tail
     assert "\x1b" not in caught.value.log_tail  # no terminal escapes reach the operator
-    assert ("logs", runner.calls[0][1], "grace") in runner.calls
+    assert ("logs", runner.calls[0][1], "low-vision") in runner.calls
     assert runner.ops()[-1] == "stop"
     assert "start_browsers" not in runner.ops()
     assert connect[1] == []
@@ -471,7 +477,7 @@ async def test_a_failed_stop_is_reported(
     runner.fail["stop"] = RunnerError("could not remove footfall-r_x-app-grace")
     with pytest.raises(RunnerError, match="could not remove"):
         await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
-    assert (tmp_path / "out" / "grace" / "report.json").exists()
+    assert (tmp_path / "out" / "low-vision" / "report.json").exists()
 
 
 async def test_a_persona_that_fails_leaves_the_others_running(
@@ -485,7 +491,7 @@ async def test_a_persona_that_fails_leaves_the_others_running(
     real = run_persona
 
     async def kenji_breaks(**options: Any) -> Any:
-        if options["persona"].id == "kenji":
+        if options["persona"].id == "one-handed":
             raise RuntimeError("something inside the persona broke")
         return await real(**options)
 
@@ -495,15 +501,21 @@ async def test_a_persona_that_fails_leaves_the_others_running(
         two_pages(tmp_path), runner, connect[0], tmp_path, personas=CHROMIUM_PERSONAS
     )
     assert [(r.persona, r.status, r.reason) for r in reports] == [
-        ("grace", "finished", "the tester called finish"),
-        ("kenji", "failed", "RuntimeError"),
+        ("low-vision", "finished", "the tester called finish"),
+        ("one-handed", "failed", "RuntimeError"),
     ]
-    failed = json.loads((tmp_path / "out" / "kenji" / "report.json").read_text())
+    failed = json.loads((tmp_path / "out" / "one-handed" / "report.json").read_text())
     assert failed["status"] == "failed"
     assert "broke" not in json.dumps(failed)
     assert runner.ops()[-1] == "stop"
     printed = capsys.readouterr().out
-    assert re.split(r"\s{2,}", printed.splitlines()[2]) == ["kenji", "failed", "0", "0", "$0.00"]
+    assert re.split(r"\s{2,}", printed.splitlines()[2]) == [
+        "one-handed",
+        "failed",
+        "0",
+        "0",
+        "$0.00",
+    ]
 
 
 async def forever(*arguments: Any, **options: Any) -> Any:
@@ -536,7 +548,7 @@ async def test_a_persona_that_never_ends_is_stopped_at_its_hard_limit(
         "the persona ran past its hard limit of 1 s, so Footfall stopped it; its actions are "
         "not counted, and its cost leaves out the model call it stopped"
     )
-    written = json.loads((tmp_path / "out" / "grace" / "report.json").read_text())
+    written = json.loads((tmp_path / "out" / "low-vision" / "report.json").read_text())
     assert written["status"] == "failed"
     assert runner.ops()[-1] == "stop"
 
@@ -697,7 +709,7 @@ async def test_a_context_that_never_closes_closes_the_connection_to_the_browsers
         (report,) = await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
     assert time.monotonic() - started < 10
     assert report.status == "finished"
-    assert (tmp_path / "out" / "grace" / "report.json").exists()
+    assert (tmp_path / "out" / "low-vision" / "report.json").exists()
     (browser,) = browsers
     assert not browser.is_connected()
     assert runner.ops()[-1] == "stop"
@@ -716,7 +728,7 @@ async def test_a_page_that_stops_answering_ends_only_its_persona(
     async def tracking_open(browser: Browser, persona: Any, *rest: Any) -> Any:
         context = await real_open(browser, persona, *rest)
         context.on("close", lambda _: closed.append(persona.id))
-        if persona.id == "kenji":
+        if persona.id == "one-handed":
             # Every capture of this persona's page hangs, as a hostile page's would.
             await context.add_init_script("window.__hang = true;")
         return context
@@ -732,7 +744,10 @@ async def test_a_page_that_stops_answering_ends_only_its_persona(
     reports = await run_folder(
         two_pages(tmp_path), runner, connect[0], tmp_path, personas=CHROMIUM_PERSONAS
     )
-    assert [(r.persona, r.status) for r in reports] == [("grace", "finished"), ("kenji", "failed")]
+    assert [(r.persona, r.status) for r in reports] == [
+        ("low-vision", "finished"),
+        ("one-handed", "failed"),
+    ]
     assert reports[1].reason == "the page stopped answering"
     assert sorted(closed) == CHROMIUM_PERSONAS
 
@@ -740,7 +755,7 @@ async def test_a_page_that_stops_answering_ends_only_its_persona(
 async def test_existing_results_are_never_overwritten(
     tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
 ) -> None:
-    (tmp_path / "out" / "grace").mkdir(parents=True)
+    (tmp_path / "out" / "low-vision").mkdir(parents=True)
     runner = FakeRunner(lambda copy: "127.0.0.1:9")
     with pytest.raises(OutputError, match="already"):
         await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
@@ -752,8 +767,8 @@ async def test_existing_results_are_never_overwritten(
     [
         ("summary.json", "dangling"),
         ("summary.json", "file"),
-        ("grace", "dangling"),
-        ("grace", "folder"),
+        ("low-vision", "dangling"),
+        ("low-vision", "folder"),
     ],
 )
 async def test_a_link_where_results_go_is_refused_before_the_run(
@@ -817,7 +832,7 @@ async def test_a_link_the_branch_commits_outside_the_tested_folder_is_refused_to
     with pytest.raises(OutputError, match="is a link"):
         await test_folder(
             top / "app",
-            persona_ids=["grace"],
+            persona_ids=["low-vision"],
             brief_name="default",
             focus=None,
             model_spec=FINISHES,
@@ -895,7 +910,7 @@ async def test_a_tested_folder_reached_through_a_link_in_its_checkout_is_refused
     with pytest.raises(LocalRunError, match="link") as refused:
         await test_folder(
             top / "app",
-            persona_ids=["grace"],
+            persona_ids=["low-vision"],
             brief_name="default",
             focus=None,
             model_spec=FINISHES,
@@ -1051,15 +1066,15 @@ def test_a_parent_that_cannot_be_opened_on_the_way_up_is_an_output_error(
 
 @pytest.mark.usefixtures("no_umask")
 def test_results_are_made_for_their_owner_alone(tmp_path: Path) -> None:
-    (grace,) = select(load_personas(load_devices()), ["grace"])
+    (grace,) = select(load_personas(load_devices()), ["low-vision"])
     out = tmp_path / "new" / "out"
     results = local._prepare_results(out, [grace], two_pages(tmp_path))
     try:
         local._write_json(results.out, "summary.json", {"run": "r"}, None)
         # Each way `footfall test` writes in a persona's folder: the report, the trace's
         # lines, and the screenshots' folder and the screenshots in it (part B, Minor 9).
-        persona = results.personas["grace"]
-        local._write_json(persona, "report.json", {"persona": "grace"}, None)
+        persona = results.personas["low-vision"]
+        local._write_json(persona, "report.json", {"persona": "low-vision"}, None)
         persona.append("trace.jsonl", b"{}\n")
         screenshots = persona.make("screenshots")
         try:
@@ -1071,18 +1086,18 @@ def test_results_are_made_for_their_owner_alone(tmp_path: Path) -> None:
     made = (
         tmp_path / "new",
         out,
-        out / "grace",
+        out / "low-vision",
         out / "summary.json",
-        out / "grace" / "report.json",
-        out / "grace" / "trace.jsonl",
-        out / "grace" / "screenshots",
-        out / "grace" / "screenshots" / "01.jpg",
+        out / "low-vision" / "report.json",
+        out / "low-vision" / "trace.jsonl",
+        out / "low-vision" / "screenshots",
+        out / "low-vision" / "screenshots" / "01.jpg",
     )
     modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in made}
     assert modes == {
         "new": 0o700,
         "out": 0o700,
-        "grace": 0o700,
+        "low-vision": 0o700,
         "summary.json": 0o600,
         "report.json": 0o600,
         "trace.jsonl": 0o600,
@@ -1112,10 +1127,10 @@ def test_a_link_above_the_results_outside_the_tested_folder_is_followed(tmp_path
     real = tmp_path / "real-results-parent"
     real.mkdir()
     (tmp_path / "linked").symlink_to(real)
-    (grace,) = select(load_personas(load_devices()), ["grace"])
+    (grace,) = select(load_personas(load_devices()), ["low-vision"])
     out = tmp_path / "linked" / "deeper" / "out"
     local._prepare_results(out, [grace], two_pages(tmp_path)).close()
-    assert (real / "deeper" / "out" / "grace").is_dir()
+    assert (real / "deeper" / "out" / "low-vision").is_dir()
 
 
 async def test_a_link_swapped_in_after_the_check_moves_no_result(
@@ -1133,8 +1148,8 @@ async def test_a_link_swapped_in_after_the_check_moves_no_result(
 
     async def prepare(*arguments: Any) -> None:
         # Once Footfall has made the results folders, links take the place of both.
-        (out / "grace").rename(tmp_path / "moved-grace")
-        (out / "grace").symlink_to(targets[0])
+        (out / "low-vision").rename(tmp_path / "moved-grace")
+        (out / "low-vision").symlink_to(targets[0])
         out.rename(tmp_path / "moved-out")
         out.symlink_to(targets[1])
         await real_prepare(*arguments)
@@ -1143,7 +1158,10 @@ async def test_a_link_swapped_in_after_the_check_moves_no_result(
     (report,) = await run_folder(two_pages(tmp_path), runner, connect[0], tmp_path)
     assert report.status == "finished"
     assert [list(target.iterdir()) for target in targets] == [[], []]
-    assert sorted(p.name for p in (tmp_path / "moved-out").iterdir()) == ["grace", "summary.json"]
+    assert sorted(p.name for p in (tmp_path / "moved-out").iterdir()) == [
+        "low-vision",
+        "summary.json",
+    ]
     moved = sorted(p.name for p in (tmp_path / "moved-grace").iterdir())
     assert moved == ["report.json", "screenshots", "trace.jsonl"]
 
@@ -1183,7 +1201,7 @@ async def test_the_results_folder_is_left_out_of_the_copy(
     runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
     await test_folder(
         folder,
-        persona_ids=["grace"],
+        persona_ids=["low-vision"],
         brief_name="default",
         focus=None,
         model_spec=FINISHES,
@@ -1374,7 +1392,7 @@ async def test_the_password_never_reaches_the_results_even_when_typed(
     tester = SigningInTester()
     monkeypatch.setattr(local, "model_from_spec", lambda spec: tester)
     reports = await run_folder(
-        demo_folder, local_runner, connect[0], tmp_path, personas=["grace"], brief="signed-out"
+        demo_folder, local_runner, connect[0], tmp_path, personas=["low-vision"], brief="signed-out"
     )
     ((env,),) = [local_runner.envs]
     username, password = env["FOOTFALL_USERNAME"], env["FOOTFALL_PASSWORD"]
@@ -1390,8 +1408,8 @@ async def test_the_password_never_reaches_the_results_even_when_typed(
 
     out = everything_written(tmp_path / "out")
     assert password.encode() not in out
-    assert b"[password]" in (tmp_path / "out" / "grace" / "report.json").read_bytes()
-    assert b"[password]" in (tmp_path / "out" / "grace" / "trace.jsonl").read_bytes()
+    assert b"[password]" in (tmp_path / "out" / "low-vision" / "report.json").read_bytes()
+    assert b"[password]" in (tmp_path / "out" / "low-vision" / "trace.jsonl").read_bytes()
     printed = capsys.readouterr()
     assert password not in printed.out + printed.err
     assert password not in caplog.text
@@ -1427,7 +1445,7 @@ async def test_footfall_signs_the_persona_in_when_the_brief_starts_signed_in(
     )
     reports = await test_folder(
         demo_folder,
-        persona_ids=["grace"],
+        persona_ids=["low-vision"],
         brief_name="default",
         focus=None,
         model_spec=f"fake:{script}",
@@ -1441,7 +1459,7 @@ async def test_footfall_signs_the_persona_in_when_the_brief_starts_signed_in(
     (report,) = reports
     assert report.status == "finished", report.reason
     password = local_runner.envs[0]["FOOTFALL_PASSWORD"]
-    trace = (tmp_path / "out" / "grace" / "trace.jsonl").read_text()
+    trace = (tmp_path / "out" / "low-vision" / "trace.jsonl").read_text()
     assert json.loads(trace.splitlines()[0])["path_before"] == "/"  # signed in, on the list
     assert password.encode() not in everything_written(tmp_path / "out")
     assert password not in capsys.readouterr().out
@@ -2119,7 +2137,7 @@ async def test_results_inside_a_repository_are_not_copied(
     runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
     await test_folder(
         folder,
-        persona_ids=["grace"],
+        persona_ids=["low-vision"],
         brief_name="default",
         focus=None,
         model_spec=FINISHES,
@@ -2205,7 +2223,7 @@ async def test_untracked_and_all_files_cannot_both_be_asked_for(tmp_path: Path) 
     with pytest.raises(ValueError, match="untracked and all_files"):
         await test_folder(
             two_pages(tmp_path),
-            persona_ids=["grace"],
+            persona_ids=["low-vision"],
             brief_name="default",
             focus=None,
             model_spec=FINISHES,
@@ -2450,7 +2468,7 @@ async def test_a_report_that_cannot_be_written_stops_nothing(
 
     def write(folder: Folder, name: str, data: object, password: str | None) -> None:
         runner.calls.append(("written", folder.path.name, name))
-        if folder.path.name == "kenji":
+        if folder.path.name == "one-handed":
             raise OSError(28, "No space left on device")
         real_write(folder, name, data, password)
 
@@ -2459,12 +2477,12 @@ async def test_a_report_that_cannot_be_written_stops_nothing(
         two_pages(tmp_path), runner, connect[0], tmp_path, personas=CHROMIUM_PERSONAS
     )
     assert [(r.persona, r.status) for r in reports] == [
-        ("grace", "finished"),
-        ("kenji", "finished"),
+        ("low-vision", "finished"),
+        ("one-handed", "finished"),
     ]
     ops = [call[:2] for call in runner.calls]
     assert ops.index(("stop", ops[-1][1])) == len(ops) - 1
-    assert ("written", "grace") in ops and ("written", "kenji") in ops
+    assert ("written", "low-vision") in ops and ("written", "one-handed") in ops
 
 
 async def test_every_persona_ends_before_a_failure_is_raised(
@@ -2478,8 +2496,8 @@ async def test_every_persona_ends_before_a_failure_is_raised(
     real_persona = local._Run.persona
 
     async def persona(self: Any, who: Any, *rest: Any) -> Any:
-        if who.id == "kenji":
-            raise RuntimeError("kenji's part broke at once")
+        if who.id == "one-handed":
+            raise RuntimeError("one-handed's part broke at once")
         report = await real_persona(self, who, *rest)
         runner.calls.append(("ended", who.id))
         return report
@@ -2491,7 +2509,7 @@ async def test_every_persona_ends_before_a_failure_is_raised(
         )
     ops = runner.ops()
     assert ops[-2:] == ["ended", "stop"]
-    grace = json.loads((tmp_path / "out" / "grace" / "report.json").read_text())
+    grace = json.loads((tmp_path / "out" / "low-vision" / "report.json").read_text())
     assert grace["status"] == "finished"  # not cut short when its browser was closed
 
 

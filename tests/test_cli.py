@@ -54,7 +54,7 @@ class Recorder:
 
     def __init__(self, result: Any = None, error: Exception | None = None) -> None:
         self.calls: list[tuple[Path, dict[str, Any]]] = []
-        self.result = result if result is not None else [report("grace")]
+        self.result = result if result is not None else [report("low-vision")]
         self.error = error
 
     async def __call__(self, folder: Path, **options: Any) -> Any:
@@ -159,7 +159,7 @@ def test_cli_test_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
             "test",
             "demo-app",
             "--personas",
-            "grace, kenji",
+            "low-vision, one-handed",
             "--brief",
             "smoke",
             "--focus",
@@ -177,7 +177,7 @@ def test_cli_test_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert isinstance(runner, RunnerClient)
     assert runner._socket_path == tmp_path / "runner.sock"
     assert options == {
-        "persona_ids": ["grace", "kenji"],
+        "persona_ids": ["low-vision", "one-handed"],
         "brief_name": "smoke",
         "focus": "the search box",
         "model_spec": "fake:script.json",
@@ -294,10 +294,12 @@ def test_a_real_model_needs_the_api_key(
 
 
 def test_the_exit_code_says_whether_a_persona_failed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "test_folder", Recorder([report("grace"), report("kenji", "failed")]))
+    monkeypatch.setattr(
+        cli, "test_folder", Recorder([report("low-vision"), report("one-handed", "failed")])
+    )
     assert main(["test", "app", "--model", "fake:s.json"]) == 1
     monkeypatch.setattr(
-        cli, "test_folder", Recorder([report("grace"), report("kenji", "incomplete")])
+        cli, "test_folder", Recorder([report("low-vision"), report("one-handed", "incomplete")])
     )
     assert main(["test", "app", "--model", "fake:s.json"]) == 0
 

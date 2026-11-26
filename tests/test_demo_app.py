@@ -417,8 +417,18 @@ def test_manifest_labels_match_the_sign_in_page(demo: Demo) -> None:
 def test_bugs_file_names_real_personas() -> None:
     text = BUGS.read_text()
     known = load_personas(load_devices())
-    named = set(re.findall(r"`([a-z]+)`", text)) & set(known)
-    assert {"malik", "mehmet", "sven", "grace", "clara", "layla", "olga", "jonas", "anna"} <= named
+    named = set(re.findall(r"`([a-z][a-z0-9-]*)`", text)) & set(known)
+    assert {
+        "skims",
+        "unusual-text",
+        "largest-text",
+        "low-vision",
+        "less-motion",
+        "right-to-left",
+        "long-labels",
+        "edge-cases",
+        "first-visit",
+    } <= named
     assert len(re.findall(r"^## Bug \d+\b", text, re.MULTILINE)) == 12
 
 
@@ -429,7 +439,7 @@ def test_bugs_file_marks_every_persona_the_demo_does_not_run() -> None:
     sections = BUGS.read_text().split("\n## ")[1:]
     for section in sections:
         for sentence in re.split(r"(?<=\.) ", section):
-            named = set(re.findall(r"`([a-z]+)`", sentence)) & others
+            named = set(re.findall(r"`([a-z][a-z0-9-]*)`", sentence)) & others
             assert not named or "when run" in sentence, sentence
 
 
@@ -442,8 +452,8 @@ def test_bug_1_names_the_personas_who_try_to_break_things() -> None:
     }
     bug_1 = BUGS.read_text().split("\n## ")[1]
     assert bug_1.startswith("Bug 1:")
-    assert breakers == {"jonas", "mehmet"}
-    assert breakers <= set(re.findall(r"`([a-z]+)`", bug_1))
+    assert breakers == {"edge-cases", "unusual-text"}
+    assert breakers <= set(re.findall(r"`([a-z][a-z0-9-]*)`", bug_1))
 
 
 def test_a_second_session_does_not_log_the_first_out(demo: Demo) -> None:

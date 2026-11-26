@@ -65,13 +65,13 @@ def test_full_manifest_is_read_and_hosts_are_normalised() -> None:
 assets = ["Tile.OpenStreetMap.org"]
 [test]
 pages = ["/", "/settings"]
-personas = ["sven", "grace"]
+personas = ["largest-text", "low-vision"]
 """
     )
     assert manifest.browser.assets == ("tile.openstreetmap.org",)
     assert manifest.login is not None
     assert manifest.login.submit == "Sign in"
-    assert manifest.test.personas == ("sven", "grace")
+    assert manifest.test.personas == ("largest-text", "low-vision")
 
 
 def test_every_problem_is_reported_at_once() -> None:
@@ -636,9 +636,9 @@ def test_persona_copy_name_limits_accepted() -> None:
 
 
 def test_duplicate_personas_are_refused() -> None:
-    assert problems_of(MINIMAL + '[test]\npersonas = ["sven", "grace", "sven"]\n') == [
-        "test.personas[2]: 'sven' is listed more than once"
-    ]
+    assert problems_of(
+        MINIMAL + '[test]\npersonas = ["largest-text", "low-vision", "largest-text"]\n'
+    ) == ["test.personas[2]: 'largest-text' is listed more than once"]
 
 
 @pytest.mark.parametrize("path", ["/a..b", "/.well-known/x", "/a/...", "/search?q=../x", "/a.b/"])

@@ -49,7 +49,7 @@ NOT_LISTED: Final = "is not on this client's allow list"
 # Every code point of Encrypted Client Hello and of the encrypted SNI before it.
 HIDDEN_NAMES: Final = frozenset({0xFE08, 0xFE09, 0xFE0A, 0xFE0B, 0xFE0C, 0xFE0D, 0xFF02, 0xFFCE})
 ECH: Final = 0xFE0D
-PERSONA_FOR: Final = {"chromium": "grace", "webkit": "sven"}
+PERSONA_FOR: Final = {"chromium": "low-vision", "webkit": "largest-text"}
 RUN_SERVER: Final = "http://127.0.0.1:3001/json"
 ENGINES: Final = ("chromium", "webkit")
 

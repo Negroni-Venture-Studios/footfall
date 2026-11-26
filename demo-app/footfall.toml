@@ -19,4 +19,4 @@ submit = "Sign in"
 [test]
 pages = ["/", "/settings"]
 briefs = "footfall/briefs"
-personas = ["sven", "grace", "malik", "clara", "layla", "anna"]
+personas = ["largest-text", "low-vision", "skims", "less-motion", "right-to-left", "first-visit"]

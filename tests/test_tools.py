@@ -167,7 +167,7 @@ def test_tap_fields_are_nullable_integers() -> None:
 def test_tool_names_match_the_prompt() -> None:
     devices = load_devices(DEVICES)
     personas = load_personas(devices, PERSONAS)
-    persona = personas["sven"]
+    persona = personas["largest-text"]
     brief = Brief(name="b", text="Look around.", start="signed-out", max_actions=30)
     prompt = system_prompt(persona, devices[persona.device], brief, "App", None)
     match = re.search(r"small set of tools\s+\(([^)]*)\)", prompt)
@@ -223,7 +223,7 @@ def test_finish_schema_matches_parse_finish() -> None:
     schema = finish["input_schema"]
     assert conforms(FINISH_EXAMPLE, schema)
     summary, score, reached, findings = parse_finish(
-        FINISH_EXAMPLE, source="sven", device="Pixel 7", screenshots={"01"}
+        FINISH_EXAMPLE, source="largest-text", device="Pixel 7", screenshots={"01"}
     )
     assert (score, reached, len(findings)) == (6, "partly", 1)
     assert summary == FINISH_EXAMPLE["summary"]

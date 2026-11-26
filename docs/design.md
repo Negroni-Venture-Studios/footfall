@@ -150,7 +150,7 @@ submit = "Sign in"              # the text of the button
 [test]
 pages = ["/", "/settings"]      # for the scripted checks
 briefs = "footfall/briefs"      # default.md is used unless the caller names another
-personas = ["sven", "grace", "jonas", "layla", "noah"]
+personas = ["largest-text", "low-vision", "edge-cases", "right-to-left", "in-a-hurry"]
 ```
 
 | Field | Meaning |
@@ -176,7 +176,7 @@ Where the data comes from is up to each app. The documentation will urge seed st
 
 A persona is a person with a device. Footfall ships a personas file. Deployers can edit or replace it. Each persona has:
 
-- an id, a short profile (who they are, their patience and skill) and a default goal, which a brief can override for an app;
+- an id that says what it tests, a short profile and a default goal. The profile gives what the person needs and how they use the app. It leaves out age, job and background. A brief can override the goal for an app;
 - a device, named from a separate list of devices, each of which gives a Playwright device descriptor (viewport, pixel density, touch and user agent) and an engine, WebKit (closest to Safari) or Chromium;
 - a locale, a timezone, a colour scheme, reduced motion and a geolocation;
 - a text scale. Browsers have no equivalent of a phone's text size setting. Footfall approximates it by scaling the page's root font size and the report says so.

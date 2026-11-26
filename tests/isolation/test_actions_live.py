@@ -63,7 +63,7 @@ def test_the_apps_last_output_gives_the_job_no_command(tmp_path: Path) -> None:
             "--model",
             f"fake:{script}",
             "--personas",
-            "sven",
+            "largest-text",
             "--out",
             str(tmp_path / "results"),
         ],

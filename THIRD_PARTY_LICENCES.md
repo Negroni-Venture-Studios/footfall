@@ -4,22 +4,6 @@ Footfall is MIT licensed and [LICENSE](LICENSE) has the text. It includes, adapt
 
 The full licence texts ship with every package in its `*.dist-info/licenses` folder.
 
-## Adapted from another project
-
-[mobile-agent-testers](https://github.com/pierridotite/mobile-agent-testers) runs AI testers against native mobile apps and is MIT licensed. Footfall's twelve personas in `footfall/data/personas.toml` take their profiles and goals from its `personas.json`. Many are copied word for word. The licence requires its notice to be kept here. Footfall's screen format, accessibility checks and tester rules follow the same approach but were written for Footfall and share no code with it.
-
-The notice:
-
-> MIT License
->
-> Copyright (c) 2026 Pierre Raffalli
->
-> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
->
-> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
->
-> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
 ## Python packages Footfall runs on
 
 These packages use the Apache-2.0, BSD-3-Clause, MIT and PSF-2.0 licences. All four are permissive and compatible with distributing Footfall under MIT. For each pull request CI runs `scripts/check_licences.py` over every installed package including the development tools. It fails on any licence it does not know to be compatible.

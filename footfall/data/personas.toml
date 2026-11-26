@@ -4,9 +4,9 @@
 # `locale` is a language tag such as en-GB, and `timezone` a time zone such as Europe/London.
 
 [[persona]]
-id = "sven"
-profile = "Retired engineer, 80, reads Swedish, needs the largest text on a small phone."
-goal = "Complete one task: every button must stay readable and reachable."
+id = "largest-text"
+profile = "You read Swedish and keep the text at its largest on a small phone."
+goal = "Complete one task. Every button must stay readable and within reach."
 device = "iPhone SE"
 locale = "sv-SE"
 timezone = "Europe/Stockholm"
@@ -17,8 +17,8 @@ geolocation = [59.3293, 18.0686]
 allow_location = true
 
 [[persona]]
-id = "grace"
-profile = "Retired nurse, 74, low vision, keeps the text at its largest and dislikes zooming."
+id = "low-vision"
+profile = "You have low vision. You keep the text at its largest and would rather not zoom."
 goal = "Read every screen and complete one task without zooming."
 device = "Pixel 7"
 locale = "en-US"
@@ -30,9 +30,9 @@ geolocation = [41.8781, -87.6298]
 allow_location = true
 
 [[persona]]
-id = "jonas"
-profile = "Engineer, 45, uses a tablet and tries to break whatever he meets."
-goal = "Complete the main task, then try to break it with odd inputs."
+id = "edge-cases"
+profile = "You read German and use a tablet. Once something works you look for ways to break it."
+goal = "Complete the main task. Then try to break it with odd input."
 device = "iPad"
 locale = "de-DE"
 timezone = "Europe/Berlin"
@@ -43,8 +43,8 @@ geolocation = [52.52, 13.405]
 allow_location = true
 
 [[persona]]
-id = "layla"
-profile = "Pharmacist, 39, reads Arabic, expects every page to flow right to left."
+id = "right-to-left"
+profile = "You read Arabic and expect every page to run from right to left."
 goal = "Do the main task end to end and check that text, icons and arrows are mirrored."
 device = "Pixel 7"
 locale = "ar-EG"
@@ -56,9 +56,9 @@ geolocation = [30.0444, 31.2357]
 allow_location = true
 
 [[persona]]
-id = "noah"
-profile = "Sales rep, 41, always between meetings, impatient, reads only headings and buttons."
-goal = "Do the main task quickly, in as few steps as possible."
+id = "in-a-hurry"
+profile = "You have a few minutes between meetings. You read the headings and buttons and skip the rest."
+goal = "Do the main task in as few steps as possible."
 device = "Laptop (Safari)"
 locale = "en-GB"
 timezone = "Europe/London"
@@ -69,9 +69,9 @@ geolocation = [51.5072, -0.1276]
 allow_location = true
 
 [[persona]]
-id = "anna"
-profile = "Retired teacher, 68, low patience with jargon, uses large text."
-goal = "Create an account and set up her first item without help."
+id = "first-visit"
+profile = "This is your first time with an app like this. You use large text and want plain words rather than jargon."
+goal = "Create an account and set up your first item without help."
 device = "iPhone SE"
 locale = "en-GB"
 timezone = "Europe/London"
@@ -82,9 +82,9 @@ geolocation = [53.4808, -2.2426]
 allow_location = true
 
 [[persona]]
-id = "kenji"
-profile = "Office worker, 29, reads Japanese, uses the site one-handed on the train."
-goal = "Finish the main task in short sessions, leaving the site and coming back."
+id = "one-handed"
+profile = "You read Japanese and use your phone with one hand on a crowded train."
+goal = "Finish the main task over several short visits to the site."
 device = "Pixel 5"
 locale = "ja-JP"
 timezone = "Asia/Tokyo"
@@ -95,9 +95,9 @@ geolocation = [35.6762, 139.6503]
 allow_location = true
 
 [[persona]]
-id = "lucia"
-profile = "Teacher, 47, uses the family tablet, reads Spanish, takes her time."
-goal = "Use the main feature on the big screen and judge whether the layout uses the space."
+id = "tablet-layout"
+profile = "You read Spanish and use a shared family tablet. You take your time."
+goal = "Use the main feature on the larger screen and judge whether the layout makes good use of the space."
 device = "iPad Mini"
 locale = "es-ES"
 timezone = "Europe/Madrid"
@@ -108,9 +108,9 @@ geolocation = [40.4168, -3.7038]
 allow_location = true
 
 [[persona]]
-id = "malik"
-profile = "Student, 21, skips every text, taps fast, dark mode everywhere."
-goal = "Reach the main feature as fast as possible, skipping optional steps."
+id = "skims"
+profile = "You skip any text you can, tap quickly and use dark mode everywhere."
+goal = "Reach the main feature as fast as possible and skip the optional steps."
 device = "Pixel 7"
 locale = "en-US"
 timezone = "America/New_York"
@@ -121,9 +121,9 @@ geolocation = [40.7128, -74.006]
 allow_location = true
 
 [[persona]]
-id = "clara"
-profile = "Designer, 34, notices every misaligned pixel, refuses location access, asks for less motion."
-goal = "Explore the site and judge whether it is worth paying for."
+id = "less-motion"
+profile = "You read French. You ask apps for less motion, refuse location access and notice misaligned pixels."
+goal = "Explore the site and decide whether you would pay for it."
 device = "iPhone 13"
 locale = "fr-FR"
 timezone = "Europe/Paris"
@@ -134,8 +134,8 @@ geolocation = [48.8566, 2.3522]
 allow_location = false
 
 [[persona]]
-id = "olga"
-profile = "Translator, 36, reads Russian, spots clumsy wording and cut-off labels."
+id = "long-labels"
+profile = "You read Russian and notice clumsy wording and cut-off labels."
 goal = "Go through every settings page and check that each label fits."
 device = "Laptop (Chrome)"
 locale = "ru-RU"
@@ -147,8 +147,8 @@ geolocation = [55.7558, 37.6173]
 allow_location = true
 
 [[persona]]
-id = "mehmet"
-profile = "Engineer, 33, reads Turkish, types names with İ, ş and ğ, tries odd input."
+id = "unusual-text"
+profile = "You read Turkish and type names with İ, ş and ğ. You try odd input to see what breaks."
 goal = "Fill every text field with Turkish characters, emoji and very long text."
 device = "Galaxy S9+"
 locale = "tr-TR"

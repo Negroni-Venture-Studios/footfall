@@ -29,7 +29,7 @@ _DEVICES = load_devices(DEVICES)
 _PERSONAS = load_personas(_DEVICES, PERSONAS)
 # Values chosen so that none of them is a browser's or Playwright's default.
 PERSONA = replace(
-    _PERSONAS["grace"],
+    _PERSONAS["low-vision"],
     locale="sv-SE",
     timezone="Asia/Tokyo",
     color_scheme="dark",
