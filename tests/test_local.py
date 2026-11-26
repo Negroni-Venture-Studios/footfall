@@ -911,6 +911,23 @@ async def test_a_tested_folder_reached_through_a_link_in_its_checkout_is_refused
     local._refuse_a_link_into(outside / "app")  # the control: named by its own path
 
 
+def test_a_tested_folder_reached_through_a_link_above_its_checkout_is_accepted(
+    tmp_path: Path,
+) -> None:
+    """Fix round 4, item 5: a link above every checkout on the way is the operator's own, as
+    /tmp is on a Mac, and the walk follows it without a refusal."""
+    real = tmp_path / "real"
+    top = real / "checkout"
+    two_pages(top)
+    git(top, "init", "-q")
+    commit_all(top)
+    (tmp_path / "above").symlink_to(real)
+    (tmp_path / "relative").symlink_to("real")
+    (tmp_path / "twice").symlink_to("above")
+    for name in ("above", "relative", "twice"):
+        local._refuse_a_link_into(tmp_path / name / "checkout" / "app")
+
+
 @pytest.fixture
 def search_only(tmp_path: Path) -> Iterator[Path]:
     """A folder its owner may search and write in but not read, mode 0o311, as a shared
