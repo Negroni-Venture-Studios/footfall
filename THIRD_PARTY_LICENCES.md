@@ -6,7 +6,9 @@ The full licence texts ship with each package, in its `*.dist-info/licenses` fol
 
 ## Adapted from another project
 
-[mobile-agent-testers](https://github.com/pierridotite/mobile-agent-testers) runs AI testers against native mobile apps. It is MIT licensed, and Footfall adapts its screen format, its accessibility check, its rules and its personas for web apps. Its notice is kept here, as the licence requires:
+[mobile-agent-testers](https://github.com/pierridotite/mobile-agent-testers) runs AI testers against native mobile apps, and is MIT licensed. Footfall's twelve personas in `footfall/data/personas.toml` take their profiles and goals from its `personas.json`. Many are copied word for word, so its notice is kept here, as the licence requires. Footfall's screen format, accessibility checks and tester rules follow the same approach, but were written for Footfall and share no code with it.
+
+The notice:
 
 > MIT License
 >
