@@ -61,6 +61,7 @@ from footfall.hosts import HostError, validate_host_name
 from footfall.manifest import RUNTIMES
 from footfall.runner.engine import Engine, EngineError
 from footfall.runner.spec import APP_UID, container_config, network_config
+from footfall.tester.report import strip_invisible
 
 logger = logging.getLogger(__name__)
 
@@ -229,12 +230,17 @@ def _show(value: object) -> str:
 
 def _show_without(secrets: Sequence[str]) -> Callable[[object], str]:
     """`_show`, with each secret taken out of the text first, so that the cut to 60
-    characters can never leave part of one to be shown."""
+    characters can never leave part of one to be shown. The characters that show nothing
+    go first, as they do from the secrets themselves, since one between a secret's
+    characters would hide it from the replace and leave a prefix that is joined again
+    wherever they are stripped later."""
+    visible = [strip_invisible(secret) for secret in secrets]
 
     def show(value: object) -> str:
-        text = str(value)
-        for secret in secrets:
-            text = text.replace(secret, _REDACTED)
+        text = strip_invisible(str(value))
+        for secret in visible:
+            if secret:
+                text = text.replace(secret, _REDACTED)
         return _show(text)
 
     return show

@@ -651,3 +651,25 @@ def test_a_path_too_deep_to_copy_is_named_without_the_password(
     monkeypatch.undo()
     assert refused_names == [name]
     assert no_part_of_the_password(str(refused.value)), refused.value
+
+
+def test_a_password_split_by_a_character_that_shows_nothing_is_redacted_too(
+    h: Harness,
+) -> None:
+    """Fix round 3, Minor 3: repr() keeps U+034F, the combining grapheme joiner, which the
+    replace does not see past, so the password split by it was cut, and the orchestrator's
+    own stripping of such characters then joined the prefix that was left."""
+    from footfall.tester.report import strip_invisible
+
+    split = SEED_PASSWORD[:3] + "\u034f" + SEED_PASSWORD[3:]
+    padded = "d" * 40 + "/" + "123456789" + split
+    h.workspace()
+
+    def seed(prepared: Path) -> None:
+        (prepared / padded).parent.mkdir(parents=True)
+        os.mkfifo(prepared / padded)
+
+    h.engine.during_wait["seed"] = seed
+    with pytest.raises(RunnerError, match="a FIFO") as refused:
+        h.service.prepare(RUN, h.workspaces / "app", "python3.13", None, "seed", [], SEED_ENV)
+    assert no_part_of_the_password(strip_invisible(str(refused.value))), refused.value
