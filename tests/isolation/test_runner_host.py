@@ -134,15 +134,20 @@ def test_a_link_planted_below_a_runs_folder_is_refused(engine: DockerEngine) -> 
     assert gone.stdout.strip() == "0"  # the link went with its run, and nothing it named
 
 
-def test_the_runs_folder_and_every_folder_above_it_on_the_host_are_roots_alone() -> None:
+def test_the_runs_folder_and_every_folder_above_it_on_the_host_are_roots_alone(
+    engine: DockerEngine,
+) -> None:
     """Part A, Minor 1: the runner checks the runs folder as it is mounted and the folders
     above it as its own container shows them, its image's. Docker finds the mount through
     the host's folders above it, which the runner never sees, so here, on the host, the
-    folder and each folder above it must be root's, no link, and writable by root alone."""
-    if not ON_HOST:
-        pytest.skip("runs on the CI host, where the runs folder is")
+    folder the runner's mount names and each folder above it must be root's, no link, and
+    writable by root alone. The mount's source must be the path the runner uses inside, as
+    the runner names its folders to Docker by that path."""
+    mounts = _inspect(engine, f"/containers/{RUNNER}/json").get("Mounts") or []
+    sources = [m.get("Source") for m in mounts if m.get("Destination") == RUNS]
+    assert sources == [RUNS], mounts
     held: dict[str, dict[str, Any]] = {}
-    for folder in (Path(RUNS), *Path(RUNS).parents):
+    for folder in (Path(sources[0]), *Path(sources[0]).parents):
         info = folder.lstat()
         held[str(folder)] = {
             "owner": info.st_uid,
