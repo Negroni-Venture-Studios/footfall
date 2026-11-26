@@ -2,11 +2,11 @@
 
 Tiny Tasks has twelve planted bugs. Each one is a usability or accessibility problem that a person on a particular device would meet. Footfall's phase 1 is done when its testers find most of them. The default brief does not mention any of them.
 
-Personas are named by their ids in `footfall/data/personas.toml`. The manifest runs `largest-text`, `low-vision`, `skims`, `less-motion`, `right-to-left` and `first-visit` by default. Any other persona is marked "when run", meaning it can catch the bug if someone adds it to `test.personas` or names it for a run. "The accessibility check" means the accessibility warnings that the tester's `look` tool is meant to give for each screen, such as controls with no name and targets that are too small. "The scripted checks" are phase 2's, which load `test.pages` and read the browser's console.
+Personas are named by their ids in `footfall/data/personas.toml`. The manifest runs `largest-text`, `low-vision`, `skims`, `less-motion`, `right-to-left`, and `first-visit` by default. Any other persona is marked "when run", meaning it can catch the bug if someone adds it to `test.personas` or names it for a run. "The accessibility check" means the accessibility warnings that the tester's `look` tool is meant to give for each screen, such as controls with no name and targets that are too small. "The scripted checks" are phase 2's, which load `test.pages` and read the browser's console.
 
 ## Bug 1: every sign-in error says "Something went wrong"
 
-A wrong password, an unknown username and two empty fields all give the same message, with no hint about which field to fix. It lives in `Handler._login` in `serve.py`, with the text in `templates/error.html`. Anyone who mistypes should catch it. The brief tells testers that only the given username and password work, so a tester can reach the error by mistyping on purpose, as `edge-cases` and `unusual-text` (both when run) tend to.
+A wrong password, an unknown username, and two empty fields all give the same message, with no hint about which field to fix. It lives in `Handler._login` in `serve.py`, with the text in `templates/error.html`. Anyone who mistypes should catch it. The brief tells testers that only the given username and password work, so a tester can reach the error by mistyping on purpose, as `edge-cases` and `unusual-text` (both when run) tend to.
 
 ## Bug 2: search is case-sensitive
 
@@ -34,7 +34,7 @@ Task text has a fixed dark grey colour, while the card behind it turns dark. The
 
 ## Bug 8: the delete control is tiny and permanent
 
-The delete button is 16 by 16 px, it asks for no confirmation and there is no undo. The size is the `.delete` rule in `static/app.css`, and the permanence is in `Handler._change`. The button does have an accessible name, so only its size and its permanence are the bug. Phone personas such as `largest-text` and `skims`, and `one-handed` when run, should catch it, and so should the accessibility check.
+The delete button is 16 by 16 px, it asks for no confirmation, and there is no undo. The size is the `.delete` rule in `static/app.css`, and the permanence is in `Handler._change`. The button does have an accessible name, so only its size and its permanence are the bug. Phone personas such as `largest-text` and `skims`, and `one-handed` when run, should catch it, and so should the accessibility check.
 
 ## Bug 9: the settings button has no accessible name
 

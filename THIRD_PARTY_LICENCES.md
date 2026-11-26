@@ -1,12 +1,12 @@
 # Third-party licences
 
-Footfall is MIT licensed and [LICENSE](LICENSE) has the text. It includes, adapts or installs the third-party software and assets below. Every licence is compatible with distributing Footfall as MIT. `scripts/check_licences.py` checks every installed Python package in CI.
+Footfall is MIT licensed and [LICENSE](LICENSE) has the text. It includes, adapts, or installs the third-party software and assets below. Every licence is compatible with distributing Footfall as MIT. `scripts/check_licences.py` checks every installed Python package in CI.
 
 The full licence texts ship with every package in its `*.dist-info/licenses` folder.
 
 ## Python packages Footfall runs on
 
-These packages use the Apache-2.0, BSD-3-Clause, MIT and PSF-2.0 licences. All four are permissive and compatible with distributing Footfall under MIT. For each pull request CI runs `scripts/check_licences.py` over every installed package including the development tools. It fails on any licence it does not know to be compatible.
+These packages use the Apache-2.0, BSD-3-Clause, MIT, and PSF-2.0 licences. All four are permissive and compatible with distributing Footfall under MIT. For each pull request CI runs `scripts/check_licences.py` over every installed package including the development tools. It fails on any licence it does not know to be compatible.
 
 | Package | Licence | Used for |
 |---|---|---|

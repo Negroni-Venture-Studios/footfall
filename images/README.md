@@ -4,7 +4,7 @@ Footfall builds four images. They are tagged `dev` when built locally. The base 
 
 ## footfall
 
-`footfall` is Footfall's own image and is built from the repository root. The runner, the egress proxy and the orchestrator all start from it and Docker Compose runs them. It has a locked install without development dependencies, precompiled bytecode for a read-only root file system and an unprivileged user with uid 10001. It also has git from its Debian release. `footfall test` uses git to copy only the files git tracks.
+`footfall` is Footfall's own image and is built from the repository root. The runner, the egress proxy, and the orchestrator all start from it and Docker Compose runs them. It has a locked install without development dependencies, precompiled bytecode for a read-only root file system and an unprivileged user with uid 10001. It also has git from its Debian release. `footfall test` uses git to copy only the files git tracks.
 
 ## python3.13
 

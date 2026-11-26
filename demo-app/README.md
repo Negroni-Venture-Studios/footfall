@@ -1,6 +1,6 @@
 # Tiny Tasks
 
-Tiny Tasks is a small to-do list and Footfall's demo app. You can add tasks with due dates, search them, mark them done, delete them and sign out. It is written in standard-library Python and vanilla JavaScript, stores its data in SQLite and has no dependencies to install.
+Tiny Tasks is a small to-do list and Footfall's demo app. You can add tasks with due dates, search them, mark them done, delete them, and sign out. It is written in standard-library Python and vanilla JavaScript, stores its data in SQLite, and has no dependencies to install.
 
 It has twelve usability and accessibility bugs planted on purpose. [BUGS.md](BUGS.md) lists them and says where every one lives and which persona should find it. Footfall's testers are measured against that list. Please do not fix the bugs. Two tests pin the search and empty-task bugs to stop that happening by accident.
 
