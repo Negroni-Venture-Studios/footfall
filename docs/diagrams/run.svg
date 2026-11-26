@@ -39,8 +39,8 @@ text { font-family: Geist, sans-serif; font-size: 14px; fill: var(--text); }
 .danger { fill: var(--danger); }
 .on-action { fill: var(--on-action); font-weight: 600; }
 </style>
-<title id="t">A run, start to finish: seven steps, with the agent told the run's state at every poll and the live wall fed from the moment the checks begin</title>
-<desc id="d">A run starts when an agent or a person asks for one; Footfall checks and queues it and answers at once. It clones the commit with a short-lived token, prepares the app (install and seed once, then start a copy for each persona), runs scripted checks on every page and device without a model, runs the personas in parallel, merges their findings and finishes by removing the containers and keeping the results. Polling the run reports queued, then preparing, then running, then finished. Quick mode stops after the scripted checks. Every screenshot goes to the live wall as it is taken, and the results are kept for 14 days by default.</desc>
+<title id="t">A run from start to finish in seven steps. Every poll tells the agent the run's state. The live wall gets screenshots from the moment the checks begin.</title>
+<desc id="d">A run starts when an agent or a person asks for one. Footfall checks and queues it and answers at once. It clones the commit with a short-lived token. It installs and seeds the app once. It then starts a copy for each persona and waits until each one answers. Scripted checks then run on every page and device without a model. The personas run in parallel and their findings are merged. The run finishes by removing the containers and keeping the results. Polling the run reports queued, then preparing, then running, then finished. Quick mode stops after the scripted checks. Every screenshot goes to the live wall as it is taken. Results are kept for 14 days by default.</desc>
 <defs>
   <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker>
 </defs>
