@@ -1,0 +1,249 @@
+name: Isolation
+
+# The sandbox's own tests, on the real stack: Docker with gVisor, the four images,
+# the dev compose file, the runner, the egress proxy and the browser container.
+# Phase 1 is done when every one passes, here and on a droplet. They are the only
+# tests that reach the internet, and only pypi.org and example.com, through the
+# egress proxy.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# As in ci.yml: a newer push to a pull request cancels the older run, and every
+# commit on main keeps a completed run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  isolation:
+    name: isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      COMPOSE: docker compose -f compose.yaml -f compose.test.yaml
+      # Short tracebacks: a long one prints each frame's arguments, which can hold a
+      # run's throwaway password or the browsers' secret path. Capturing at the sys
+      # level only leaves file descriptor 1 as the job's own output, so the ::add-mask::
+      # that Footfall writes there for each secret it makes reaches the log at once,
+      # and not after a failure's traceback, as captured output would.
+      PYTEST: pytest -m isolation -p no:cacheprovider -v --tb=short --capture=sys
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
+        with:
+          version: "0.13.9"  # the uv the footfall image copies in
+          python-version: "3.12"
+      - name: An annotation for the masks job to find
+        # The masks job's control: it must find exactly this one before it trusts a count of
+        # no annotations forged by an app.
+        run: echo "::notice title=FOOTFALL-ANNOTATION-CONTROL::The masks job counts this one."
+      - name: Install gVisor's runsc
+        # The release Snug pins, installed as Snug's image workflow does, from packages signed
+        # by the key whose fingerprint Snug pins (deploy/office.sh there).
+        env:
+          GVISOR_FINGERPRINT: 6F1DF85E3A71C24918E727D56FC6D554E32BD943
+          GVISOR_RELEASE: "20261026"
+        run: |
+          curl -fsSL https://gvisor.dev/archive.key -o "$RUNNER_TEMP/gvisor.key"
+          keys=$(gpg --show-keys --with-colons "$RUNNER_TEMP/gvisor.key")
+          primaries=$(printf '%s\n' "$keys" | grep -c '^pub:' || true)
+          fingerprint=$(printf '%s\n' "$keys" | awk -F: '/^fpr:/ { print $10; exit }')
+          if [ "$primaries" != 1 ] || [ "$fingerprint" != "$GVISOR_FINGERPRINT" ]; then
+            echo "::error::gVisor's key is not the one pinned: $primaries keys, the first $fingerprint"
+            exit 1
+          fi
+          sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg < "$RUNNER_TEMP/gvisor.key"
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases 20261026 main" \
+            | sudo tee /etc/apt/sources.list.d/gvisor.list
+          sudo apt-get update -qq
+          sudo apt-get install --yes -qq runsc
+          sudo runsc install
+          sudo systemctl restart docker
+          runsc --version
+          runsc --version | grep -q "release-$GVISOR_RELEASE" \
+            || { echo "::error::runsc is not gVisor's release $GVISOR_RELEASE"; exit 1; }
+          docker info --format '{{json .Runtimes}}'
+          docker version
+      - name: Build the four images, and the footfall image's test stage
+        run: |
+          docker build -t footfall:dev -f images/footfall/Dockerfile .
+          docker build --target test -t footfall:test -f images/footfall/Dockerfile .
+          docker build -t footfall-python3.13:dev -f images/python/Dockerfile .
+          docker build -t footfall-node22:dev -f images/node/Dockerfile .
+          docker build -t footfall-browsers:dev -f images/browsers/Dockerfile .
+      - name: The browsers image serves nothing without the runner's command
+        # Ruling R68: run as it is, it says why and stops, and never opens run-server.
+        run: |
+          status=0
+          said=$(docker run --rm --network none footfall-browsers:dev 2>&1) || status=$?
+          echo "$said"
+          if [ "$status" != 64 ] || ! printf '%s' "$said" | grep -q "on its own it serves nothing"; then
+            echo "::error::The browsers image did not refuse to start without a command (exit $status)."
+            exit 1
+          fi
+      - run: uv sync --locked
+      - name: Make the folders the stack mounts
+        run: |
+          sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/footfall /var/lib/footfall/workspaces
+          sudo install -d -o root -g root -m 0700 /var/lib/footfall-runs
+          sudo install -d -o 10001 -g 10001 -m 0755 /var/lib/footfall/test-logs
+      - name: Listen on every address of the host
+        # An app container must not reach the host. This gives the tests a port that
+        # certainly answers on each of the host's addresses, to try.
+        run: |
+          nohup uv run python -m http.server 8765 --bind 0.0.0.0 --directory "$(mktemp -d)" \
+            > "$RUNNER_TEMP/host-listener.log" 2>&1 &
+          addresses=$(hostname -I | tr ' ' '\n' | grep -v ':' | tr '\n' ' ')
+          echo "FOOTFALL_TEST_HOST_PORT=8765" >> "$GITHUB_ENV"
+          echo "FOOTFALL_TEST_HOST_ADDRESSES=$addresses" >> "$GITHUB_ENV"
+          echo "The host's addresses: $addresses"
+      - name: Start the dev stack
+        working-directory: deploy/dev
+        run: |
+          $COMPOSE up -d
+          $COMPOSE ps
+      - name: The sandbox, the proxy, the runner and the browsers
+        working-directory: deploy/dev
+        run: |
+          $COMPOSE exec -T orchestrator $PYTEST tests/isolation \
+            --ignore=tests/isolation/test_end_to_end.py \
+            --ignore=tests/isolation/test_docker_host.py \
+            --ignore=tests/isolation/test_runner_host.py
+      - name: footfall test end to end, with each container's memory measured
+        if: success() || failure()
+        working-directory: deploy/dev
+        run: |
+          uv run python ../../scripts/measure_memory.py --out "$RUNNER_TEMP/memory.json" \
+            --summary "$GITHUB_STEP_SUMMARY" &
+          sampler=$!
+          status=0
+          $COMPOSE exec -T orchestrator $PYTEST tests/isolation/test_end_to_end.py || status=$?
+          kill -TERM "$sampler"
+          wait "$sampler"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: success() || failure()
+        with:
+          name: memory
+          path: ${{ runner.temp }}/memory.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: On the host, links in a run's folder, where the proxy listens, how Docker answers, and that no run left anything behind
+        if: success() || failure()
+        env:
+          FOOTFALL_ISOLATION: "1"
+          FOOTFALL_ISOLATION_HOST: "1"
+          FOOTFALL_TEST_RESULTS: ${{ runner.temp }}/test-results
+        run: |
+          sudo cp -r /var/lib/footfall/test-results "$FOOTFALL_TEST_RESULTS" || mkdir -p "$FOOTFALL_TEST_RESULTS"
+          sudo chown -R "$(id -u):$(id -g)" "$FOOTFALL_TEST_RESULTS"
+          uv run $PYTEST tests/isolation/test_runner_host.py tests/isolation/test_docker_host.py
+      - name: The stack's logs
+        if: always()
+        working-directory: deploy/dev
+        run: |
+          $COMPOSE logs --no-color --timestamps || true
+          sudo cat /var/lib/footfall/test-logs/proxy.log || true
+      - name: Stop the dev stack
+        if: always()
+        working-directory: deploy/dev
+        run: $COMPOSE down --volumes || true
+
+  # Reads the isolation job's log through the API and fails unless the mask check's line is
+  # there masked, and never in clear, so a mask that stops working turns the run red rather
+  # than waiting for someone to read the log. It counts lines and prints none of them.
+  masks:
+    name: masks
+    needs: isolation
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+    steps:
+      - name: The isolation log shows the mask check masked, and never in clear
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          job=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name == "isolation") | .id')
+          if [ -z "$job" ]; then
+            echo "::error::This run has no job called isolation."
+            exit 1
+          fi
+          log="$RUNNER_TEMP/isolation.log"
+          said="$RUNNER_TEMP/gh.err"
+          # A finished job's log can take minutes to be readable, and until then the API
+          # answers with an error or a log that is not yet the job's. Only a log that names
+          # the job counts as read. The log holds the colour codes of the steps' output,
+          # which gh refuses to write without being told it may.
+          read=no
+          for attempt in $(seq 1 60); do
+            if gh api --allow-escape-sequences "repos/$REPO/actions/jobs/$job/logs" \
+              > "$log" 2> "$said" \
+              && grep -q '^\S* *Complete job name: isolation' "$log"; then
+              read=yes
+              break
+            fi
+            sleep 10
+          done
+          if [ "$read" != yes ]; then
+            echo "::error::Could not read the isolation job's log in 10 minutes. The API last said: $(tail -n 1 "$said" | cut -c1-200)"
+            exit 1
+          fi
+          ran=$(grep -c 'test_actions_live.py::test_a_masked_value_is_hidden_in_the_actions_log' "$log" || true)
+          masked=$(grep -c 'FOOTFALL-MASK-CHECK \*\*\*' "$log" || true)
+          clear=$(grep -c 'FOOTFALL-MASK-CHECK footfall-mask-check-' "$log" || true)
+          echo "In the isolation log: the mask check ran $ran times; its line masked $masked times, in clear $clear times."
+          if [ "$ran" -lt 1 ]; then
+            echo "::error::The mask check did not run, so the log shows nothing either way."
+            exit 1
+          fi
+          if [ "$clear" -gt 0 ]; then
+            echo "::error::The mask check's value is in the isolation log in clear."
+            exit 1
+          fi
+          if [ "$masked" -lt 1 ]; then
+            echo "::error::The mask check ran, but its line is not in the log masked."
+            exit 1
+          fi
+          # Audit F-03: an app's output, printed by footfall test, forged no annotation,
+          # and its forged commands are in the log as text.
+          # Each annotation's title and message, one to a line, kept in a file and only counted.
+          annotations="$RUNNER_TEMP/annotations.txt"
+          gh api --paginate "repos/$REPO/check-runs/$job/annotations?per_page=100" \
+            --jq '.[] | ((.title // "") + " " + (.message // "") | gsub("\n"; " "))' \
+            > "$annotations"
+          control=$(grep -c 'FOOTFALL-ANNOTATION-CONTROL' "$annotations" || true)
+          forged=$(grep -c 'FOOTFALL-FORGED' "$annotations" || true)
+          shown_forged=$(grep -c 'FOOTFALL-FORGED' "$log" || true)
+          echo "In the isolation job: $control control annotations, $forged annotations an app forged; its lines shown as text $shown_forged times."
+          if [ "$control" != 1 ]; then
+            echo "::error::The isolation job's control annotation was found $control times, not once, so a count of forged ones means nothing."
+            exit 1
+          fi
+          if [ "$forged" != 0 ] || [ "$shown_forged" -lt 2 ]; then
+            echo "::error::An app's output was read as a workflow command, or the check of it did not run."
+            exit 1
+          fi
+          # Beyond the canary: a mask command shown as text was never read as one, and a
+          # browsers address with its path in clear is the secret itself (audit N-13). A red
+          # job here means deleting this run's logs.
+          shown=$(grep -c '::add-mask::' "$log" || true)
+          paths=$(grep -cE 'ws://[^/[:space:]]+/[A-Za-z0-9_-]{24,}' "$log" || true)
+          echo "In the isolation log: $shown mask commands shown as text, $paths browsers addresses with a path in clear."
+          if [ "$shown" -gt 0 ] || [ "$paths" -gt 0 ]; then
+            echo "::error::The isolation log shows a secret or a mask command in clear. Delete this run's logs."
+            exit 1
+          fi

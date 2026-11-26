@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+sbom.json
+
+# Local configuration and data: never commit secrets or a real instance's data
+.env
+*.env
+!deploy/footfall.env.example
+data/
+# Footfall's own package data, the personas and devices it ships, is not instance data.
+!footfall/data/
+*.sqlite3
+*.sqlite3-*
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Local Claude Code settings (preview servers, personal permissions)
+.claude/launch.json
+.claude/settings.local.json
+.claude/worktrees/
+
+# The plan workspace
+.superpowers/

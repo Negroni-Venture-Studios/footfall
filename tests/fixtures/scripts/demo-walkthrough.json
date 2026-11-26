@@ -1,0 +1,31 @@
+[
+  [
+    {"text": "I am on my task list. I will look at the settings page first."},
+    {"tool": "go", "input": {"to": "/settings"}}
+  ],
+  [
+    {"text": "Now back to the list."},
+    {"tool": "go", "input": {"to": "/"}}
+  ],
+  [
+    {
+      "tool": "finish",
+      "input": {
+        "summary": "I opened the settings page and came back to my task list.",
+        "score": 5,
+        "goal_reached": "partly",
+        "findings": [
+          {
+            "title": "The settings page has no way back to the list",
+            "severity": "minor",
+            "page": "/settings",
+            "steps": ["Open the task list", "Go to /settings", "Look for a link to the list"],
+            "expected": "A link or button back to the task list.",
+            "actual": "I had to change the address to get back.",
+            "screenshots": ["02"]
+          }
+        ]
+      }
+    }
+  ]
+]

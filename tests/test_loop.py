@@ -1,0 +1,1216 @@
+"""One persona's run: the loop between the model and the executor, on a real local Chromium."""
+
+import asyncio
+import base64
+import copy
+import json
+import logging
+import math
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Final, cast
+
+import pytest
+from playwright.async_api import Browser, BrowserContext, ViewportSize
+
+from footfall.manifest import Brief
+from footfall.personas import DEVICES, PERSONAS, Device, Persona, load_devices, load_personas
+from footfall.tester import loop
+from footfall.tester.guard import Guard
+from footfall.tester.loop import (
+    ACCOUNT,
+    BEGIN,
+    DECLINED,
+    FINISH_NOW,
+    FIRST_LOOK,
+    IDLE,
+    NUDGE,
+    PAGE_STOPPED,
+    REMINDER,
+    Budget,
+    RunSpend,
+    run_persona,
+)
+from footfall.tester.model import (
+    CLIENT_RETRIES,
+    CLIENT_TIMEOUT,
+    NO_USAGE,
+    AnthropicModel,
+    FakeModel,
+    ModelClient,
+    ModelTurn,
+)
+from footfall.tester.pricing import Price, Usage, cost_usd
+from footfall.tester.report import PersonaReport
+from footfall.tester.tools import TOOLS, Executor, Redactor, ToolOutcome
+from footfall.tester.trace import Trace
+from tests.app_server import AppServer
+from tests.fake_api import KEY, Api, iteration, message
+
+SCRIPTS = Path(__file__).parent / "fixtures" / "scripts"
+PHONE: ViewportSize = {"width": 390, "height": 664}
+SECRET = 'Zq"7\\Wx9\\"kJ-v4Qp8'
+BRIEF = Brief(name="explore", text="Look around the app.", start="signed-out", max_actions=None)
+HOME = (
+    "<!doctype html><title>Home</title><h1>Home</h1>"
+    '<a href="/second" style="font-size:30px">Second</a>'
+)
+SECOND = "<!doctype html><title>Second</title><h1>Second page</h1>"
+
+_DEVICES = load_devices(DEVICES)
+_PERSONAS = load_personas(_DEVICES, PERSONAS)
+PERSONA: Persona = _PERSONAS["largest-text"]
+DEVICE: Device = _DEVICES[PERSONA.device]
+
+
+@dataclass
+class World:
+    executor: Executor
+    trace: Trace
+    shots: Path
+
+
+MakeWorld = Callable[..., Awaitable[World]]
+
+
+@pytest.fixture
+async def world(
+    loopback_browser: Browser, app_server: AppServer, tmp_path: Path
+) -> AsyncIterator[MakeWorld]:
+    app_server.page("/", HOME)
+    app_server.page("/second", SECOND)
+    contexts: list[BrowserContext] = []
+
+    async def make(path: str = "/", *, redact: frozenset[str] = frozenset()) -> World:
+        context = await loopback_browser.new_context(service_workers="block", viewport=PHONE)
+        contexts.append(context)
+        guard = Guard(app_server.origin, frozenset())
+        await guard.install(context)
+        page = await context.new_page()
+        await page.goto(app_server.origin + path)
+        trace = Trace(tmp_path / f"trace-{len(contexts)}.jsonl")
+        shots = tmp_path / f"shots-{len(contexts)}"
+        executor = Executor(page, guard, trace, shots, touch=False, redact=redact)
+        return World(executor, trace, shots)
+
+    try:
+        yield make
+    finally:
+        for context in contexts:
+            await context.close()
+
+
+async def run(
+    w: World,
+    model: ModelClient,
+    *,
+    budget: Budget | None = None,
+    brief: Brief = BRIEF,
+    **options: Any,
+) -> PersonaReport:
+    return await run_persona(
+        persona=PERSONA,
+        device=DEVICE,
+        executor=w.executor,
+        model=model,
+        brief=brief,
+        focus=None,
+        app_name="Test app",
+        budget=budget or Budget(),
+        **options,
+    )
+
+
+def tool(name: str, **data: Any) -> dict[str, Any]:
+    return {"tool": name, "input": data}
+
+
+LOOK = [tool("look")]
+TEXT = [{"text": "I am thinking about what to do."}]
+
+
+def finish(*, summary: str = "All fine.", findings: list[dict[str, Any]] | None = None) -> Any:
+    return [
+        tool(
+            "finish",
+            summary=summary,
+            score=8,
+            goal_reached="yes",
+            findings=findings or [],
+        )
+    ]
+
+
+class SystemsFake(FakeModel):
+    """A fake that also keeps every system prompt it was sent."""
+
+    def __init__(self, script: list[list[dict[str, Any]]]) -> None:
+        super().__init__(script)
+        self.systems: list[str] = []
+
+    async def turn(
+        self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    ) -> ModelTurn:
+        self.systems.append(system)
+        return await super().turn(system, tools, messages)
+
+
+class Turns:
+    """A model that gives the turns it was made with, and keeps every list it is sent."""
+
+    def __init__(self, *turns: ModelTurn | Exception) -> None:
+        self.turns = list(turns)
+        self.calls: list[list[dict[str, Any]]] = []
+
+    async def turn(
+        self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    ) -> ModelTurn:
+        self.calls.append(copy.deepcopy(messages))
+        answer = self.turns.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def answer(
+    *blocks: dict[str, Any],
+    stop: str = "tool_use",
+    usage: Usage = NO_USAGE,
+    model: str = "claude-sonnet-5-5",
+    charges: tuple[tuple[str, Usage], ...] = (),
+) -> ModelTurn:
+    return ModelTurn(list(blocks), stop, usage, model, charges)
+
+
+def use(name: str, ident: str = "toolu_1", **data: Any) -> dict[str, Any]:
+    return {"type": "tool_use", "id": ident, "name": name, "input": data}
+
+
+FINISH_BLOCK = use("finish", "toolu_f", summary="Done.", score=5, goal_reached="no", findings=[])
+
+
+def systems(messages: list[dict[str, Any]]) -> list[int]:
+    return [i for i, m in enumerate(messages) if m["role"] == "system"]
+
+
+NUDGE_BLOCK = {"type": "text", "text": NUDGE}
+
+
+def nudges(messages: list[dict[str, Any]]) -> list[int]:
+    """Where the nudge is: a text block of its own in a user message, never a tool result."""
+    return [
+        i for i, m in enumerate(messages) if m["role"] == "user" and NUDGE_BLOCK in m["content"]
+    ]
+
+
+def nudged(message: dict[str, Any]) -> bool:
+    """The message is the tool results of a turn, with the nudge after them."""
+    if message["role"] != "user" or message["content"][-1] != NUDGE_BLOCK:
+        return False
+    return all(b["type"] == "tool_result" for b in message["content"][:-1])
+
+
+def results(message: dict[str, Any]) -> list[dict[str, Any]]:
+    assert message["role"] == "user"
+    return [b for b in message["content"] if b["type"] == "tool_result"]
+
+
+def free(model: str, usage: Usage) -> float:
+    return 0.0
+
+
+# ------------------------------------------------------------------ a whole run
+
+
+async def test_finishes_with_findings(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel.from_file(SCRIPTS / "finishes.json")
+    report = await run(w, model)
+    assert report.status == "finished"
+    assert report.reason == "the tester called finish"
+    assert (report.persona, report.device) == (PERSONA.id, DEVICE.name)
+    assert (report.score, report.goal_reached) == (6, "partly")
+    assert report.summary == "Both pages load, but the second page has no way back."
+    (finding,) = report.findings
+    assert finding.title == "No way back from the second page"
+    assert (finding.source, finding.device) == (PERSONA.id, DEVICE.name)
+    assert finding.screenshots == ("02",)
+    assert report.actions == 1  # the go; finish is not an action
+    assert report.cost_usd == 0.0
+    assert report.seconds >= 0
+    assert [s.tool for s in w.trace.steps()] == ["go", "finish"]
+    assert sorted(p.name for p in w.shots.iterdir()) == ["01.jpg", "02.jpg"]
+
+
+async def test_the_first_message_is_the_first_look(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([finish()])
+    await run(w, model)
+    (first,) = model.calls[0]
+    assert first["role"] == "user"
+    screen, image, begin = first["content"]
+    assert screen["type"] == "text"
+    assert screen["text"].startswith(FIRST_LOOK + "\n")
+    assert "Screenshot id: 01" in screen["text"]
+    assert "Home" in screen["text"]
+    assert image == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": base64.b64encode((w.shots / "01.jpg").read_bytes()).decode("ascii"),
+        },
+    }
+    assert begin == {"type": "text", "text": BEGIN}
+    assert [s.tool for s in w.trace.steps()] == ["finish"]  # the first look is not traced
+
+
+async def test_the_account_goes_in_the_first_message_not_the_system_prompt(
+    world: MakeWorld,
+) -> None:
+    username, password = "tester-Qm4v", "Hk2-pZ7_wR9xL3nB"  # gitleaks:allow
+    w = await world(redact=frozenset({password}))
+    model = SystemsFake([finish(summary=f"I signed in with {password}.")])
+    report = await run(w, model, account=(username, password))
+    plain = SystemsFake([finish()])
+    await run(await world(), plain)
+
+    (first,) = model.calls[0]
+    screen, image, account, begin = first["content"]
+    assert screen["text"].startswith(FIRST_LOOK + "\n")
+    assert image["type"] == "image"
+    assert account == {"type": "text", "text": ACCOUNT.format(username=username, password=password)}
+    assert begin == {"type": "text", "text": BEGIN}
+    assert model.systems == plain.systems  # the prompt stays the same, so it can be cached
+    assert password not in model.systems[0]
+    assert username not in model.systems[0]
+    assert password not in report.summary
+    assert "[password]" in report.summary
+
+
+async def test_history_is_append_only(world: MakeWorld) -> None:
+    w = await world()
+    script = [
+        [{"text": "Going on."}, tool("go", to="/second")],
+        TEXT,
+        [tool("tap", element="one", x=None, y=None)],
+        [tool("look"), tool("look")],
+        LOOK,
+        finish(),
+    ]
+    model = FakeModel(script)
+    report = await run(w, model, budget=Budget(max_actions=3))
+    assert report.status == "finished"
+    assert len(model.calls) == len(script)
+    assert nudged(model.calls[-1][-1])
+    assert systems(model.calls[-1]) == []
+    for before, after in zip(model.calls, model.calls[1:], strict=False):
+        assert len(after) > len(before)
+        for index, earlier in enumerate(before):
+            assert after[index] == earlier, index
+    # Every assistant message is the content the model gave, exactly.
+    final = model.calls[-1]
+    replies = [m["content"] for m in final if m["role"] == "assistant"]
+    assert replies[0] == [
+        {"type": "text", "text": "Going on."},
+        {"type": "tool_use", "id": "toolu_fake_001_1", "name": "go", "input": {"to": "/second"}},
+    ]
+    assert len(replies) == len(script) - 1
+
+
+async def test_a_tool_result_holds_the_text_and_the_screenshot(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([[tool("go", to="/second")], finish()])
+    await run(w, model)
+    (result,) = results(model.calls[1][-1])
+    assert result["tool_use_id"] == "toolu_fake_001_0"
+    assert "is_error" not in result
+    text, image = result["content"]
+    assert text["type"] == "text"
+    assert "Went to " in text["text"]
+    assert "Screenshot id: 02" in text["text"]
+    assert image["source"]["media_type"] == "image/jpeg"
+    jpeg = base64.b64decode(image["source"]["data"])
+    assert jpeg == (w.shots / "02.jpg").read_bytes()
+
+
+async def test_invalid_tool_input_returns_error_and_continues(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([[tool("tap", element="one", x=None, y=None)], finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    (result,) = results(model.calls[1][-1])
+    assert result["is_error"] is True
+    assert result["content"] == [
+        {"type": "text", "text": "`element` must be a whole number or null"}
+    ]
+    assert report.actions == 1  # a call that went wrong still counts
+    assert w.trace.steps()[0].error is not None
+
+
+async def test_an_unknown_tool_gets_an_error_and_runs_nothing(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([[tool("click", at="the button")], finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    (result,) = results(model.calls[1][-1])
+    assert result["tool_use_id"] == "toolu_fake_001_0"
+    assert result["is_error"] is True
+    assert 'There is no tool called "click"' in result["content"][0]["text"]
+    assert report.actions == 0
+    (refused, _) = w.trace.steps()
+    assert (refused.tool, refused.input, refused.error) == (
+        "(unknown tool)",
+        {},
+        "not run: there is no tool of that name",
+    )
+    assert refused.screenshot_after is None
+
+
+async def test_two_tool_uses_in_one_turn_get_an_error_each(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([[tool("look"), tool("go", to="/second")], finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    first, second = results(model.calls[1][-1])
+    assert (first["tool_use_id"], second["tool_use_id"]) == ("toolu_fake_001_0", "toolu_fake_001_1")
+    assert first["is_error"] is second["is_error"] is True
+    assert "one tool at a time" in first["content"][0]["text"]
+    assert report.actions == 0
+    first_step, second_step, last = w.trace.steps()
+    assert [first_step.tool, second_step.tool, last.tool] == ["look", "go", "finish"]
+    assert first_step.error == second_step.error == "not run: more than one tool call in one turn"
+    assert first_step.input == second_step.input == {}
+
+
+async def test_a_text_only_turn_gets_a_reminder(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([TEXT, finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    assert model.calls[1][-1] == {"role": "user", "content": [{"type": "text", "text": REMINDER}]}
+
+
+async def test_an_empty_turn_is_not_appended(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([[], finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    roles = [m["role"] for m in model.calls[1]]
+    assert roles == ["user", "user"]
+    assert model.calls[1][-1]["content"] == [{"type": "text", "text": REMINDER}]
+
+
+async def test_three_turns_in_a_row_without_a_tool_are_incomplete(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([TEXT, LOOK, TEXT, [tool("click")], TEXT, finish()])
+    report = await run(w, model)
+    # The look starts the count again; a call that was not run does not.
+    assert report.status == "incomplete"
+    assert report.reason == IDLE == "the tester did nothing in three turns in a row"
+    assert len(model.calls) == 5
+    assert report.actions == 1
+
+
+async def test_max_tokens_mid_tool_is_a_failed_turn(world: MakeWorld) -> None:
+    w = await world()
+    cut = answer({"type": "text", "text": "I will tap"}, use("tap", "toolu_cut"), stop="max_tokens")
+    model = Turns(cut, answer(FINISH_BLOCK))
+    report = await run(w, model)
+    assert report.status == "finished"
+    (result,) = results(model.calls[1][-1])
+    assert result["tool_use_id"] == "toolu_cut"
+    assert result["is_error"] is True
+    assert "length limit" in result["content"][0]["text"]
+    assert report.actions == 0
+    (refused, _) = w.trace.steps()
+    assert (refused.tool, refused.error) == (
+        "tap",
+        "not run: the call was cut off at the token limit",
+    )
+
+
+async def test_max_tokens_with_no_tool_gets_a_reminder(world: MakeWorld) -> None:
+    w = await world()
+    model = Turns(answer({"type": "text", "text": "Hmm"}, stop="max_tokens"), answer(FINISH_BLOCK))
+    report = await run(w, model)
+    assert report.status == "finished"
+    assert model.calls[1][-1]["content"] == [{"type": "text", "text": REMINDER}]
+
+
+# ------------------------------------------------------------------ the budget
+
+
+async def test_action_budget_sends_system_nudge_then_incomplete(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel.from_file(SCRIPTS / "wanders.json")
+    report = await run(w, model, budget=Budget(max_actions=3, grace_turns=2))
+    assert report.status == "incomplete"
+    assert report.reason == "the budget of 3 actions ran out before the tester called finish"
+    assert report.actions == 3
+    assert len(model.calls) == 5  # three actions, then two grace turns
+    # The nudge follows the tool results of the third action, in the same message, once.
+    assert nudges(model.calls[2]) == []
+    assert nudged(model.calls[3][-1])
+    assert nudges(model.calls[4]) == [len(model.calls[3]) - 1]
+    assert systems(model.calls[4]) == []
+    # Grace turns still run their tools.
+    assert len(w.trace.steps()) == 5
+
+
+async def test_finish_inside_grace_is_finished(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([LOOK, LOOK, LOOK, finish()])
+    report = await run(w, model, budget=Budget(max_actions=2, grace_turns=2))
+    assert report.status == "finished"
+    assert report.actions == 2  # the look in the grace turns is not counted
+    assert len(w.trace.steps()) == 4
+
+
+async def test_text_turns_inside_grace_use_it_up(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([LOOK, TEXT, TEXT, finish()])
+    report = await run(w, model, budget=Budget(max_actions=1, grace_turns=2))
+    assert report.status == "incomplete"
+    assert len(model.calls) == 3
+    # In grace, a turn without a tool is told to finish, not to keep testing.
+    assert model.calls[2][-1] == {"role": "user", "content": [{"type": "text", "text": FINISH_NOW}]}
+    assert nudges(model.calls[2]) == [len(model.calls[1]) - 1]
+
+
+async def test_no_grace_turns_ends_at_once(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([LOOK, LOOK])
+    report = await run(w, model, budget=Budget(max_actions=1, grace_turns=0))
+    assert report.status == "incomplete"
+    assert len(model.calls) == 1
+    assert nudges(model.calls[0]) == []
+
+
+async def test_cost_ceiling_stops(world: MakeWorld) -> None:
+    w = await world()
+    test_price = Price(input=0.30, output=0.0, cache_write=0.0, cache_read=0.0, cache_write_1h=0.0)
+
+    def pricing(model: str, usage: Usage) -> float:
+        assert model == "fake"
+        return usage.input_tokens * test_price.input / 1_000_000
+
+    model = FakeModel([LOOK] * 10, usage=Usage(1_000_000, 0, 0, 0))
+    report = await run(w, model, budget=Budget(max_cost_usd=1.00), pricing=pricing)
+    assert report.status == "incomplete"
+    assert report.reason == "the cost ceiling of $1.00 was reached before the tester called finish"
+    assert len(model.calls) == 6  # $1.20 after four turns, then two grace turns
+    assert nudged(model.calls[4][-1])
+    assert report.cost_usd == pytest.approx(1.80)
+    assert report.actions == 4
+
+
+class NoBrowser:
+    """An executor with no browser behind it, for the tests of what a run spends: every look
+    shows the same words, and nothing finishes."""
+
+    def __init__(self) -> None:
+        self.redactor = Redactor()
+        self.screenshot_ids: set[str] = set()
+
+    async def first_look(self) -> ToolOutcome:
+        return ToolOutcome("A page.", None, None, False)
+
+    async def run(self, tool: str, data: Any) -> ToolOutcome:
+        return ToolOutcome("A page.", None, None, False)
+
+    def refuse(self, name: object, why: str) -> None:
+        pass
+
+
+THIRTY_CENTS: Final = Usage(1_000_000, 0, 0, 0)  # at the test price below, $0.30 a turn
+
+
+def thirty_cents(model: str, usage: Usage) -> float:
+    return usage.input_tokens * 0.30 / 1_000_000
+
+
+async def spend_run(model: FakeModel, spend: RunSpend, persona: Persona = PERSONA) -> PersonaReport:
+    return await run_persona(
+        persona=persona,
+        device=DEVICE,
+        executor=cast(Executor, NoBrowser()),
+        model=model,
+        brief=BRIEF,
+        focus=None,
+        app_name="Test app",
+        budget=Budget(max_cost_usd=5.00),
+        pricing=thirty_cents,
+        spend=spend,
+    )
+
+
+async def test_the_runs_cost_ceiling_stops_every_persona_starting_another_turn() -> None:
+    """Ruling R74: the run's spend is checked before each persona's turn, so once it reaches
+    the operator's ceiling no persona starts another, its own budget notwithstanding, and no
+    grace turn is spent past it."""
+    spend = RunSpend(1.00)
+    first = FakeModel([LOOK] * 10, usage=THIRTY_CENTS)
+    report = await spend_run(first, spend)
+    assert len(first.calls) == 4  # $1.20 after four turns
+    assert report.status == "incomplete"
+    assert report.reason == (
+        "the run's cost ceiling of $1.00 was reached before the tester called finish"
+    )
+    assert report.cost_usd == pytest.approx(1.20)
+    assert spend.spent_usd == pytest.approx(1.20)
+    second = FakeModel([LOOK] * 10, usage=THIRTY_CENTS)
+    other = await spend_run(second, spend, _PERSONAS["low-vision"])
+    assert second.calls == []
+    assert (other.status, other.cost_usd, other.reason) == ("incomplete", 0.0, report.reason)
+    assert spend.spent_by(PERSONA.id) == pytest.approx(1.20)
+    assert spend.spent_by("low-vision") == 0.0
+
+
+async def test_a_run_under_its_cost_ceiling_is_not_stopped_by_it() -> None:
+    spend = RunSpend(12.00)
+    model = FakeModel([LOOK] * 3, usage=THIRTY_CENTS)
+    report = await spend_run(model, spend)
+    assert len(model.calls) == 4  # the fourth turn was asked for, past the script's end
+    assert report.reason == "ScriptError"
+    assert spend.spent_usd == pytest.approx(report.cost_usd) == pytest.approx(0.90)
+
+
+@pytest.mark.parametrize("ceiling", [0.0, -1.0, math.nan, math.inf, True])
+def test_a_runs_cost_ceiling_must_be_a_positive_amount(ceiling: Any) -> None:
+    with pytest.raises(ValueError, match="cost ceiling"):
+        RunSpend(ceiling)
+
+
+async def test_a_fake_model_costs_nothing(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([LOOK, finish()], usage=Usage(1_000_000, 1_000_000, 0, 0))
+    report = await run(w, model)
+    assert report.status == "finished"
+    assert report.cost_usd == 0.0
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class Slow:
+    """A fake model that takes `seconds` of the clock's time to answer."""
+
+    def __init__(self, model: FakeModel, clock: Clock, seconds: float) -> None:
+        self.model, self.clock, self.seconds = model, clock, seconds
+
+    async def turn(
+        self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    ) -> ModelTurn:
+        self.clock.now += self.seconds
+        return await self.model.turn(system, tools, messages)
+
+
+async def test_time_limit_stops(world: MakeWorld) -> None:
+    w = await world()
+    clock = Clock()
+    fake = FakeModel([LOOK] * 10)
+    # Wrapped, the fake is no longer known to be free, so the test says it is.
+    slow = Slow(fake, clock, 100.0)
+    report = await run(w, slow, budget=Budget(max_seconds=250), clock=clock, pricing=free)
+    assert report.status == "incomplete"
+    assert report.reason == "the time limit of 250 s ran out before the tester called finish"
+    assert len(fake.calls) == 5  # 300 s after three turns, then two grace turns
+    assert nudged(fake.calls[3][-1])
+    assert report.seconds == 500.0
+
+
+async def test_brief_max_actions_raises_budget(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel.from_file(SCRIPTS / "wanders.json")
+    brief = Brief(name="long", text="Look around.", start="signed-out", max_actions=4)
+    report = await run(w, model, budget=Budget(max_actions=2, grace_turns=1), brief=brief)
+    assert report.status == "incomplete"
+    assert report.reason == "the budget of 4 actions ran out before the tester called finish"
+    assert report.actions == 4
+    assert len(model.calls) == 5
+
+
+def test_a_budget_must_be_positive() -> None:
+    wrong: list[dict[str, Any]] = [
+        {"max_actions": 0},
+        {"max_actions": 1.5},
+        {"max_actions": True},
+        {"max_cost_usd": 0.0},
+        {"max_cost_usd": math.nan},
+        {"max_cost_usd": math.inf},
+        {"max_cost_usd": True},
+        {"max_seconds": "600"},
+        {"max_seconds": -1.0},
+        {"max_seconds": math.nan},
+        {"max_seconds": math.inf},
+        {"grace_turns": -1},
+        {"grace_turns": 1.0},
+        {"grace_turns": False},
+    ]
+    for fields in wrong:
+        with pytest.raises(ValueError, match="budget"):
+            Budget(**fields)
+    assert Budget(max_actions=1, max_cost_usd=0.01, max_seconds=0.5, grace_turns=0)
+
+
+# ------------------------------------------------------------------ how runs end badly
+
+
+async def test_refusal_is_incomplete(world: MakeWorld) -> None:
+    w = await world()
+    model = Turns(answer(use("look")), answer(stop="refusal"), answer(FINISH_BLOCK))
+    report = await run(w, model)
+    assert report.status == "incomplete"
+    assert report.reason == DECLINED == "the model declined"
+    assert len(model.calls) == 2
+    assert report.actions == 1
+
+
+async def test_a_context_window_that_is_full_is_incomplete(world: MakeWorld) -> None:
+    w = await world()
+    model = Turns(answer(stop="model_context_window_exceeded"), answer(FINISH_BLOCK))
+    report = await run(w, model)
+    assert report.status == "incomplete"
+    assert report.reason == "the conversation outgrew the model's context window"
+
+
+async def test_exception_is_failed_without_detail_leak(
+    world: MakeWorld, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    w = await world(redact=frozenset({SECRET}))
+    model = Turns(answer(use("look")), RuntimeError(f"the key {KEY} and the password {SECRET}"))
+    report = await run(w, model)
+    assert report.status == "failed"
+    assert report.reason == "RuntimeError"
+    assert report.actions == 1
+    dumped = json.dumps(report.to_json())
+    for secret in (KEY, SECRET):
+        assert secret not in dumped
+        assert secret not in caplog.text
+        assert all(secret not in r.getMessage() for r in caplog.records)
+
+
+async def test_a_page_that_stops_answering_fails_the_persona(
+    world: MakeWorld, app_server: AppServer
+) -> None:
+    app_server.page(
+        "/throws",
+        "<button>Hello</button><script>window.getComputedStyle = function () {"
+        " throw new Error('no'); };</script>",
+    )
+    w = await world("/throws")
+    model = FakeModel([finish()])
+    report = await run(w, model)
+    assert report.status == "failed"
+    assert report.reason == PAGE_STOPPED == "the page stopped answering"
+    assert model.calls == []
+
+
+async def test_a_turn_without_charges_is_priced_as_the_model_that_answered(
+    world: MakeWorld,
+) -> None:
+    w = await world()
+    usage = Usage(10_000, 2_000, 5_000, 40_000)
+    model = Turns(
+        answer(use("look"), usage=usage, model="claude-opus-5-5"),
+        answer(FINISH_BLOCK, usage=usage, model="claude-sonnet-5-5"),
+    )
+    report = await run(w, model)
+    assert report.status == "finished"
+    expected = cost_usd("claude-opus-5-5", usage) + cost_usd("claude-sonnet-5-5", usage)
+    assert report.cost_usd == pytest.approx(expected)
+    assert cost_usd("claude-opus-5-5", usage) != cost_usd("claude-sonnet-5-5", usage)
+
+
+async def test_a_fallback_turn_is_priced_for_every_attempt(world: MakeWorld) -> None:
+    w = await world()
+    declined, served = Usage(10_000, 2_000, 5_000, 0), Usage(3_000, 500, 0, 40_000)
+    model = Turns(
+        answer(
+            use("look"),
+            usage=served,
+            model="claude-sonnet-5",
+            charges=(("claude-sonnet-5-5", declined), ("claude-sonnet-5", served)),
+        ),
+        answer(FINISH_BLOCK, usage=served, model="claude-sonnet-5"),
+    )
+    report = await run(w, model)
+    assert report.status == "finished"
+    expected = (
+        cost_usd("claude-sonnet-5-5", declined)
+        + cost_usd("claude-sonnet-5", served)
+        + cost_usd("claude-sonnet-5", served)
+    )
+    assert report.cost_usd == pytest.approx(expected)
+
+
+async def test_an_unpriced_model_is_charged_at_the_dearest_rates(
+    world: MakeWorld, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+    w = await world()
+    unexpected = Usage(1_000_000, 1_000_000, 0, 0)
+    model = Turns(
+        answer(
+            use("look"),
+            model="claude-opus-4-7",
+            charges=(
+                ("claude-sonnet-5-5", Usage(1_000_000, 0, 0, 0)),
+                ("claude-opus-4-7", unexpected),
+            ),
+        ),
+        answer(FINISH_BLOCK, usage=unexpected, model="claude-opus-4-7"),
+    )
+    report = await run(w, model)
+    # The run carries on, and the unknown model costs as much as the dearest known one.
+    assert report.status == "finished"
+    assert report.cost_usd == pytest.approx(2.00 + 2 * (5.00 + 25.00))
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        'model "claude-opus-4-7" has no price, so it is charged at the dearest rates'
+    ]
+
+
+async def test_the_report_is_redacted(world: MakeWorld) -> None:
+    w = await world(redact=frozenset({SECRET}))
+    # Plain, and split by characters the report strips, which the executor cannot see past.
+    hidden = SECRET[:4] + "‮" + SECRET[4:]
+    finding = {
+        "title": f"Password {SECRET} shown",
+        "severity": "major",
+        "page": f"/x/{hidden}",
+        "steps": [f"Type {SECRET}", f"Read {hidden}"],
+        "expected": f"No {hidden}",
+        "actual": f"Saw {SECRET}",
+        "screenshots": ["01"],
+    }
+    # Split by characters that show nothing, which the report keeps.
+    zero_width = SECRET[:3] + "\u200b" + SECRET[3:]
+    soft_hyphen = SECRET[:5] + "\u00ad" + SECRET[5:]
+    joined = SECRET[:6] + "\u034f" + SECRET[6:] + "\ufe0f"
+    summary = f"I typed {hidden} and {SECRET}, {zero_width}, {soft_hyphen} and {joined}."
+    model = FakeModel([finish(summary=summary, findings=[finding])])
+    report = await run(w, model)
+    assert report.status == "finished"
+    dumped = json.dumps(report.to_json(), ensure_ascii=False)
+    for run_ in {SECRET[i : i + 4] for i in range(len(SECRET) - 3)}:
+        assert run_ not in dumped, run_
+    assert report.summary == (
+        "I typed [password] and [password], [password], [password] and [password]."
+    )
+    (found,) = report.findings
+    assert found.title == "Password [password] shown"
+    assert found.steps == ("Type [password]", "Read [password]")
+    assert (found.page, found.expected, found.actual) == (
+        "/x/[password]",
+        "No [password]",
+        "Saw [password]",
+    )
+
+
+async def test_redaction_leaves_the_report_s_fixed_fields_alone(world: MakeWorld) -> None:
+    # Unlikely secrets, but each is also the value of a field that is not free text.
+    w = await world(redact=frozenset({"partly", "minor", "01"}))
+    finding = {
+        "title": "A minor thing on screen 01",
+        "severity": "minor",
+        "page": "/",
+        "steps": ["Look at 01"],
+        "expected": "Nothing partly done",
+        "actual": "It was partly done",
+        "screenshots": ["01"],
+    }
+    script = [
+        [
+            tool(
+                "finish",
+                summary="I got partly there.",
+                score=5,
+                goal_reached="partly",
+                findings=[finding],
+            )
+        ]
+    ]
+    report = await run(w, FakeModel(script))
+    assert report.status == "finished"
+    assert report.goal_reached == "partly"
+    (found,) = report.findings
+    assert (found.severity, found.screenshots) == ("minor", ("01",))
+    assert report.summary == "I got [password] there."
+    assert found.title == "A [password] thing on screen [password]"
+    assert found.steps == ("Look at [password]",)
+
+
+async def test_the_executor_exposes_its_secrets_read_only(world: MakeWorld) -> None:
+    w = await world(redact=frozenset({"short", "a-longer-secret", ""}))
+    assert w.executor.secrets == ("a-longer-secret", "short")
+    with pytest.raises(AttributeError):
+        w.executor.secrets = ()  # type: ignore[misc]
+
+
+# ------------------------------------------------------------------ through the real client
+
+
+async def test_a_whole_run_through_the_messages_api(world: MakeWorld, api: Api) -> None:
+    w = await world()
+    thinking = {"type": "thinking", "thinking": "", "signature": "c2lnbmF0dXJl"}
+    api.answer(
+        message([thinking, {"type": "tool_use", "id": "toolu_a", "name": "look", "input": {}}])
+    )
+    api.answer(
+        message(
+            [
+                thinking,
+                {
+                    "type": "tool_use",
+                    "id": "toolu_b",
+                    "name": "finish",
+                    "input": {
+                        "summary": "Fine.",
+                        "score": 9,
+                        "goal_reached": "yes",
+                        "findings": [],
+                    },
+                },
+            ]
+        )
+    )
+    model = AnthropicModel(client=api.client())
+    report = await run(w, model, budget=Budget(max_actions=1))
+    assert report.status == "finished"
+    first, second = api.bodies()
+    assert second["messages"][: len(first["messages"])] == first["messages"]
+    assert second["messages"][1]["content"][0] == thinking
+    # The nudge goes to the API as a system message after the tool results.
+    # The nudge goes to the API in the user turn, after the tool results.
+    assert nudged(second["messages"][-1])
+    assert systems(second["messages"]) == []
+    assert first["tools"] == second["tools"] == TOOLS
+    usage = Usage(1200, 80, 1000, 200)
+    assert report.cost_usd == pytest.approx(2 * cost_usd("claude-sonnet-5-5", usage))
+
+
+async def test_api_status_error_is_failed_without_the_key(
+    world: MakeWorld, api: Api, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    w = await world(redact=frozenset({SECRET}))
+    # The tester types the password, so the next request carries it; the API's error
+    # echoes the key and the password back.
+    api.answer(
+        message([{"type": "tool_use", "id": "toolu_t", "name": "type", "input": {"text": SECRET}}])
+    )
+    api.answer(
+        {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": f"bad {KEY} {SECRET}"},
+        },
+        400,
+    )
+    report = await run(w, AnthropicModel(client=api.client()))
+    assert report.status == "failed"
+    assert report.reason == "BadRequestError (status 400)"
+    typed = api.bodies()[1]["messages"][1]["content"][0]
+    assert typed["input"] == {"text": SECRET}  # the API is sent it
+    assert any(r.name.startswith("anthropic") for r in caplog.records)
+    dumped = json.dumps(report.to_json())
+    places = [dumped, caplog.text, *(r.getMessage() for r in caplog.records)]
+    for place in places:
+        assert KEY not in place
+        for run_ in {SECRET[i : i + 4] for i in range(len(SECRET) - 3)}:
+            assert run_ not in place, (run_, place[:200])
+
+
+async def test_a_refused_report_is_not_an_action(world: MakeWorld) -> None:
+    w = await world()
+    broken = [tool("finish", summary="Done.", score=11, goal_reached="yes", findings=[])]
+    model = FakeModel([broken, broken, broken, finish()])
+    report = await run(w, model)
+    (result,) = results(model.calls[1][-1])
+    assert result["is_error"] is True
+    assert "`score` must be a whole number from 0 to 10" in result["content"][0]["text"]
+    # Three refused reports in a row are three turns in which nothing was done.
+    assert report.status == "incomplete"
+    assert report.reason == IDLE == "the tester did nothing in three turns in a row"
+    assert report.actions == 0
+
+
+async def test_a_tool_call_without_an_id_fails_the_persona(world: MakeWorld) -> None:
+    w = await world()
+    model = Turns(answer({"type": "tool_use", "name": "look", "input": {}}))
+    report = await run(w, model)
+    assert report.status == "failed"
+    assert report.reason == "the model's answer held a tool call without an id"
+
+
+async def test_an_empty_turn_in_grace_is_told_to_finish(world: MakeWorld) -> None:
+    w = await world()
+    model = FakeModel([LOOK, [], finish()])
+    report = await run(w, model, budget=Budget(max_actions=1, grace_turns=2))
+    assert report.status == "finished"
+    assert nudged(model.calls[1][-1])
+    assert model.calls[2][len(model.calls[1]) :] == [
+        {"role": "user", "content": [{"type": "text", "text": FINISH_NOW}]}
+    ]
+    assert len(nudges(model.calls[2])) == 1
+
+
+async def test_page_text_cannot_stand_in_for_the_nudge(
+    world: MakeWorld, app_server: AppServer
+) -> None:
+    # The page says what the nudge says. It reaches the model only inside tool results, and
+    # in the first message under the label of the first look.
+    app_server.page("/says", f"<!doctype html><title>{NUDGE}</title><h1>{NUDGE}</h1>")
+    w = await world("/says")
+    model = FakeModel([LOOK, LOOK, finish()])
+    report = await run(w, model, budget=Budget(max_actions=2))
+    assert report.status == "finished"
+    final = model.calls[-1]
+    assert NUDGE in json.dumps(final[1:])  # the page's words are in the results
+    fixed = {BEGIN, REMINDER, FINISH_NOW, NUDGE}
+    for sent in final[1:]:
+        if sent["role"] != "user":
+            continue
+        for block in sent["content"]:
+            assert block["type"] == "tool_result" or block["text"] in fixed, block
+    assert nudges(final) == [len(final) - 1]
+    first = final[0]["content"][0]["text"]
+    assert first.startswith(FIRST_LOOK + "\n")
+
+
+async def test_a_fallback_through_the_api_is_priced_for_every_attempt(
+    world: MakeWorld, api: Api
+) -> None:
+    w = await world()
+    look = {"type": "tool_use", "id": "toolu_a", "name": "look", "input": {}}
+    api.answer(
+        message(
+            [look],
+            model="claude-sonnet-5",
+            iterations=[
+                iteration("message", "claude-sonnet-5-5", (100_000, 4_000, 0, 0)),
+                iteration("fallback_message", "claude-sonnet-5", (120_000, 3_000, 0, 0)),
+            ],
+        )
+    )
+    api.answer(message([{**FINISH_BLOCK, "id": "toolu_b"}], model="claude-sonnet-5"))
+    report = await run(w, AnthropicModel(client=api.client()))
+    assert report.status == "finished"
+    expected = (
+        cost_usd("claude-sonnet-5-5", Usage(100_000, 4_000, 0, 0))
+        + cost_usd("claude-sonnet-5", Usage(120_000, 3_000, 0, 0))
+        + cost_usd("claude-sonnet-5", Usage(1200, 80, 1000, 200))
+    )
+    assert report.cost_usd == pytest.approx(expected)
+
+
+def no_run_of(secret: str, *places: str) -> None:
+    """No four characters of `secret` in a row appear in any of `places`."""
+    for place in places:
+        for run_ in {secret[i : i + 4] for i in range(len(secret) - 3)}:
+            assert run_ not in place, (run_, place[:200])
+
+
+async def test_a_refused_call_is_traced_without_its_secret(world: MakeWorld) -> None:
+    w = await world(redact=frozenset({SECRET}))
+    # Long enough that cutting it to a length first would leave part of the password.
+    model = FakeModel([[tool("a" * 30 + SECRET, text=SECRET)], finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    no_run_of(SECRET, w.trace.path.read_text(encoding="utf-8"), str(w.trace.steps()))
+    refused = w.trace.steps()[0]
+    assert (refused.tool, refused.input) == ("(unknown tool)", {})
+
+
+async def test_a_report_emptied_by_invisible_characters_is_refused_and_retried(
+    world: MakeWorld,
+) -> None:
+    w = await world(redact=frozenset({SECRET}))
+    empty = [tool("finish", summary="\u200b\u00ad", score=5, goal_reached="no", findings=[])]
+    model = FakeModel([empty, finish()])
+    report = await run(w, model)
+    assert report.status == "finished"
+    (result,) = results(model.calls[1][-1])
+    assert result["is_error"] is True
+    assert result["content"][0]["text"] == "`summary` must not be empty"
+
+
+async def test_the_trace_strips_invisible_characters_before_redacting(world: MakeWorld) -> None:
+    w = await world(redact=frozenset({SECRET}))
+    split = SECRET[:3] + "\u200b" + SECRET[3:9] + "\u034f" + SECRET[9:]
+    model = FakeModel([[tool("type", text=split)], finish(summary=f"I typed {split}.")])
+    report = await run(w, model)
+    assert report.status == "finished"
+    steps = w.trace.steps()
+    assert [s.tool for s in steps] == ["type", "finish"]
+    assert steps[0].input == {"text": "[password]"}
+    assert steps[1].input["summary"] == "I typed [password]."
+    no_run_of(SECRET, w.trace.path.read_text(encoding="utf-8"), str(steps))
+
+
+@pytest.mark.parametrize("secret", ["Kp7  q-vN3x-Rz4w", "Kp7\tq-vN3x-Rz4w", "Kp7\nq-vN3x-Rz4w"])
+async def test_no_form_of_a_password_with_whitespace_survives_in_the_report(
+    world: MakeWorld, secret: str
+) -> None:
+    w = await world(redact=frozenset({secret}))
+    for gap in ("  ", "\t", "\n", " ", "\n \t"):
+        for form in (secret, "Kp7" + gap + "q-vN3x-Rz4w"):
+            found = {
+                "title": f"Typed {form}",  # one line
+                "severity": "minor",
+                "page": "/",
+                "steps": [f"Type {form}"],  # one line
+                "expected": "e",
+                "actual": f"It showed {form}",  # many lines
+                "screenshots": [],
+            }
+            model = FakeModel([finish(summary=f"I typed {form}.", findings=[found])])
+            report = await run(w, model)
+            (finding,) = report.findings
+            assert finding.title == "Typed [password]"
+            assert finding.steps == ("Type [password]",)
+            assert finding.actual == "It showed [password]"
+            assert report.summary == "I typed [password]."
+            assert "q-vN3x" not in json.dumps(report.to_json(), ensure_ascii=False)
+    assert "q-vN3x" not in w.trace.path.read_text(encoding="utf-8")
+
+
+class Hung:
+    """A model whose call never comes back."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def turn(
+        self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    ) -> ModelTurn:
+        self.calls += 1
+        await asyncio.sleep(60)
+        raise AssertionError("the call should have been cut short")
+
+
+async def test_a_hung_model_call_ends_at_the_time_limit(
+    world: MakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Production's order, shortened: the least a call is given, below the time limit, below
+    # the floor of a grace turn. The clock stands still, so the call is given the whole limit.
+    w = await world()
+    monkeypatch.setattr(loop, "MIN_TURN", 0.1)
+    monkeypatch.setattr(loop, "TURN_FLOOR", 20.0)
+    started = time.monotonic()
+    report = await run(w, Hung(), budget=Budget(max_seconds=1.0), clock=Clock(), pricing=free)
+    assert time.monotonic() - started < 10  # cut at the limit, not at the floor
+    assert report.status == "incomplete"
+    assert report.reason == (
+        "the time limit of 1 s ran out before the tester called finish; "
+        "a model call it cut off is not counted, so the cost may read low"
+    )
+
+
+class Allowed:
+    """A fake model that notes how long the loop gave each of its calls, and moves the clock
+    to the next of `times` while it answers."""
+
+    def __init__(self, model: FakeModel, clock: Clock, times: list[float]) -> None:
+        self.model, self.clock, self.times = model, clock, times
+        self.opened: list[float | None] = []  # every timeout the loop opens
+        self.given: list[float | None] = []  # the one each call was made under
+
+    def timeout(self, delay: float | None) -> asyncio.Timeout:
+        self.opened.append(delay)
+        return asyncio.timeout(delay)
+
+    async def turn(
+        self, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    ) -> ModelTurn:
+        self.given.append(self.opened[-1])
+        if self.times:
+            self.clock.now = self.times.pop(0)
+        return await self.model.turn(system, tools, messages)
+
+
+def allowed(
+    monkeypatch: pytest.MonkeyPatch, script: list[Any], clock: Clock, times: list[float]
+) -> Allowed:
+    model = Allowed(FakeModel(script), clock, times)
+    monkeypatch.setattr(loop, "asyncio", SimpleNamespace(timeout=model.timeout))
+    return model
+
+
+async def test_a_default_budgets_first_call_is_given_no_more_than_its_time_limit(
+    world: MakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = await world()
+    clock = Clock()
+    model = allowed(monkeypatch, [finish()], clock, [])
+    report = await run(w, model, clock=clock, pricing=free)
+    assert report.status == "finished"
+    (first,) = model.given
+    assert first is not None
+    assert first <= Budget().max_seconds
+
+
+async def test_a_call_is_given_the_time_left_but_never_less_than_a_minute(
+    world: MakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = await world()
+    clock = Clock()
+    start = clock.now
+    # The first call ends with 61 s left, the second with 59 s, the third at the limit.
+    times = [start + 539, start + 541, start + 600]
+    model = allowed(monkeypatch, [LOOK, LOOK, LOOK, finish()], clock, times)
+    report = await run(w, model, clock=clock, pricing=free)
+    assert report.status == "finished"
+    assert model.given == [600, 61, 60, 900]  # the last is a grace turn, after the limit
+
+
+async def test_a_grace_turn_is_given_the_floor_even_with_time_left(
+    world: MakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = await world()
+    clock = Clock()
+    model = allowed(monkeypatch, [LOOK, finish()], clock, [])
+    report = await run(w, model, budget=Budget(max_actions=1), clock=clock, pricing=free)
+    assert report.status == "finished"
+    assert model.given == [600, 900]  # the actions ran out, and 600 s were left
+
+
+def test_a_grace_turn_has_as_long_as_one_request() -> None:
+    # The grace turn that writes the report is the heaviest of the run, and the client may
+    # retry it, so it gets as long as every attempt the client may make.
+    assert loop.TURN_FLOOR >= CLIENT_TIMEOUT * (CLIENT_RETRIES + 1)
+
+
+async def test_a_timeout_raised_by_the_model_itself_fails_the_persona(world: MakeWorld) -> None:
+    w = await world()
+    report = await run(w, Turns(TimeoutError("its own")), pricing=free)
+    assert report.status == "failed"
+    assert report.reason == "TimeoutError"
+
+
+async def test_a_secret_with_an_invisible_character_is_still_found(world: MakeWorld) -> None:
+    secret, plain = "Kp7\u200bq-vN3x-Rz4w", "Kp7q-vN3x-Rz4w"
+    # A secret made only of characters that show nothing would redact nothing, so it goes.
+    w = await world(redact=frozenset({secret, "\u200b\u00ad"}))
+    assert w.executor.secrets == (plain,)
+    script = [
+        [tool("type", text=secret)],
+        [tool("type", text=plain)],
+        finish(summary=f"I typed {secret} and {plain}."),
+    ]
+    report = await run(w, FakeModel(script))
+    assert report.status == "finished"
+    assert report.summary == "I typed [password] and [password]."
+    steps = w.trace.steps()
+    assert [s.input for s in steps[:2]] == [{"text": "[password]"}, {"text": "[password]"}]
+    no_run_of(plain, w.trace.path.read_text(encoding="utf-8"), str(steps), report.summary)

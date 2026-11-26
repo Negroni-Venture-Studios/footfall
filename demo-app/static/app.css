@@ -1,0 +1,176 @@
+:root {
+  color-scheme: light dark;
+  --page: #f4f6f8;
+  --card: #ffffff;
+  --text: #1d2730;
+  --muted: #55626d;
+  --line: #c4ccd3;
+  --accent: #1b4965;
+  --error: #a4161a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #12181d;
+    --card: #1c252c;
+    --text: #e8edf1;
+    --muted: #a6b2bc;
+    --line: #3b4852;
+    --accent: #5fa8d3;
+    --error: #ff8a8d;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text);
+  font: 1rem/1.4 system-ui, sans-serif;
+}
+
+/* Planted bug 4: a fixed height in pixels. At 1.0 the title fits; at 200% text its line is
+   about twice the header, so the letters are cut top and bottom on any phone. */
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  overflow: hidden;
+  padding: 0 1rem;
+  background: #1b4965;
+  color: #ffffff;
+}
+
+.app-title {
+  margin: 0;
+  font-size: 1.5rem;
+  line-height: 1.6;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  color: #ffffff;
+  border-radius: 50%;
+}
+
+main {
+  padding: 1rem;
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+h2 {
+  margin: 0.5rem 0 1rem;
+}
+
+.stack {
+  display: grid;
+  gap: 0.4rem;
+  margin: 1rem 0;
+}
+
+input,
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+
+button {
+  cursor: pointer;
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  button {
+    color: #12181d;
+  }
+}
+
+a {
+  color: var(--accent);
+}
+
+.error {
+  color: var(--error);
+  font-weight: 600;
+}
+
+/* Planted bug 10: a fixed 420px width, wider than a small phone. */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 420px;
+}
+
+.toolbar input {
+  flex: 1;
+  min-width: 0;
+}
+
+.count {
+  color: var(--muted);
+  margin: 1rem 0 0.5rem;
+}
+
+.tasks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.task {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.4rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.task form {
+  margin: 0;
+}
+
+/* Planted bug 7: a fixed dark grey that does not change in dark mode. */
+.task-text {
+  flex: 1;
+  color: #333;
+}
+
+.task.done .task-text {
+  text-decoration: line-through;
+}
+
+.due {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+/* Planted bug 8: a 16 by 16 pixel target, with nothing to confirm or undo it. */
+.delete {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  background: transparent;
+  color: var(--error);
+  border: 0;
+}

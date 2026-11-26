@@ -14,6 +14,11 @@ Markdown shows the one that matches the reader's theme:
       <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/x-dark.svg">
       <img alt="..." src="images/diagrams/x-light.svg">
     </picture>
+
+GitHub also shows each source on its own when someone browses the folder, and
+without a stylesheet every shape there is black. So each source carries a light
+stylesheet of its own, marked with id="preview", which this keeps up to date and
+which never reaches a built copy.
 """
 
 import base64
@@ -97,8 +102,30 @@ def _font(name: str, family: str) -> str:
     )
 
 
+PREVIEW_OPEN = '<style id="preview">'
+_PREVIEW = re.compile(r'\n?<style id="preview">.*?</style>', re.DOTALL)
+
+
+def without_preview(source: str) -> str:
+    """The drawing alone, without the stylesheet it carries for GitHub's preview."""
+    return _PREVIEW.sub("", source)
+
+
+def with_preview(source: str) -> str:
+    """The source with an up-to-date light stylesheet, so GitHub shows it in colour."""
+    bare = without_preview(source)
+    variables = "".join(f"--{name}: {pair[0]}; " for name, pair in TOKENS.items())
+    style = f"{PREVIEW_OPEN}svg {{ {variables}}}{PALETTE}</style>"
+    opening = re.search(r"<svg\b[^>]*>", bare)
+    if opening is None:
+        raise ValueError("no <svg> element")
+    end = opening.end()
+    return bare[:end] + "\n" + style + bare[end:]
+
+
 def build(source: str, theme: int) -> str:
     """The diagram with its palette for one theme (0 light, 1 dark) and its fonts."""
+    source = without_preview(source)
     variables = "".join(f"--{name}: {pair[theme]}; " for name, pair in TOKENS.items())
     fonts = [_font("Geist-Variable.woff2", "Geist")]
     if 'class="mono' in source or " mono" in source:
@@ -121,6 +148,10 @@ def outputs() -> dict[pathlib.Path, str]:
 
 
 def main() -> int:
+    for path in sorted(DIAGRAMS.glob("*.svg")):
+        text = path.read_text(encoding="utf-8")
+        if with_preview(text) != text:
+            path.write_text(with_preview(text), encoding="utf-8")
     OUT.mkdir(parents=True, exist_ok=True)
     built = outputs()
     for path, text in built.items():

@@ -1,0 +1,141 @@
+# Footfall's development stack: the egress proxy, the runner, and an
+# orchestrator to run `footfall test` in. Build the images first, as
+# images/README.md describes, then, from this folder:
+#
+#   sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/footfall /var/lib/footfall/workspaces
+#   sudo install -d -o root -g root -m 0700 /var/lib/footfall-runs
+#   FOOTFALL_REPO=/path/to/a/repository docker compose up -d
+#   docker compose exec orchestrator footfall test /repo/<the app's folder>
+#
+# FOOTFALL_REPO defaults to this repository, whose demo app is tested with
+# `footfall test /repo/demo-app`. The repository is mounted read-only with its
+# .git, so that footfall test copies only the files git tracks, and an
+# untracked .env stays behind. The results land in
+# /var/lib/footfall/footfall-results on the host.
+#
+# Each run's files are in /var/lib/footfall-runs, which must be root's alone:
+# the runner, which is root, writes there and names its folders to Docker, so
+# no other user may rename anything in it or above it. The runner refuses to
+# start otherwise, and nothing else mounts it. It sees the folders above it
+# only as its own container shows them, so on the host /var/lib and /var,
+# which Docker goes through to find it, must be root's alone too, as they are
+# on a stock Ubuntu.
+#
+# On a Mac, Docker Desktop has no gVisor. FOOTFALL_RUNTIME=runc starts the
+# containers under test without it, and every command then warns that it has.
+# Never set it on a server.
+
+name: footfall-dev
+
+x-logging: &logging
+  # Docker keeps container output forever by default.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  proxy:
+    image: footfall:dev
+    container_name: footfall-proxy
+    command: ["proxy"]
+    restart: unless-stopped
+    environment:
+      FOOTFALL_PROXY_CONTROL: /run/footfall-proxy/proxy.sock
+      FOOTFALL_RUNTIME: ${FOOTFALL_RUNTIME:-runsc}
+    volumes:
+      # Only the proxy and the runner mount its control socket.
+      - proxy-control:/run/footfall-proxy
+    # Docker's default bridge, from which it reaches the hosts each run is
+    # allowed. The runner connects it to each run's network and tells it its
+    # address there, and that is the only place it listens.
+    network_mode: bridge
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    logging: *logging
+
+  runner:
+    image: footfall:dev
+    container_name: footfall-runner
+    command: ["runner"]
+    restart: unless-stopped
+    # Root, because it holds the Docker socket and gives each run's files to
+    # the containers' user. Its group is the orchestrator's, which may use its
+    # socket: the runner makes that socket root:10001, mode 0660.
+    user: "0:10001"
+    environment:
+      FOOTFALL_PROXY_CONTROL: /run/footfall-proxy/proxy.sock
+      FOOTFALL_RUNTIME: ${FOOTFALL_RUNTIME:-runsc}
+      FOOTFALL_PROXY_CONTAINER: footfall-proxy
+      FOOTFALL_ORCHESTRATOR_CONTAINER: footfall-orchestrator
+      FOOTFALL_RUNS: /var/lib/footfall-runs
+    volumes:
+      # Nothing else in Footfall mounts the Docker socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Docker reads a container's bind sources on the host, so the runs
+      # folder has the same path in here as on the host. Only the runner
+      # mounts it.
+      - /var/lib/footfall-runs:/var/lib/footfall-runs
+      # The orchestrator's copies of the folders it tests, which the runner
+      # only reads.
+      - /var/lib/footfall/workspaces:/var/lib/footfall/workspaces:ro
+      - runner-socket:/run/footfall
+      - proxy-control:/run/footfall-proxy
+    # It needs no network: it reaches Docker and the proxy by Unix socket.
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN  # gives each copy of the app to the containers' user
+      - DAC_OVERRIDE  # reads workspaces, and measures folders a container locked down
+      - FOWNER  # sets the modes of files it does not own
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    logging: *logging
+
+  orchestrator:
+    image: footfall:dev
+    container_name: footfall-orchestrator
+    # It waits for `docker compose exec orchestrator footfall test ...`, and
+    # listens on no port.
+    entrypoint: ["sleep", "infinity"]
+    restart: unless-stopped
+    environment:
+      # The Anthropic key reaches this container and no other.
+      - ANTHROPIC_API_KEY
+      - FOOTFALL_RUNTIME=${FOOTFALL_RUNTIME:-runsc}
+      - FOOTFALL_PROXY_CONTAINER=footfall-proxy
+    volumes:
+      - /var/lib/footfall:/var/lib/footfall
+      - runner-socket:/run/footfall
+      - ${FOOTFALL_REPO:-../..}:/repo:ro
+    # Docker's default bridge, for the Anthropic API. The runner connects it
+    # to each run's network, so that it can drive the browsers.
+    network_mode: bridge
+    depends_on:
+      - proxy
+      - runner
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    logging: *logging
+
+volumes:
+  # Each takes its owner and mode from the folder in the footfall image.
+  runner-socket:
+  proxy-control:

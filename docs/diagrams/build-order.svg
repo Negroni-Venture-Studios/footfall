@@ -1,6 +1,46 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 330" width="1000" height="330" role="img" aria-labelledby="t d">
-<title id="t">The build order: the sandbox and the tester come first, because the security model depends on them, then runs, the droplet, agents, and the device wall and report</title>
-<desc id="d">Phase 1 builds the sandbox and the tester (the runner, gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and the demo app) and is done when every isolation test passes. Phase 2 builds runs (queue, limits, scripted checks, findings, merge, spend) and is done when a run produces a merged report. Phase 3 puts Footfall on a droplet (compose, Caddy, cloud-init, the GitHub App, sign-in, settings, tokens) and is done when a fresh droplet can be set up from the docs. Phase 4 builds the MCP endpoint and the agent skill and is done when an agent fixes something Footfall found. Phase 5 builds the live device wall and the report and is done when the mockups' layouts are live. Phase 6, later, covers an OAuth server, replaying a finding to check a fix, comparing versions and iOS on a Mac.</desc>
+<style id="preview">svg { --bg: #fdfbf9; --surface: #ffffff; --tint: #f7efe8; --border: #ece3db; --border-strong: #d8cabe; --text: #1A0B00; --text-2: #6a5141; --text-3: #7a6253; --link: #B24400; --action: #FF6200; --on-action: #1A0B00; --ok: #127D47; --warn: #8a5a00; --danger: #a8322b; }
+svg { background: var(--bg); }
+text { font-family: Geist, sans-serif; font-size: 14px; fill: var(--text); }
+.bg { fill: var(--bg); }
+.box { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; }
+.zone { fill: var(--tint); stroke: var(--border); stroke-width: 1; }
+.zone-dashed {
+  fill: none; stroke: var(--border-strong); stroke-width: 1.25; stroke-dasharray: 6 5;
+}
+.box-dashed {
+  fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; stroke-dasharray: 6 5;
+}
+.key { fill: var(--surface); stroke: var(--link); stroke-width: 1.75; }
+.solid-action { fill: var(--action); }
+.solid-ok { fill: var(--ok); }
+.solid-warn { fill: var(--warn); }
+.solid-danger { fill: var(--danger); }
+.line { fill: none; stroke: var(--text-3); stroke-width: 1.5; }
+.line-accent { fill: none; stroke: var(--link); stroke-width: 1.75; }
+.line-ok { fill: none; stroke: var(--ok); stroke-width: 1.5; }
+.line-danger { fill: none; stroke: var(--danger); stroke-width: 1.5; }
+.line-dashed { fill: none; stroke: var(--text-3); stroke-width: 1.25; stroke-dasharray: 4 4; }
+.arrow { fill: var(--text-3); }
+.arrow-accent { fill: var(--link); }
+.arrow-ok { fill: var(--ok); }
+.arrow-danger { fill: var(--danger); }
+.title { font-size: 15px; font-weight: 600; }
+.label { font-size: 13px; fill: var(--text-2); }
+.small { font-size: 12px; fill: var(--text-3); }
+.heading { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; fill: var(--text-3); }
+.mono {
+  font-family: "Geist Mono", monospace; font-size: 12.5px; fill: var(--text-2);
+  font-variant-ligatures: none;
+}
+.accent { fill: var(--link); }
+.ok { fill: var(--ok); }
+.warn { fill: var(--warn); }
+.danger { fill: var(--danger); }
+.on-action { fill: var(--on-action); font-weight: 600; }
+</style>
+<title id="t">The build order. The sandbox and the tester come first because the security model depends on them. Then come runs, the droplet, agents, and the device wall and report.</title>
+<desc id="d">Phase 1 builds the sandbox and the tester. That is the runner, the gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and the demo app. It is done when every isolation test passes. Phase 2 builds runs: the queue, limits, scripted checks, findings, merging and spend. It is done when a run produces a merged report. Phase 3 puts Footfall on a droplet with compose, Caddy, cloud-init, the GitHub App, sign-in, settings and tokens. It is done when a fresh droplet can be set up from the docs. Phase 4 builds the MCP endpoint, the OAuth server, the Tasks extension, the spend allowance, and the skills served over MCP and as a plugin. It is done when a cloud session fixes something Footfall found. Phase 5 builds the live device wall and the report. It is done when the mockups' layouts are live. Later work is tracked as GitHub issues. That includes replaying a finding to check a fix, comparing versions, an MCP App and iOS on a Mac.</desc>
 <defs>
   <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker>
 </defs>
@@ -49,12 +89,13 @@
 <text class="heading" x="532" y="64">PHASE 4</text>
 <text class="title" x="532" y="88">Agents</text>
 <text class="label" x="532" y="112">MCP endpoint</text>
-<text class="label" x="532" y="130">start and poll,</text>
+<text class="label" x="532" y="130">OAuth server</text>
 <text class="label" x="532" y="148">Tasks extension</text>
-<text class="label" x="532" y="166">agent skill</text>
+<text class="label" x="532" y="166">spend allowance</text>
+<text class="label" x="532" y="184">skills, plugin</text>
 <text class="heading" x="532" y="250">DONE WHEN</text>
-<text class="small" x="532" y="270">an agent fixes what</text>
-<text class="small" x="532" y="286">Footfall found</text>
+<text class="small" x="532" y="270">a cloud session fixes</text>
+<text class="small" x="532" y="286">what Footfall found</text>
 
 <!-- Phase 5 -->
 <rect class="box" x="684" y="40" width="150" height="270" rx="8"/>
@@ -71,10 +112,11 @@
 <rect class="box-dashed" x="850" y="40" width="130" height="270" rx="8"/>
 <text class="heading" x="864" y="64">LATER</text>
 <text class="title" x="864" y="88">Next</text>
-<text class="label" x="864" y="112">OAuth server</text>
-<text class="label" x="864" y="130">replay a finding</text>
-<text class="label" x="864" y="148">compare versions</text>
+<text class="label" x="864" y="112">replay a finding</text>
+<text class="label" x="864" y="130">compare versions</text>
+<text class="label" x="864" y="148">MCP App</text>
 <text class="label" x="864" y="166">iOS on a Mac</text>
+<text class="label" x="864" y="184">GitHub issues</text>
 
 <path class="line" d="M170,210 H184" marker-end="url(#tip)"/>
 <path class="line" d="M336,210 H350" marker-end="url(#tip)"/>

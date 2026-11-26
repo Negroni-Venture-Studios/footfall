@@ -1,0 +1,58 @@
+# Devices a persona can use. `playwright` is the name of a Playwright device descriptor,
+# which supplies the viewport, pixel density, touch support and user agent; `engine` must
+# be that descriptor's browser. The names here are what personas.toml refers to, and what a
+# later iOS worker can map to simulators.
+
+[[device]]
+name = "iPhone SE"
+playwright = "iPhone SE"
+engine = "webkit"
+kind = "phone"
+
+[[device]]
+name = "iPhone 13"
+playwright = "iPhone 13"
+engine = "webkit"
+kind = "phone"
+
+[[device]]
+name = "Pixel 5"
+playwright = "Pixel 5"
+engine = "chromium"
+kind = "phone"
+
+[[device]]
+name = "Pixel 7"
+playwright = "Pixel 7"
+engine = "chromium"
+kind = "phone"
+
+[[device]]
+name = "Galaxy S9+"
+playwright = "Galaxy S9+"
+engine = "chromium"
+kind = "phone"
+
+[[device]]
+name = "iPad"
+playwright = "iPad (gen 7)"
+engine = "webkit"
+kind = "tablet"
+
+[[device]]
+name = "iPad Mini"
+playwright = "iPad Mini"
+engine = "webkit"
+kind = "tablet"
+
+[[device]]
+name = "Laptop (Safari)"
+playwright = "Desktop Safari"
+engine = "webkit"
+kind = "laptop"
+
+[[device]]
+name = "Laptop (Chrome)"
+playwright = "Desktop Chrome"
+engine = "chromium"
+kind = "laptop"
