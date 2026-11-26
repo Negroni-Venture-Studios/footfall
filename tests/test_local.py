@@ -1816,6 +1816,43 @@ def test_a_name_git_does_not_compose_is_not_composed_before_the_match(
     assert '"Key.env"' in str(refused.value)
 
 
+@pytest.mark.parametrize(
+    ("raw", "as_git_reads_it"),
+    [
+        pytest.param("\u00e9e\u0301.env", "\u00e9\u00e9.env", id="partly decomposed"),
+        pytest.param("a\u0301\u0323.env", "\u1ea1\u0301.env", id="marks out of order"),
+        pytest.param("\u212ae\u0301.env", "\u212a\u00e9.env", id="singleton by a decomposed"),
+    ],
+)
+@pytest.mark.usefixtures("own_git_home")
+def test_a_name_git_may_compose_some_other_way_matches_no_tracked_name(
+    tmp_path: Path, raw: str, as_git_reads_it: str
+) -> None:
+    """Ruling R82: a listed name that is neither composed nor exactly its composed form
+    decomposed is one git may still compose, into a name that is not the tracked one. The
+    branch tracks the raw spelling, the developer's excludes name the spelling git reads,
+    and the raw name, kept as it was, matched the tracked one. It now matches nothing."""
+    assert unicodedata.normalize("NFC", raw) == unicodedata.normalize("NFC", as_git_reads_it)
+    folder = tracked_two_pages(tmp_path)
+    git(folder, "config", "core.precomposeUnicode", "false")
+    (folder / raw).write_text("FROM_THE_BRANCH=1\n")
+    commit_all(folder)
+    assert (
+        raw.encode()
+        in subprocess.run(
+            [GIT, "-C", str(folder), "ls-files", "-z"], check=True, capture_output=True
+        ).stdout
+    )
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write(f"{as_git_reads_it}\n")
+    (folder / raw).write_text(DEVELOPERS_SECRET)
+    local._git_files(folder)  # the control: uncomposed, the folder lists the tracked name
+    git(folder, "config", "core.precomposeUnicode", "true")
+    with pytest.raises(LocalRunError, match="differs from the name on disk") as refused:
+        local._git_files(folder)
+    assert local._shown(PurePosixPath(raw)) in str(refused.value)
+
+
 @pytest.mark.usefixtures("own_git_home")
 def test_a_folder_that_cannot_be_listed_is_named_with_the_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

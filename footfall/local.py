@@ -581,12 +581,18 @@ def _staged(git: str, folder: Path, tracked: Collection[PurePosixPath]) -> set[P
     return {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
 
 
-def _composed(name: bytes) -> bytes:
-    """`name` as git's precompose leaves it: its NFC form when `name` is exactly that form
-    decomposed, and `name` itself otherwise."""
+def _composed(name: bytes) -> bytes | None:
+    """`name` as a folder lists it, as git reads it with core.precomposeUnicode true, where
+    that is known: `name` itself when it is composed already, and its NFC form when `name`
+    is exactly that form decomposed. Any other name git may compose in some other way, so
+    it is None, and matches no tracked name."""
     text = os.fsdecode(name)
     nfc = unicodedata.normalize("NFC", text)
-    return os.fsencode(nfc) if unicodedata.normalize("NFD", nfc) == text else name
+    if nfc == text:
+        return name
+    if unicodedata.normalize("NFD", nfc) == text:
+        return os.fsencode(nfc)
+    return None  # git may compose it otherwise: it matches no tracked name
 
 
 def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]) -> None:
@@ -598,10 +604,11 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
     excludes, which fold ASCII case at most, do not match the two. With every part listed as
     it is tracked, the excludes are matched against the names the disk holds. Each folder is
     listed once. With core.precomposeUnicode true, git composes each name it reads from a
-    folder, so the listed names are composed here too, as git composes them: a name is
-    replaced by its NFC form only when it is that form decomposed. NFC alone would also
-    swap a singleton such as the KELVIN SIGN for its equivalent, which git leaves as it is.
-    Raises LocalRunError.
+    folder, so a listed name is composed here too where the result is sure: a composed name
+    is kept, and a name that is exactly its NFC form decomposed is replaced by that form.
+    A name that is neither, such as one partly decomposed or one that holds a singleton
+    like the KELVIN SIGN beside a decomposed letter, is left out of the listing, since git
+    may read it as some other name; the tracked name is then refused. Raises LocalRunError.
     """
     asked = ["config", "--bool", "--default", "false", "--get", "core.precomposeUnicode"]
     composes = _run_git(git, folder, asked).strip() == b"true"
@@ -621,7 +628,7 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
                     "under their own names on disk; let it be listed, or pass --all-files"
                 ) from None
             if composes:
-                found = [_composed(n) for n in found]
+                found = [c for n in found if (c := _composed(n)) is not None]
             listings[inside] = frozenset(found)
         return listings[inside]
 
