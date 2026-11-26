@@ -4,7 +4,7 @@ Tiny Tasks is a small to-do list and Footfall's demo app. You can add tasks with
 
 It has twelve usability and accessibility bugs planted on purpose. [BUGS.md](BUGS.md) lists them and says where every one lives and which persona should find it. Footfall's testers are measured against that list. Please do not fix the bugs. Two tests pin the search and empty-task bugs to stop that happening by accident.
 
-Everything else is built the way it should be and the code is safe to copy from.
+Everything else is built the way it should be and the code is safe to copy.
 
 ## Run it locally
 

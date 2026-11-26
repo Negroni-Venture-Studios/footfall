@@ -22,12 +22,12 @@ I'll reply within 72 hours. I'll work with you on a fix and agree the timing of 
 In scope:
 
 - Footfall's own code: the runner and its container settings, the egress proxy, the tester's tools and its guard, how a run's results reach a calling agent, and any code handling an API key, a token or a password.
-- The deployment files Footfall ships: its container images, the Compose files and the scripts that set a server up.
+- The deployment files Footfall ships: its container images, the Compose files and the scripts that set up a server.
 
 Out of scope:
 
 - The apps Footfall tests. A bug in an app under test is what Footfall exists to find. An app's own weaknesses are its author's to fix.
-- Weaknesses in an operator's own infrastructure or configuration that Footfall's documentation already warns against.
+- Weaknesses in an operator's own infrastructure or configuration against which Footfall's documentation already warns.
 
 ## Supported versions
 

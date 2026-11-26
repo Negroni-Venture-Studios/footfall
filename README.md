@@ -6,7 +6,7 @@ Developers have always found those problems by watching someone use the app. The
 
 Agents don't work that way. They change an app many times a day with nobody watching. Often the app has a single user. There is nobody in the hallway.
 
-Footfall is the hallway. When an agent finishes a change it calls Footfall. Footfall runs the app in a sandbox and sends a dozen AI testers at it. Each one plays a different person on a different phone, tablet or laptop and tries to do what the app is for. They report what went wrong with a screenshot of each problem and the steps to see it again. The agent fixes what they found before anyone else looks.
+Footfall is the hallway. When an agent finishes a change it calls Footfall. Footfall runs the app in a sandbox and sends a dozen AI testers at it. Each one plays a different person on a different phone, tablet or laptop and tries to do what the app is meant to do. They report what went wrong with a screenshot of each problem and the steps to see it again. The agent fixes what they found before anyone else looks.
 
 Footfall is open source and self-hosted. You run it on your own server with your own Anthropic API key.
 
@@ -29,7 +29,7 @@ Footfall is at phase 1 of the [design](docs/design.md). That is the sandbox and 
 
 Build the images as [images/README.md](images/README.md) describes. Then start the development stack in [deploy/dev/compose.yaml](deploy/dev/compose.yaml) with the commands at the top of that file. The demo app [Tiny Tasks](demo-app/README.md) is a small to-do list with twelve bugs planted for the testers to find. `footfall test /repo/demo-app` tests it.
 
-Docker Desktop on a Mac has no gVisor. To develop on a Mac set `FOOTFALL_RUNTIME=runc`. Footfall then runs the containers under test without gVisor and warns you that it is doing so. Never set it on a server.
+Docker Desktop on a Mac has no gVisor. To develop on a Mac set `FOOTFALL_RUNTIME=runc`. Footfall then runs the containers under test without gVisor and warns you. Never set it on a server.
 
 ## Contributing and security
 

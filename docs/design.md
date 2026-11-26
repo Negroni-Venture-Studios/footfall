@@ -18,7 +18,7 @@ Agents have made software cheap enough to build for one user ([A distribution of
 
 These apps still need someone to use them the way a stranger would. Unit tests check what the author expected to happen. A tester playing a person on a particular device finds what nobody thought to check, such as a button hidden by the keyboard on a small phone, a chart cut off at large text, or an error that only says "Error".
 
-Footfall does this for web apps. It is a service the coding agent calls itself when it finishes a change. The check then happens on every change without anyone having to remember it. Each app's repository holds a brief saying what the app is for and what each kind of person should try to do. That brief is the specification the testers work against. It survives every rebuild of the code.
+Footfall does this for web apps. It is a service the coding agent calls itself when it finishes a change. The check then happens on every change without anyone having to remember it. Each app's repository holds a brief saying what the app is for and what each kind of person should try to do. That brief is the specification against which the testers work. It survives every rebuild of the code.
 
 ## Who it is for
 
@@ -34,7 +34,7 @@ Agents call the MCP endpoint with a token a person made for them.
 2. For each run, clone the commit, prepare data and start the app in an isolated container, run scripted checks on every device, run several personas in parallel, each on its own emulated device, and merge their findings.
 3. Testers whose only abilities are a few browser actions Footfall defines, confined to the app under test, with nothing in reach worth stealing.
 4. Results shaped for an agent to act on, and the same results as web pages for a person.
-5. Web pages for a live device wall, a summary report, the list of runs, agent tokens and settings. Nobody should need the DigitalOcean console once Footfall is set up.
+5. Web pages for a live device wall, a summary report, the list of runs, agent tokens and settings. Nobody should need the DigitalOcean console once Footfall is running.
 6. Hard limits on spend and load.
 7. Deployable by other people, with generic configuration, setup an agent can guide, documentation with diagrams, and a demo app with planted bugs.
 
@@ -115,7 +115,7 @@ The web process and the orchestrator are separate containers. A flaw in the part
 
 1. **Start.** An agent calls `start_run`, or a person presses Run on a page. Footfall checks the token's scope, that the GitHub App is installed on the repository, that a manifest exists at that commit, the limits, and the day's spend. It resolves the ref to a commit SHA, queues the run and answers at once with the run's id and the address of its live page.
 2. **Clone.** The orchestrator fetches the commit into a workspace with an installation token. GitHub makes that token valid for one hour. Only refs in the installed repository are accepted and code from a fork cannot arrive through a pull request.
-3. **Prepare.** The runner starts a fresh container from Footfall's base image for the manifest's runtime and copies the workspace in. The manifest's `install` command runs with access to the package registries. Then `seed` runs. The runner then starts a copy of the prepared app for each persona and one for the scripted checks. Testers never see each other's changes and live data is fetched only once. Each copy runs `start` and Footfall polls its `ready` path until it answers. If the timeout passes first the run fails and reports the app's last log lines.
+3. **Prepare.** The runner starts a fresh container from Footfall's base image for the manifest's runtime and copies the workspace into it. The manifest's `install` command runs with access to the package registries. Then `seed` runs. The runner then starts a copy of the prepared app for each persona and one for the scripted checks. Testers never see each other's changes and live data is fetched only once. Each copy runs `start` and Footfall polls its `ready` path until it answers. If the timeout passes first the run fails and reports the app's last log lines.
 4. **Scripted checks.** Each page the manifest lists is loaded once on every persona's device against the copy kept for the checks. No model is involved. These findings arrive within a minute or two. In quick mode the run ends here.
 5. **Personas.** The testers run in parallel. Each has its own browser context, its own emulated device and its own copy of the app. Each runs until it finishes or uses up its budget. Every screenshot goes to the live wall as it is taken.
 6. **Merge.** One model call with no tools groups the findings that describe the same problem and writes the summary.
@@ -231,7 +231,7 @@ The MCP endpoint follows the stateless core of the 2026-07-28 specification and 
 
 `focus` is a short note from the caller, such as "the new gauge cards on /gauges". It is added to every tester's brief for that run. `mode` is `full` by default. `quick` runs the scripted checks only. They take a minute or two and use no model and an agent can afford them on every change.
 
-A run takes minutes. Where the client supports the Tasks extension `start_run` returns a task it can wait on. The task is checked every 15 seconds and kept for as long as the run is. Other clients poll `run_status`.
+A run takes minutes. Where the client supports the Tasks extension `start_run` returns a task on which it can wait. The task is checked every 15 seconds and kept for as long as the run is. Other clients poll `run_status`.
 
 Every agent token has an allowance. So does every OAuth client a person approves. The allowance is the most a run it starts may be estimated to cost without asking anyone. The estimate is the sum of the personas' cost ceilings. Twelve personas at the default ceiling of $1 come to $12. The person sets the allowance when they make the token or approve the client. It starts from the instance's default of $5 and never goes above a cap the admins set. A larger run asks the person to confirm through the client before it is queued. Where nobody can answer the run waits for up to a day as awaiting approval. Continuous integration is one such place. The result gives the address of the page where the person can approve it. Quick runs use no model and never ask.
 
@@ -252,7 +252,7 @@ The web pages, all behind GitHub sign-in:
 - **Report**. The run's facts (app, commit, branch, who asked for it, the brief); headline numbers (distinct problems, blockers and majors, goals reached, time from start to last report, model use); a replay of the device wall from the run's screenshots; a chart of how many testers saw each problem; the problems, most severe first and grouped across testers, each with its screenshots and expandable to every tester's steps, expected and actual results, with scripted findings among them and labelled; a table of the devices; and the call that would run it again.
 - **Agent tokens.** Make, name, scope and revoke tokens, and see when each was last used.
 - **Settings**, for admins.
-- **First run.** The page a new instance shows until it is set up.
+- **First run.** The page a new instance shows until setup is finished.
 
 Two mockups fix the layout and content of the device wall and the report. They do not fix the styling, which follows the branding below. Their figures and findings are illustrative.
 
@@ -279,7 +279,7 @@ People sign in through the App. It reads repositories through short-lived instal
 - On a personal instance only the account that owns it may sign in. It is the admin.
 - Membership and the repositories each person can read are checked at each sign-in. They are checked again at least hourly for open sessions and for tokens in use. Someone who leaves the organisation or loses access to a repository loses it in Footfall too without anyone editing Footfall.
 
-The repositories Footfall can test are exactly those the App is installed on. An agent cannot point it at anything else.
+The repositories Footfall can test are exactly those on which the App is installed. An agent cannot point it at anything else.
 
 Each person makes their own agent tokens. A token has a name, a scope and an expiry. The scope is start and read runs, or read only. It can be limited to some of the repositories its owner can read. A token is shown once, stored only as a SHA-256 hash of its 32 random bytes and listed with its last use. It can be revoked. Every run records the person and the token that started it. Requests are rate-limited per token.
 
@@ -322,7 +322,7 @@ The code under test is untrusted, even when the deployer's own agent wrote it. I
 
 Hosts in `app.egress` and `browser.assets` must be host names, never addresses or wildcards. The proxy refuses any host that resolves to a private, loopback or link-local address. It connects to the address it checked and does not look the name up again. Anyone who can push to a tested repository can therefore widen what that repository's runs may reach but only to public hosts. Each run's page lists every host its containers reached.
 
-Footfall cannot protect against someone with root on the droplet, against DigitalOcean itself, or against a compromised GitHub account belonging to an organisation owner. A tester can also be wrong and that is why every finding has screenshots. A plain-English `docs/security.md` for deployers will set this out.
+Footfall cannot protect against someone with root on the droplet, against DigitalOcean itself, or against a compromised GitHub account belonging to an organisation owner. A tester can also be wrong and that is why every finding has screenshots. A plain-English `docs/security.md` for deployers will explain this.
 
 ### Data and retention
 
@@ -421,7 +421,7 @@ I decided these on or before 24 November 2026:
 - One instance per GitHub organisation or per developer on a personal account. Access follows membership of the organisation and can be narrowed to one team.
 - Each person makes their own agent tokens.
 - Settings live in the web pages and nobody needs the DigitalOcean console after setup.
-- Setup that the deployer's own agent can walk them through.
+- Setup that the deployer's own agent can guide.
 - The name, Footfall.
 - A live device wall and a summary report.
 - The Negroni palette and the Geist fonts in a quiet style.
