@@ -12,7 +12,8 @@ RUN npm install --global --ignore-scripts playwright@1.65.1
 COPY images/browsers/gate.js /opt/footfall/gate.js
 # Chromium sends a GREASE Encrypted Client Hello, which the egress proxy refuses, and only this
 # policy turns it off; the command-line switch no longer does. The policy also turns off what
-# would have Chromium call Google, such as autofill's server, which the proxy refuses too.
+# would have Chromium call Google, such as autofill's server and component downloads, which the
+# proxy refuses too.
 # Each path is where one build of Chromium for Linux reads managed policies: Chromium's own,
 # Chrome's, and Chrome for Testing's.
 COPY images/browsers/chromium-policy.json /etc/chromium/policies/managed/footfall.json

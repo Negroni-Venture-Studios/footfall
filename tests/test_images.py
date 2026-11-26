@@ -153,6 +153,10 @@ def test_browsers_image_has_the_gate_and_the_ech_policy() -> None:
         "SearchSuggestEnabled": False,
         "SafeBrowsingProtectionLevel": 0,
         "MetricsReportingEnabled": False,
+        # Playwright already passes --disable-component-update, yet full Chromium fetched a
+        # component from redirector.gvt1.com, Google's download host, early in one
+        # end-to-end run. The policy covers what the switch does not.
+        "ComponentUpdatesEnabled": False,
     }
 
 

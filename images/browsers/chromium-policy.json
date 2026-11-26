@@ -7,5 +7,6 @@
   "SpellCheckServiceEnabled": false,
   "SearchSuggestEnabled": false,
   "SafeBrowsingProtectionLevel": 0,
-  "MetricsReportingEnabled": false
+  "MetricsReportingEnabled": false,
+  "ComponentUpdatesEnabled": false
 }
