@@ -79,7 +79,7 @@ Footfall has failed if any of these becomes true, even if it works:
 | Area | Options | Chosen | Why |
 |---|---|---|---|
 | Tester | Claude Code per persona, limited to Microsoft's Playwright MCP server; Footfall's own loop on the Anthropic API with tools it defines; scripted checks only | Footfall's own loop | No shell exists anywhere, every persona has a hard budget, and results come back in exactly the shape Footfall needs. Claude Code with Playwright MCP would depend on two fast-moving tools staying pinned and locked down. Scripted checks alone lose the personas, so they run before the personas instead. |
-| Web framework | Django; Starlette, which the MCP SDK is built on; the standard library | Django | Sessions, CSRF protection, forms, migrations and security headers are built in and long audited, and Snug's security code (fail-closed configuration, the rate limiter, hashed tokens, the append-only audit log, the tests that walk every URL) can be reused nearly as it is. Starlette would mean assembling those by hand. The standard library cannot hold MCP's long-lived connections without the same SDK. |
+| Web framework | Django; Starlette, which the MCP SDK is built on; the standard library | Django | Sessions, CSRF protection, forms, migrations, and security headers are built in and long audited, and Snug's security code (fail-closed configuration, the rate limiter, hashed tokens, the append-only audit log, the tests that walk every URL) can be reused nearly as it is. Starlette would mean assembling those by hand. The standard library cannot hold MCP's long-lived connections without the same SDK. |
 | Starting containers | A small runner of Footfall's own, the only holder of the Docker socket; an off-the-shelf Docker socket proxy; a virtual machine per run | Footfall's own runner | A socket proxy filters which API call is made, not what it asks for, so allowing "create container" allows a privileged container that mounts the host's disk. Firecracker needs nested virtualisation, which DigitalOcean [does not officially support](https://www.digitalocean.com/community/questions/does-digitalocean-support-nested-kvm-now). The runner writes every container's settings itself and ignores anything else. |
 | Sandbox runtime | Docker's default runtime; gVisor; Kata Containers | gVisor | gVisor puts its own kernel between the code under test and the host's, needs no hardware virtualisation, and Snug already runs it on DigitalOcean for its LibreOffice converter. Kata needs nested virtualisation. |
 
@@ -192,7 +192,7 @@ Each tester is a loop in which the model sees a screenshot of the page and a num
 | `look` | Returns a screenshot, a numbered list of interactive and text elements with their centres, and accessibility warnings for the screen |
 | `tap` | Taps an element by number, or a point by coordinates |
 | `type` | Types text into the focused field, up to a fixed length |
-| `scroll` | Scrolls up, down, left or right |
+| `scroll` | Scrolls up, down, left, or right |
 | `go` | Goes to a path on the app, goes back, or reloads |
 | `finish` | Writes the structured report and ends the loop |
 
@@ -311,8 +311,8 @@ The code under test is untrusted, even when the deployer's own agent wrote it. I
 
 | Threat | Controls |
 |---|---|
-| Code under test escapes its container | gVisor; no Linux capabilities; a read-only root filesystem except the workspace and a temporary folder; limits on memory, CPU, processes and disk; nothing secret inside; only the runner can talk to Docker |
-| Code under test reaches the internet, the host or other services | An internal network only; everything else goes through the egress proxy, which allows each run only its manifest's hosts (and package registries during `install`); DigitalOcean's metadata address, `169.254.169.254`, is refused outright |
+| Code under test escapes its container | gVisor; no Linux capabilities; a read-only root filesystem except the workspace and a temporary folder; limits on memory, CPU, processes, and disk; nothing secret inside; only the runner can talk to Docker |
+| Code under test reaches the internet, the host, or other services | An internal network only; everything else goes through the egress proxy, which allows each run only its manifest's hosts (and package registries during `install`); DigitalOcean's metadata address, `169.254.169.254`, is refused outright |
 | A page steers the tester | The tools accept paths, never URLs; requests to any other host are aborted; the tester holds nothing worth leaking; the prompt says page text is data |
 | A tester's text steers the calling agent | Length limits on every field; tool descriptions that call findings observations; the merge sees titles only |
 | A hostile page attacks the browser | Browsers run in their own container per run, under gVisor, with no secrets |
@@ -371,7 +371,7 @@ Documentation grows with each phase:
 | `docs/design.md` | Contributors; this document | Now |
 | `docs/architecture.md` | Contributors, on how the code works | 1 onwards |
 | `docs/security.md` | Deployers, on what Footfall protects against | 1 onwards |
-| `docs/manifest.md` | App authors and their agents, on `footfall.toml`, briefs and seed data | 2 |
+| `docs/manifest.md` | App authors and their agents, on `footfall.toml`, briefs, and seed data | 2 |
 | `docs/deploy-digitalocean.md` | Deployers, click by click | 3 |
 | `docs/configuration.md` | Admins, on every setting | 3 |
 | `docs/connecting-agents.md` | People connecting Claude Code locally, in the cloud, and other MCP clients | 4 |

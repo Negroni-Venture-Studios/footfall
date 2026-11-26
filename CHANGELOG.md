@@ -12,7 +12,7 @@ All notable changes to Footfall are recorded here. The format follows [Keep a Ch
 - An app's `footfall.toml` says how to install, seed, and start it, which pages to test, and which hosts it may reach. Its briefs say what the app is for and what each kind of person should try. Footfall reports all the problems it finds in them at once.
 - `footfall runner` starts and stops the containers for each run. It is the only part of Footfall that can talk to Docker.
 - `footfall proxy` is the egress proxy. A run's containers reach the internet only through it. They reach only the hosts the app's manifest names.
-- Three settings for whoever runs Footfall: `FOOTFALL_DISK_BUDGET_MIB` (8 GiB by default), `FOOTFALL_RUN_LIFETIME_MINUTES` (90) and `FOOTFALL_RUN_COST_CEILING_USD` ($12). `footfall test --cost-ceiling` sets the last one for a single run. The tested repository cannot raise any of them. A value Footfall cannot use stops it rather than falling back to the default.
+- Three settings for whoever runs Footfall: `FOOTFALL_DISK_BUDGET_MIB` (8 GiB by default), `FOOTFALL_RUN_LIFETIME_MINUTES` (90), and `FOOTFALL_RUN_COST_CEILING_USD` ($12). `footfall test --cost-ceiling` sets the last one for a single run. The tested repository cannot raise any of them. A value Footfall cannot use stops it rather than falling back to the default.
 - `deploy/dev/compose.yaml` runs the development stack.
 - The isolation workflow runs the whole stack under gVisor on a GitHub-hosted runner for each pull request. It checks what the app and browser containers can and cannot reach.
 

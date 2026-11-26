@@ -30,7 +30,7 @@ When the list is empty, or a search finds nothing, the page shows a blank space 
 
 ## Bug 7: task text is unreadable in dark mode
 
-Task text has a fixed dark grey colour, while the card behind it turns dark. The cause is the `.task-text` rule in `static/app.css`. Every persona with a dark colour scheme should catch it, which is `largest-text`, `skims`, `edge-cases` (when run), `one-handed` (when run), `long-labels` (when run) and `unusual-text` (when run). Of those, the demo runs `largest-text` and `skims` by default.
+Task text has a fixed dark grey colour, while the card behind it turns dark. The cause is the `.task-text` rule in `static/app.css`. Every persona with a dark colour scheme should catch it, which is `largest-text`, `skims`, `edge-cases` (when run), `one-handed` (when run), `long-labels` (when run), and `unusual-text` (when run). Of those, the demo runs `largest-text` and `skims` by default.
 
 ## Bug 8: the delete control is tiny and permanent
 
