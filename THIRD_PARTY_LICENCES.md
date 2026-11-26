@@ -1,12 +1,12 @@
 # Third-party licences
 
-Footfall is MIT licensed (see [LICENSE](LICENSE)). It includes, adapts or installs the third-party software and assets below. Every licence is compatible with distributing Footfall as MIT, and `scripts/check_licences.py` checks every installed Python package in CI.
+Footfall is MIT licensed and [LICENSE](LICENSE) has the text. It includes, adapts or installs the third-party software and assets below. Every licence is compatible with distributing Footfall as MIT. `scripts/check_licences.py` checks every installed Python package in CI.
 
-The full licence texts ship with each package, in its `*.dist-info/licenses` folder.
+The full licence texts ship with every package in its `*.dist-info/licenses` folder.
 
 ## Adapted from another project
 
-[mobile-agent-testers](https://github.com/pierridotite/mobile-agent-testers) runs AI testers against native mobile apps, and is MIT licensed. Footfall's twelve personas in `footfall/data/personas.toml` take their profiles and goals from its `personas.json`. Many are copied word for word, and the licence requires its notice to be kept here. Footfall's screen format, accessibility checks and tester rules follow the same approach, but were written for Footfall and share no code with it.
+[mobile-agent-testers](https://github.com/pierridotite/mobile-agent-testers) runs AI testers against native mobile apps and is MIT licensed. Footfall's twelve personas in `footfall/data/personas.toml` take their profiles and goals from its `personas.json`. Many are copied word for word. The licence requires its notice to be kept here. Footfall's screen format, accessibility checks and tester rules follow the same approach but were written for Footfall and share no code with it.
 
 The notice:
 
