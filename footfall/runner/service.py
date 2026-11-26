@@ -227,6 +227,22 @@ def _show(value: object) -> str:
     return text if len(text) <= 60 else f"{text[:57]}..."
 
 
+def _show_without(secrets: Sequence[str]) -> Callable[[object], str]:
+    """`_show`, with each secret taken out of the text first, so that the cut to 60
+    characters can never leave part of one to be shown."""
+
+    def show(value: object) -> str:
+        text = str(value)
+        for secret in secrets:
+            text = text.replace(secret, _REDACTED)
+        return _show(text)
+
+    return show
+
+
+_SHOW_ANY: Final = _show_without(())  # a path or a name as a refusal shows it, with no secret
+
+
 def _network_name(run_id: str) -> str:
     return f"footfall-{run_id}"
 
@@ -493,13 +509,16 @@ def _walk(
                 os.close(inner)
 
 
-def _entries(folder: int, what: str) -> Generator[tuple[PurePath, int, str, os.stat_result]]:
+def _entries(
+    folder: int, what: str, show: Callable[[object], str] = _SHOW_ANY
+) -> Generator[tuple[PurePath, int, str, os.stat_result]]:
     """Yield (where, its descriptor, name, lstat) for everything below an open folder.
 
     The walk goes by descriptor, depth first, and never into or through a link. It refuses
     anything but files, folders and links, a tree more than `MAX_DEPTH` folders deep, and a
     folder that turns into something else before it is walked. Each folder is yielded before
-    anything in it.
+    anything in it. A refusal names the path as `show` shows it, since code under test chose
+    the names.
     """
     try:
         for here, dirfd, name, info in _walk(folder, MAX_DEPTH, tally=None):
@@ -507,21 +526,22 @@ def _entries(folder: int, what: str) -> Generator[tuple[PurePath, int, str, os.s
                 stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
             ):
                 raise RunnerError(
-                    f"{what} contains {_kind(info.st_mode)} at {_show(str(here / name))}; "
+                    f"{what} contains {_kind(info.st_mode)} at {show(here / name)}; "
                     "only files, folders and symbolic links are copied"
                 )
             yield here, dirfd, name, info  # one at a time: a folder may hold millions
     except _Deep as deep:
         raise RunnerError(
-            f"{what} is more than {MAX_DEPTH} folders deep at {_show(str(deep.where))}, or "
+            f"{what} is more than {MAX_DEPTH} folders deep at {show(deep.where)}, or "
             "too deep there for the runner to reach"
         ) from None
     except _Changed as changed:
-        where = _show(str(changed.where))
-        raise RunnerError(f"{what} changed while it was read, at {where}") from None
+        raise RunnerError(f"{what} changed while it was read, at {show(changed.where)}") from None
 
 
-def _copy_file(folder: int, name: str, target: int, allowed: int) -> int:
+def _copy_file(
+    folder: int, name: str, target: int, allowed: int, show: Callable[[object], str] = _SHOW_ANY
+) -> int:
     """Copy one regular file, named relative to an open folder, to the same name in the open
     folder `target`; return the bytes written.
 
@@ -536,7 +556,7 @@ def _copy_file(folder: int, name: str, target: int, allowed: int) -> int:
         info = os.fstat(reader)
         if not stat.S_ISREG(info.st_mode):
             raise RunnerError(
-                f"{_show(name)} changed into {_kind(info.st_mode)} while it was copied"
+                f"{show(name)} changed into {_kind(info.st_mode)} while it was copied"
             )
         writer = os.open(name, _WRITE_FLAGS, 0o600, dir_fd=target)
         written = 0
@@ -567,9 +587,11 @@ def _copy_tree(
     chown: Chown,
     what: str,
     shown: Path,
+    show: Callable[[object], str] = _SHOW_ANY,
 ) -> int:
     """Copy the folder `relative` below the open `root` to a new folder `name` in the open
-    folder `parent`, in one pass; return the bytes.
+    folder `parent`, in one pass; return the bytes. A refusal names a path as `show` shows
+    it.
 
     The write side goes by descriptor as the read side does: every entry is made relative to
     the open folder it goes in, never through a link, and each folder's mode is set on its own
@@ -597,7 +619,7 @@ def _copy_tree(
         made.append((_TOP, os.open(name, _FOLDER_FLAGS, dir_fd=parent), top.st_mode))
         chown(parent, name, shown)
         written = _size(top)
-        for here, dirfd, entry, info in _entries(source, what):
+        for here, dirfd, entry, info in _entries(source, what, show):
             if written > limit:
                 raise _OverBudget
             close_to(here)
@@ -613,7 +635,7 @@ def _copy_tree(
                 os.symlink(link, entry, dir_fd=target)
                 written += _charge(len(os.fsencode(link)))
             else:
-                written += _charge(_copy_file(dirfd, entry, target, limit - written))
+                written += _charge(_copy_file(dirfd, entry, target, limit - written, show))
             chown(target, entry, shown / here / entry)
         if written > limit:
             raise _OverBudget
@@ -630,21 +652,23 @@ def _copy_tree(
     return written
 
 
-def _scan_tree(root: int, relative: PurePath, what: str) -> None:
+def _scan_tree(
+    root: int, relative: PurePath, what: str, show: Callable[[object], str] = _SHOW_ANY
+) -> None:
     """Refuse a folder below `root` holding anything a copy would refuse."""
     source = _open_folder(root, relative)
     try:
-        for _entry in _entries(source, what):
+        for _entry in _entries(source, what, show):
             pass
     finally:
         os.close(source)
 
 
-def _incoming_size(root: int, relative: PurePath) -> int:
+def _incoming_size(root: int, relative: PurePath, show: Callable[[object], str] = _SHOW_ANY) -> int:
     """Bytes that copying the folder `relative` below the open `root` would write."""
     parent = _open_folder(root, relative.parent)
     try:
-        return _measure_in(parent, relative.name, MAX_DEPTH)[0]
+        return _measure_in(parent, relative.name, MAX_DEPTH, show)[0]
     finally:
         os.close(parent)
 
@@ -673,7 +697,9 @@ def _measure(top: Path, max_depth: int) -> tuple[int, int]:
         os.close(parent)
 
 
-def _measure_in(parent: int, name: str, max_depth: int) -> tuple[int, int]:
+def _measure_in(
+    parent: int, name: str, max_depth: int, show: Callable[[object], str] = _SHOW_ANY
+) -> tuple[int, int]:
     """Bytes that copying `name` in the open folder `parent` would write, never following a
     link, and how many entries the measure skipped because they vanished or changed while it
     read.
@@ -685,7 +711,8 @@ def _measure_in(parent: int, name: str, max_depth: int) -> tuple[int, int]:
     the walk never holds more descriptors than that. A folder swapped for a link while it is
     measured is never opened through the link. An entry that vanishes, or a folder that
     changes, is skipped and counted: what it held is not in the total, which is why a run
-    whose measures keep skipping is stopped. Any other failure is raised.
+    whose measures keep skipping is stopped. Any other failure is raised. _TooDeep names the
+    path as `show` shows it.
     """
     try:
         info = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -706,22 +733,23 @@ def _measure_in(parent: int, name: str, max_depth: int) -> tuple[int, int]:
             total += _size(entry)
     except _Deep as deep:
         raise _TooDeep(
-            f"more than {max_depth} folders deep at {_show(str(deep.where))}, "
-            "or too deep there to reach"
+            f"more than {max_depth} folders deep at {show(deep.where)}, or too deep there to reach"
         ) from None
     finally:
         os.close(folder)
     return total, tally.skipped
 
 
-def _measure_settled(parent: int, name: str, max_depth: int) -> tuple[int, int]:
+def _measure_settled(
+    parent: int, name: str, max_depth: int, show: Callable[[object], str] = _SHOW_ANY
+) -> tuple[int, int]:
     """A measure, taken again at once if it skipped something. A file or folder replaced
     once, as a dev server replaces a cache folder while it starts, is found by the second;
     a run that keeps changing its files makes both skip, and then the larger of the two is
     the usage, since each missed what it skipped."""
-    usage, skipped = _measure_in(parent, name, max_depth)
+    usage, skipped = _measure_in(parent, name, max_depth, show)
     if skipped:
-        again, skipped = _measure_in(parent, name, max_depth)
+        again, skipped = _measure_in(parent, name, max_depth, show)
         usage = max(usage, again) if skipped else again
     return usage, skipped
 
@@ -987,17 +1015,29 @@ class RunnerService:
                 if copy in run.copies:
                     raise RunnerError(f"copy {copy} already exists in run {run_id}")
                 run.copies.add(copy)
+                failure: RunnerError | None = None
                 try:
                     address = self._start_app_locked(run, copy, start, port, hosts)
+                except (RunnerError, EngineError, OSError, ValueError, RecursionError) as error:
+                    # A copy's error can quote a path the seed named, and Docker's words what a
+                    # container was given, so it goes on without the password, as prepare's.
+                    failure = _redacted(error, dict.fromkeys(run.secrets, _REDACTED))
                 except BaseException:
-                    name = _container_name(run_id, "app", copy)
-                    if not run.closed and self._forget_locked(run, name):
-                        run.copies.discard(copy)
-                        # One that cannot be deleted goes with the run's folder when it stops.
-                        remove = functools.partial(self._remove_copy, run.run_id, copy)
-                        self._attempt([], f"delete copy {copy}", remove)
+                    self._forget_copy_locked(run, copy)
                     raise
+                if failure is not None:
+                    self._forget_copy_locked(run, copy)
+                    raise failure
                 return f"{address}:{port}"
+
+    def _forget_copy_locked(self, run: _Run, copy: str) -> None:
+        """Remove a copy that failed to start, and its folder, logging what goes wrong."""
+        name = _container_name(run.run_id, "app", copy)
+        if not run.closed and self._forget_locked(run, name):
+            run.copies.discard(copy)
+            # One that cannot be deleted goes with the run's folder when it stops.
+            remove = functools.partial(self._remove_copy, run.run_id, copy)
+            self._attempt([], f"delete copy {copy}", remove, run.secrets)
 
     def start_browsers(self, run_id: str, assets: Sequence[str]) -> str:
         """Start the run's browser container and return its Playwright endpoint.
@@ -1118,7 +1158,8 @@ class RunnerService:
                         self._stop_for_locked(run, LIFETIME_REASON)
                 continue
             try:
-                usage, skipped = _measure_settled(self._runs_fd, run.run_id, _RUN_DEPTH)
+                show = _show_without(run.secrets)
+                usage, skipped = _measure_settled(self._runs_fd, run.run_id, _RUN_DEPTH, show)
                 if usage > self._disk_budget:
                     reason = DISK_REASON
                 elif self._unsteady(run, skipped):
@@ -1251,7 +1292,12 @@ class RunnerService:
             self._step_locked(run, "install", install, install_hosts, {})
         if seed is not None:
             self._step_locked(run, "seed", seed, hosts, seed_env)
-        _scan_tree(self._runs_fd, PurePath(run.run_id, _PREPARED), "the prepared app")
+        _scan_tree(
+            self._runs_fd,
+            PurePath(run.run_id, _PREPARED),
+            "the prepared app",
+            _show_without(run.secrets),
+        )
         run.prepared = True
 
     def _step_locked(
@@ -1314,9 +1360,10 @@ class RunnerService:
         # The stops come after the handlers, so that a stop that fails too logs no chain back
         # to the measure's error, which may name a file the seed named after the password.
         reason, said = "", ""
+        show = _show_without(run.secrets)
         try:
-            usage, skipped = _measure_settled(self._runs_fd, run.run_id, _RUN_DEPTH)
-            extra = 0 if incoming is None else _incoming_size(*incoming)
+            usage, skipped = _measure_settled(self._runs_fd, run.run_id, _RUN_DEPTH, show)
+            extra = 0 if incoming is None else _incoming_size(*incoming, show)
         except _TooDeep as deep:
             reason, said = DISK_REASON, f"{DISK_REASON}: {deep}"
         except (OSError, RecursionError) as error:
@@ -1369,6 +1416,7 @@ class RunnerService:
                 chown=self._chown,
                 what=what,
                 shown=run.directory / inside / name,
+                show=_show_without(run.secrets),
             )
         except _OverBudget:
             self._stop_for_locked(run, DISK_REASON)

@@ -1476,9 +1476,11 @@ async def test_folder(
             print(format_table(reports), file=stream)
         except BaseException as error:
             if isinstance(error, LocalRunError | RunnerError):
-                # The runner redacts its logs, but by plain replacement, which a password cut
-                # by a character that shows nothing gets past.
+                # The runner redacts its logs and messages, but by plain replacement, which a
+                # password cut by a character that shows nothing gets past; and its message
+                # can quote a path the seed named.
                 error.log_tail = _clean_tail(error.log_tail, run.password)
+                error.args = (_clean_tail(str(error), run.password),)
             await _finish(runner, run_id, workspace, quiet=True)
             results.tidy()
             raise

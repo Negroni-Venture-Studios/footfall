@@ -1607,6 +1607,34 @@ async def test_a_runner_log_tail_never_rebuilds_the_password(
     assert "\u200b" not in tail
 
 
+async def test_a_runner_errors_message_never_rebuilds_the_password(tmp_path: Path) -> None:
+    """Observation 7: the runner's message can quote a path the seed named, and the message,
+    not only the log tail, is cleaned and redacted before it goes on to be printed."""
+    folder = two_pages(tmp_path, LOGIN_MANIFEST)
+    (folder / "footfall" / "briefs" / "default.md").write_text(
+        '+++\nstart = "signed-out"\n+++\nLook around.\n'
+    )
+    passwords: list[str] = []
+
+    class StartFails(FakeRunner):
+        async def prepare(self, run_id: str, workspace: Path, *rest: Any) -> str:
+            passwords.append(rest[-1]["FOOTFALL_PASSWORD"])
+            return "runsc"
+
+        async def start_app(self, *arguments: Any) -> str:
+            password = passwords[0]
+            raise RunnerError(f"the copy holds a FIFO at 'x/{password[:3]}\u200b{password[3:]}'")
+
+    async def no_browsers(engine: str, endpoint: str) -> Browser:
+        raise BrowserConnectError("not reached in this test")
+
+    with pytest.raises(RunnerError) as caught:
+        await run_folder(folder, StartFails(lambda copy: "127.0.0.1:9"), no_browsers, tmp_path)
+    message = str(caught.value)
+    assert "[password]" in message
+    assert passwords[0] not in strip_invisible(clean_text(message, 10**9))
+
+
 async def test_an_app_log_tail_never_rebuilds_the_password(
     tmp_path: Path, connect: tuple[Connect, list[tuple[str, str]]]
 ) -> None:

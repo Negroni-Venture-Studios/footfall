@@ -603,3 +603,51 @@ def test_a_workspace_too_long_to_reach_is_refused_and_leaves_nothing(
     assert h.engine.live == {}
     assert h.engine.networks == {}
     assert list(h.runs.iterdir()) == []
+
+
+# ---------------------------------------------------------------- the seed's names, redacted
+
+SEED_PASSWORD = "pw-7f3k2m9q4x8z"  # gitleaks:allow
+SEED_ENV = {"FOOTFALL_USERNAME": "tester", "FOOTFALL_PASSWORD": SEED_PASSWORD}
+# Padding that puts the password across the 60-character cut of a message's path, as the
+# path is shown from the prepared app (PADDED) or from the run's folder (PADDED_IN_RUN).
+PADDED = "d" * 40 + "/" + "123456789" + SEED_PASSWORD
+PADDED_IN_RUN = "d" * 31 + "/" + "123456789" + SEED_PASSWORD
+
+
+def no_part_of_the_password(text: str) -> bool:
+    return not any(SEED_PASSWORD[:size] in text for size in range(4, len(SEED_PASSWORD) + 1))
+
+
+def test_a_fifo_the_seed_names_after_the_password_is_refused_without_it(h: Harness) -> None:
+    """Observation 7: a seed that runs `mkfifo "$FOOTFALL_PASSWORD"` beside padding had the
+    path quoted, cut to 60 characters, and only then redacted, so a prefix of the password
+    reached the caller, where ::add-mask:: does not hide a prefix."""
+    h.workspace()
+
+    def seed(prepared: Path) -> None:
+        (prepared / PADDED).parent.mkdir(parents=True)
+        os.mkfifo(prepared / PADDED)
+
+    h.engine.during_wait["seed"] = seed
+    with pytest.raises(RunnerError, match="a FIFO") as refused:
+        h.service.prepare(RUN, h.workspaces / "app", "python3.13", None, "seed", [], SEED_ENV)
+    assert no_part_of_the_password(str(refused.value) + refused.value.log_tail), refused.value
+    assert list(h.runs.iterdir()) == []
+
+
+@pytest.mark.parametrize("call", ["stat", "open"])
+def test_a_path_too_deep_to_copy_is_named_without_the_password(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    """The same through start_app's copy, whose errors went to the caller unredacted."""
+    h.workspace()
+    h.engine.during_wait["seed"] = lambda prepared: (prepared / PADDED_IN_RUN).mkdir(parents=True)
+    h.service.prepare(RUN, h.workspaces / "app", "python3.13", None, "seed", [], SEED_ENV)
+    name = PADDED_IN_RUN.rpartition("/")[2]
+    refused_names = refuse_once(monkeypatch, call, name)
+    with pytest.raises(RunnerError, match="deep") as refused:
+        h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    monkeypatch.undo()
+    assert refused_names == [name]
+    assert no_part_of_the_password(str(refused.value)), refused.value

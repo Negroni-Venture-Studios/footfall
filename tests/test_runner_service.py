@@ -1126,7 +1126,7 @@ def test_a_run_that_cannot_be_measured_is_stopped(
     prepare(h)
     h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
 
-    def too_many_files(parent: int, name: str, max_depth: int) -> tuple[int, int]:
+    def too_many_files(parent: int, name: str, max_depth: int, *show: Any) -> tuple[int, int]:
         raise OSError(24, "Too many open files")
 
     monkeypatch.setattr("footfall.runner.service._measure_in", too_many_files)
@@ -1810,7 +1810,7 @@ def unsteady(monkeypatch: pytest.MonkeyPatch, skips: list[int], then: int = 0) -
     `then` once they run out. Returns the list, which empties as measures are taken."""
     left = list(skips)
 
-    def measure(parent: int, name: str, max_depth: int) -> tuple[int, int]:
+    def measure(parent: int, name: str, max_depth: int, *show: Any) -> tuple[int, int]:
         return PAGE, left.pop(0) if left else then
 
     monkeypatch.setattr("footfall.runner.service._measure_in", measure)
@@ -1962,7 +1962,7 @@ def test_when_both_measures_skip_the_larger_is_held_to_the_budget(
     prepare(h)
     sizes = [2 * MIB, PAGE]
 
-    def measure(parent: int, name: str, max_depth: int) -> tuple[int, int]:
+    def measure(parent: int, name: str, max_depth: int, *show: Any) -> tuple[int, int]:
         return (sizes.pop(0) if sizes else PAGE), 1
 
     monkeypatch.setattr("footfall.runner.service._measure_in", measure)
@@ -2060,10 +2060,10 @@ def test_a_measure_that_fails_naming_the_password_never_logs_it(
     real = module._measure_settled
     failing: list[bool] = []
 
-    def measure(parent: int, name: str, max_depth: int) -> tuple[int, int]:
+    def measure(parent: int, name: str, max_depth: int, *show: Any) -> tuple[int, int]:
         if failing:
             raise OSError(errno.EIO, "Input/output error", f"cache-{PASSWORD}")
-        return real(parent, name, max_depth)
+        return real(parent, name, max_depth, *show)
 
     monkeypatch.setattr(module, "_measure_settled", measure)
     h.engine.fail("containers", EngineError("the daemon is busy"))
