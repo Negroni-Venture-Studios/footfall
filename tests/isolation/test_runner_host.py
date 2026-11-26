@@ -280,8 +280,9 @@ function look(name) {
 })();
 """
 # Docker's resolver, public resolvers, and STUN servers a page's WebRTC might use: Google's
-# and Cloudflare's, by address, since no outside name resolves; and Google's and Cloudflare's
-# resolvers by IPv6, should a run's network ever have it.
+# and Cloudflare's, by address, since no outside name resolves; and by IPv6, should a run's
+# network ever have it, Google's and Cloudflare's resolvers and Google's STUN server
+# (stun.l.google.com). Each is sent both the DNS question and the STUN request.
 _OUTSIDE: Final = (
     "127.0.0.11:53",
     "8.8.8.8:53",
@@ -289,7 +290,8 @@ _OUTSIDE: Final = (
     "74.125.250.129:19302",
     "162.159.207.0:3478",
     "[2001:4860:4860::8888]:53",
-    "[2606:4700:4700::1111]:3478",
+    "[2606:4700:4700::1111]:53",
+    "[2001:4860:4864:5:8000::1]:19302",
 )
 # What the IPv6 control may say when the container has no IPv6 at all, so that nothing can
 # be sent by udp6 to begin with.
