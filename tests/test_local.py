@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -1646,6 +1647,111 @@ def test_a_case_variant_of_an_excluded_name_is_refused_on_any_volume(tmp_path: P
     assert git_output(folder, "ls-files", "-m").splitlines() == ["PROD.ENV"]
     with pytest.raises(LocalRunError, match=r'"PROD\.ENV"'):
         local._git_files(folder)
+
+
+NFC_NAME = unicodedata.normalize("NFC", "caf\u00e9.env")
+NFD_NAME = unicodedata.normalize("NFD", NFC_NAME)
+ALIASES = [
+    pytest.param("CAF\u00c9.env", NFC_NAME, id="unicode case"),
+    pytest.param("PROD.ENV", "prod.env", id="ascii case"),
+    pytest.param(NFD_NAME, NFC_NAME, id="nfd over nfc"),
+    pytest.param(NFC_NAME, NFD_NAME, id="nfc over nfd"),
+]
+
+
+def tracked_under(folder: Path, tracked: str, sub: str = "") -> None:
+    """Put `tracked` in the index of the repository at `folder`, in `sub`, whatever name the
+    disk holds, as a checkout of a branch that tracks it leaves the index."""
+    done = subprocess.run(
+        [GIT, "-C", str(folder), "hash-object", "-w", "--stdin"],
+        input=b"FROM_THE_BRANCH=1\n",
+        check=True,
+        capture_output=True,
+    )
+    blob = done.stdout.decode().strip()
+    git(folder, "update-index", "--add", "--cacheinfo", f"100644,{blob},{sub}{tracked}")
+
+
+@pytest.mark.parametrize(("tracked", "on_disk"), ALIASES)
+@pytest.mark.parametrize("sub", ["", "footfall/"])
+def test_a_tracked_name_the_folder_lists_differently_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracked: str, on_disk: str, sub: str
+) -> None:
+    """Ruling R80: on a volume that folds case or the form of an accented letter, the
+    developer's file answers to the branch's tracked name, and git's excludes, which fold
+    ASCII case at most, do not match the two. A changed tracked name that its folder does
+    not list byte for byte is refused. The folder's listing is stood in for here, so that
+    this runs on a volume that keeps every name apart."""
+    folder = tracked_two_pages(tmp_path)
+    git(folder, "config", "core.precomposeUnicode", "false")
+    (folder / sub / tracked).write_text(DEVELOPERS_SECRET)
+    tracked_under(folder, tracked, sub)
+    local._git_files(folder)  # the control: the folder lists the tracked name itself
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write(f"{on_disk}\n")
+    real = os.listdir
+
+    def aliasing(where: Any) -> list[Any]:
+        return [os.fsencode(on_disk) if n == os.fsencode(tracked) else n for n in real(where)]
+
+    monkeypatch.setattr(os, "listdir", aliasing)
+    with pytest.raises(LocalRunError, match="differs from the name on disk") as refused:
+        local._git_files(folder)
+    assert local._shown(PurePosixPath(sub + tracked)) in str(refused.value)
+
+
+@pytest.mark.parametrize(("tracked", "on_disk"), ALIASES)
+def test_a_tracked_name_that_opens_your_file_by_another_name_is_refused(
+    tmp_path: Path, tracked: str, on_disk: str
+) -> None:
+    """Ruling R80 on a real volume: the developer's excluded file is on disk under one name,
+    the branch tracks another that opens it, and nothing is stood in for."""
+    folder = tracked_two_pages(tmp_path)
+    git(folder, "config", "core.precomposeUnicode", "false")
+    (folder / on_disk).write_text(DEVELOPERS_SECRET)
+    if not (folder / tracked).exists() or os.fsencode(tracked) in os.listdir(os.fsencode(folder)):  # noqa: PTH208  # the names as bytes
+        pytest.skip("this volume keeps the two names apart, or stores one as the other")
+    tracked_under(folder, tracked)
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write(f"{on_disk}\n")
+    with pytest.raises(LocalRunError, match="differs from the name on disk") as refused:
+        local._git_files(folder)
+    assert local._shown(PurePosixPath(tracked)) in str(refused.value)
+
+
+def test_a_decomposed_tracked_name_is_refused_where_git_composes_what_it_reads(
+    tmp_path: Path,
+) -> None:
+    """Ruling R80: with core.precomposeUnicode true, git composes each name it reads from a
+    folder before it matches an exclude, so a tree's decomposed name is matched to nothing.
+    The folder's names are composed the same way before the tracked name is looked for."""
+    folder = tracked_two_pages(tmp_path)
+    git(folder, "config", "core.precomposeUnicode", "false")
+    (folder / NFD_NAME).write_text(DEVELOPERS_SECRET)
+    tracked_under(folder, NFD_NAME)
+    assert (
+        NFD_NAME.encode()
+        in subprocess.run(
+            [GIT, "-C", str(folder), "ls-files", "-z"], check=True, capture_output=True
+        ).stdout
+    )
+    if NFD_NAME.encode() in os.listdir(os.fsencode(folder)):  # noqa: PTH208  # the names as bytes
+        local._git_files(folder)  # the control: git reads the name as the folder holds it
+    git(folder, "config", "core.precomposeUnicode", "true")
+    with pytest.raises(LocalRunError, match="differs from the name on disk"):
+        local._git_files(folder)
+
+
+def test_a_composed_tracked_name_over_a_decomposed_file_is_read_where_git_composes(
+    tmp_path: Path,
+) -> None:
+    """The usual state on a Mac: the index holds the composed name, the folder may hold
+    either form, and git composes what it reads, so the two are one name to its excludes."""
+    folder = tracked_two_pages(tmp_path)
+    git(folder, "config", "core.precomposeUnicode", "true")
+    (folder / NFD_NAME).write_text("FROM_THE_BRANCH=1\n")
+    tracked_under(folder, NFC_NAME)
+    assert PurePosixPath(NFC_NAME) in local._git_files(folder).names
 
 
 def test_a_deleted_tracked_file_your_excludes_name_does_not_stop_the_run(tmp_path: Path) -> None:

@@ -42,6 +42,7 @@ import stat
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -579,6 +580,51 @@ def _staged(git: str, folder: Path, tracked: Collection[PurePosixPath]) -> set[P
     return {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
 
 
+def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]) -> None:
+    """Refuse each of `names`, tracked files in `folder`, that the disk holds under another
+    name: one whose path has a part its folder does not list byte for byte.
+
+    On a volume that folds case, or the form of an accented letter, a file of the
+    developer's answers to a name the branch tracks that differs from its own, and git's
+    excludes, which fold ASCII case at most, do not match the two. With every part listed as
+    it is tracked, the excludes are matched against the names the disk holds. Each folder is
+    listed once. With core.precomposeUnicode true, git composes each name it reads from a
+    folder, so the listed names are composed here too. Raises LocalRunError.
+    """
+    asked = ["config", "--bool", "--default", "false", "--get", "core.precomposeUnicode"]
+    composes = _run_git(git, folder, asked).strip() == b"true"
+    listings: dict[PurePosixPath, frozenset[bytes]] = {}
+
+    def listing(inside: PurePosixPath) -> frozenset[bytes]:
+        if inside not in listings:
+            try:
+                found = os.listdir(os.fsencode(folder / inside))  # noqa: PTH208  # as bytes
+            except OSError:
+                found = []  # not a folder that can be listed, so nothing in it is as tracked
+            if composes:
+                found = [os.fsencode(unicodedata.normalize("NFC", os.fsdecode(n))) for n in found]
+            listings[inside] = frozenset(found)
+        return listings[inside]
+
+    def as_tracked(name: PurePosixPath) -> bool:
+        return all(
+            os.fsencode(part) in listing(PurePosixPath(*name.parts[:depth]))
+            for depth, part in enumerate(name.parts)
+        )
+
+    others = sorted(name for name in names if not as_tracked(name))
+    if others:
+        shown = ", ".join(_shown(name) for name in others[:_NAMED])
+        more = f" and {len(others) - _NAMED} more" if len(others) > _NAMED else ""
+        raise LocalRunError(
+            f"{shown}{more}: tracked by the branch and changed, staged or marked "
+            "assume-unchanged in this checkout, under a name that differs from the name on "
+            "disk, by case or by the form of an accented letter, so your own git excludes "
+            "cannot be matched to it and a file of yours may be under the branch's name; "
+            "remove or rename it, and check the branch out again"
+        )
+
+
 def _refuse_yours(
     git: str,
     folder: Path,
@@ -612,6 +658,7 @@ def _refuse_yours(
     marked = present(assumed) - changed
     if not changed and not marked:
         return
+    _refuse_other_names(git, folder, changed | marked)
     where = _run_git(
         git, folder, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
     )
