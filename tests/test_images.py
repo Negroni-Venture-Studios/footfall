@@ -139,7 +139,17 @@ def test_browsers_image_has_the_gate_and_the_ech_policy() -> None:
         "/etc/opt/chrome_for_testing/policies/managed",
     ):
         assert f"COPY {policy} {folder}/footfall.json" in text
-    assert json.loads((ROOT / policy).read_text()) == {
+    settings = json.loads((ROOT / policy).read_text())
+    # Chromium's spellchecker downloads a dictionary from redirector.gvt1.com when a fresh
+    # profile first sees a key press. Only the blocklist stops it. SpellcheckEnabled set to
+    # false still downloads the dictionary and turns the blocklist off, so it stays unset.
+    # The blocklist names all 57 languages for which Chromium has a dictionary, as
+    # components/spellcheck/common/spellcheck_common.cc lists them, so a new locale in the
+    # image brings no new download. en-US is the dictionary of the image's own locale.
+    blocklist = settings.pop("SpellcheckLanguageBlocklist")
+    assert "en-US" in blocklist
+    assert len(set(blocklist)) == len(blocklist) == 57
+    assert settings == {
         # The egress proxy refuses every ClientHello that hides its server name.
         "EncryptedClientHelloEnabled": False,
         # The rest would have Chromium call Google, which the proxy refuses: full Chromium
@@ -153,10 +163,6 @@ def test_browsers_image_has_the_gate_and_the_ech_policy() -> None:
         "SearchSuggestEnabled": False,
         "SafeBrowsingProtectionLevel": 0,
         "MetricsReportingEnabled": False,
-        # Playwright already passes --disable-component-update, yet full Chromium fetched a
-        # component from redirector.gvt1.com, Google's download host, early in one
-        # end-to-end run. The policy covers what the switch does not.
-        "ComponentUpdatesEnabled": False,
     }
 
 
