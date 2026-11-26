@@ -559,17 +559,37 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
 
 
 def _worktree_top(folder: Path) -> Path:
-    """The top of the git worktree `folder` lies in, all of which the tested branch decides,
-    or `folder` itself when git names none, as for a folder outside git."""
+    """The top of the git worktree `folder` lies in, all of which the tested branch decides.
+
+    git is asked first. When it cannot say, because it is missing or will not read the
+    repository, as one another user owns, the nearest folder at or above `folder` that holds
+    a `.git` is the top, found without git; with none, `folder` itself, as outside git.
+    Raises OutputError when a folder on the way cannot be looked in.
+    """
     git = shutil.which("git")
-    if git is None:
-        return folder
-    try:
-        where = _run_git(git, folder, ["rev-parse", "--show-toplevel"])
-    except LocalRunError:
-        return folder
-    top = os.fsdecode(where.removesuffix(b"\n"))
-    return Path(top) if top else folder
+    if git is not None:
+        try:
+            where = _run_git(git, folder, ["rev-parse", "--show-toplevel"])
+        except LocalRunError:
+            pass
+        else:
+            top = os.fsdecode(where.removesuffix(b"\n"))
+            if top:
+                return Path(top)
+    real = folder.resolve()
+    for candidate in (real, *real.parents):
+        try:
+            (candidate / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            why = error.strerror or type(error).__name__
+            raise OutputError(
+                f"cannot tell where the tested checkout's top is: {_shown(candidate)} cannot "
+                f"be looked in ({why})"
+            ) from None
+        return candidate
+    return folder
 
 
 def _known_git_folders(folder: Path) -> frozenset[_Identity]:

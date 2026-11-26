@@ -795,6 +795,44 @@ async def test_a_link_the_branch_commits_outside_the_tested_folder_is_refused_to
     assert list(elsewhere.iterdir()) == []
 
 
+@pytest.mark.parametrize("git", ["refuses", "missing"])
+async def test_a_checkout_git_will_not_read_is_still_found_by_its_git_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git: str
+) -> None:
+    """Fix round 2, Minor 3: with --all-files, git may refuse the repository, as it does one
+    another user owns, and the check fell back to the tested folder, so a link the branch
+    commits between that folder and the checkout's top was followed again. Without git's
+    answer, the nearest folder above that holds a `.git` is the top."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    top = tmp_path / "checkout"
+    two_pages(top)
+    (top / "x").symlink_to(elsewhere)
+    git_folder = top / ".git"
+    git_folder.mkdir()  # git is not asked to read it here
+    monkeypatch.chdir(top)
+    if git == "missing":
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+    else:
+        real = local._run_git
+
+        def refusing(git: str, folder: Path, arguments: Sequence[str], **options: Any) -> bytes:
+            if "--show-toplevel" in arguments:
+                raise LocalRunError("git cannot read the files (fatal: detected dubious ownership)")
+            return real(git, folder, arguments, **options)
+
+        monkeypatch.setattr(local, "_run_git", refusing)
+    assert local._worktree_top(top / "app") == top.resolve()
+    with pytest.raises(OutputError, match="is a link"):
+        local._prepare_results(Path("x") / "results", [], local._worktree_top(top / "app"))
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_outside_git_the_tested_folder_is_the_top(tmp_path: Path) -> None:
+    folder = two_pages(tmp_path)
+    assert local._worktree_top(folder) == folder
+
+
 @pytest.fixture
 def search_only(tmp_path: Path) -> Iterator[Path]:
     """A folder its owner may search and write in but not read, mode 0o311, as a shared
