@@ -413,13 +413,14 @@ def test_a_refusal_sent_before_the_request_is_read_still_reaches_the_client() ->
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(path))
         listener.listen()
+        listener.settimeout(10)  # a client that never connects cannot hold the stand-in
 
         def refuse() -> None:
             connection, _ = listener.accept()
             with connection:
                 connection.sendall(b'{"ok": false, "error": "the proxy answers only user 0"}\n')
 
-        thread = threading.Thread(target=refuse)
+        thread = threading.Thread(target=refuse, daemon=True)  # nor hold pytest at exit
         thread.start()
         try:
             client = ProxyControlClient(path, timeout=10)
