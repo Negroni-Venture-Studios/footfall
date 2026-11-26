@@ -21,7 +21,7 @@ SKIPPED = {
     ".pytest_cache",
 }
 # The plans quote the links of files they describe, as examples, not as links.
-PLANS = ROOT / "docs" / "superpowers"
+PLANS = ROOT / "docs" / "plans"
 DOCUMENTS = sorted(
     p
     for p in ROOT.glob("**/*.md")

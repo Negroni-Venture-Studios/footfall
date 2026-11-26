@@ -54,7 +54,7 @@ module-root = ""
 target-version = "py312"
 line-length = 100
 # The plan's code blocks are sketches of later tasks, not code.
-extend-exclude = ["docs/superpowers"]
+extend-exclude = ["docs/plans", "docs/specs"]
 
 [tool.ruff.lint]
 select = [

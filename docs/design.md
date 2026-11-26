@@ -241,7 +241,7 @@ Footfall's skills tell a coding agent when to call it (quick mode after a change
 
 Agents connect in one of three ways. A Claude Code cloud session, or claude.ai, adds Footfall as a custom connector and signs in through Footfall's OAuth server; cloud sessions get Tasks only from connectors. A local Claude Code session can do the same, or send a bearer token made on Footfall's web page, read from an environment variable named in the project's `.mcp.json`. Scripts and continuous integration use bearer tokens.
 
-The details are in the [design for the 2026-07-28 features](superpowers/specs/2026-11-24-mcp-2026-07-28-design.md).
+The details are in the [design for the 2026-07-28 features](specs/2026-11-24-mcp-2026-07-28-design.md).
 
 ### What people see
 
