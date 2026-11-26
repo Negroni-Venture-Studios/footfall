@@ -203,6 +203,44 @@ async def test_runs_names_every_run_the_proxy_holds(live: Live) -> None:
     assert await call(live.client.runs) == []
 
 
+async def test_a_revoke_of_a_runs_last_address_lets_its_lookup_pool_go(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R75, through the socket: a request whose name the system resolver looks up
+    makes the run's pool; revoking the run's last address, with no listener of its own,
+    leaves the proxy holding nothing for the run, and the pool's thread ends."""
+    looked_up: list[str] = []
+
+    def getaddrinfo(host: str, port: int, *args: Any, **kwargs: Any) -> list[Any]:
+        looked_up.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    await call(live.client.allow, "127.0.0.1", RUN, ["api.example.com"])
+    server = await live.proxy.start("127.0.0.1", 0)
+    try:
+        reader, writer = await asyncio.open_connection(*server.sockets[0].getsockname()[:2])
+        writer.write(b"GET http://api.example.com/ HTTP/1.1\r\nHost: api.example.com\r\n\r\n")
+        await writer.drain()
+        async with asyncio.timeout(10):
+            await reader.read()  # 502: the guard keeps the test from reaching the address
+        writer.close()
+    finally:
+        server.close()
+    assert looked_up == ["api.example.com"]
+    assert lookup_threads(RUN) == 1
+    assert live.proxy.runs() == [RUN]
+    await call(live.client.revoke, "127.0.0.1")
+    assert live.proxy.runs() == []
+    async with asyncio.timeout(10):
+        while lookup_threads(RUN):
+            await asyncio.sleep(0.01)
+
+
+def lookup_threads(run_id: str) -> int:
+    return sum(t.name.startswith(f"footfall-lookup-{run_id}") for t in threading.enumerate())
+
+
 async def test_revoke_run_closes_the_runs_listeners(live: Live) -> None:
     await call(live.client.allow, APP, RUN, ["api.example.com"])
     await call(live.client.listen, "127.0.0.1", RUN)
