@@ -1760,6 +1760,34 @@ def test_a_tracked_name_the_folder_lists_differently_is_refused(
     assert local._shown(PurePosixPath(sub + tracked)) in str(refused.value)
 
 
+def listed_as(monkeypatch: pytest.MonkeyPatch, tracked: str, on_disk: str) -> None:
+    """Stand in for os.listdir, so that every folder shows the name `tracked` as `on_disk`."""
+    real = os.listdir
+
+    def aliasing(where: Any) -> list[Any]:
+        return [os.fsencode(on_disk) if n == os.fsencode(tracked) else n for n in real(where)]
+
+    monkeypatch.setattr(os, "listdir", aliasing)
+
+
+@pytest.mark.usefixtures("own_git_home")
+def test_a_tracked_folder_the_disk_lists_differently_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R80, pass 6: every part of the path is looked for, not the last alone. The
+    branch tracks a file in a folder whose name the top lists in another case."""
+    folder = tracked_two_pages(tmp_path)
+    git(folder, "config", "core.precomposeUnicode", "false")
+    (folder / "CAF\u00c9").mkdir()
+    (folder / "CAF\u00c9" / "prod.env").write_text(DEVELOPERS_SECRET)
+    tracked_under(folder, "prod.env", "CAF\u00c9/")
+    local._git_files(folder)  # the control: the top lists the folder as it is tracked
+    listed_as(monkeypatch, "CAF\u00c9", "caf\u00e9")
+    with pytest.raises(LocalRunError, match="differs from the name on disk") as refused:
+        local._git_files(folder)
+    assert local._shown(PurePosixPath("CAF\u00c9/prod.env")) in str(refused.value)
+
+
 @pytest.mark.parametrize(("tracked", "on_disk"), ALIASES)
 @pytest.mark.usefixtures("own_git_home")
 def test_a_tracked_name_that_opens_your_file_by_another_name_is_refused(
