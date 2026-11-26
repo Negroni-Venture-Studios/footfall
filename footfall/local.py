@@ -640,7 +640,9 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
             "assume-unchanged in this checkout, under a name that differs from the name on "
             "disk, by case or by the form of an accented letter, so your own git excludes "
             "cannot be matched to it and a file of yours may be under the branch's name; "
-            "remove or rename it, and check the branch out again"
+            "remove or rename it, and check the branch out again. If a fresh checkout is "
+            "refused the same way, the branch tracks two names that this volume holds as "
+            "one: fix that on the branch, or test from a volume that keeps them apart"
         )
 
 

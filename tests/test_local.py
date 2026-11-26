@@ -1695,7 +1695,8 @@ def test_your_repository_excludes_outrank_your_global_ones(tmp_path: Path) -> No
 def test_a_case_variant_of_an_excluded_name_is_refused_on_any_volume(tmp_path: Path) -> None:
     """Ruling R79: with core.ignoreCase false, git matches the developer's `prod.env` to the
     branch's PROD.ENV on no volume, though on a volume that ignores case both names open
-    the one file. The listing of excluded names ignores case whatever the setting."""
+    the one file. The listing of excluded names folds the case of ASCII letters whatever
+    the setting; ruling R80 sees to every other difference."""
     folder = tracked_two_pages(tmp_path)
     (folder / "PROD.ENV").write_text("FROM_THE_BRANCH=1\n")
     commit_all(folder)
@@ -1758,6 +1759,10 @@ def test_a_tracked_name_the_folder_lists_differently_is_refused(
     with pytest.raises(LocalRunError, match="differs from the name on disk") as refused:
         local._git_files(folder)
     assert local._shown(PurePosixPath(sub + tracked)) in str(refused.value)
+    # Pass 6, item 5: a clone of a branch that tracks both names would be refused the same
+    # way, and checking it out again would not help, so the refusal says what would.
+    assert "two names that this volume holds as one" in str(refused.value)
+    assert "a volume that keeps them apart" in str(refused.value)
 
 
 def listed_as(monkeypatch: pytest.MonkeyPatch, tracked: str, on_disk: str) -> None:
