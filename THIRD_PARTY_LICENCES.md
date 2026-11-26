@@ -22,6 +22,8 @@ The notice:
 
 ## Python packages Footfall runs on
 
+These packages use the Apache-2.0, BSD-3-Clause, MIT and PSF-2.0 licences. All four are permissive and compatible with distributing Footfall under MIT. On every pull request, CI runs `scripts/check_licences.py` over every installed package, these and the development tools alike, and fails on any licence it does not know to be compatible.
+
 | Package | Licence | Used for |
 |---|---|---|
 | anthropic | Apache-2.0 | The Anthropic API client, which drives the testers |
