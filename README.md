@@ -21,19 +21,21 @@ The agent asks Footfall over MCP to test its change. Each app's repository holds
 
 ## Status
 
-Footfall is at phase 1 of the [design](docs/design.md), which is the sandbox and the tester. Nothing here is ready to deploy. Phase 1 builds the runner, the gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and a demo app with planted bugs, all driven from the command line. Later phases add runs, deployment, the MCP endpoint and the live device wall.
+Footfall is at phase 1 of the [design](docs/design.md). That is the sandbox and the tester. Nothing here is ready to deploy. Phase 1 builds the runner, the gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and a demo app with planted bugs. All of it is driven from the command line. Later phases add runs, deployment, the MCP endpoint and the live device wall.
 
 ## Trying phase 1
 
-`footfall test <folder>` sends the testers at an app in a local folder. It runs in the development stack in [deploy/dev/compose.yaml](deploy/dev/compose.yaml), which needs Docker with gVisor, as on Linux, and an Anthropic API key. Build the images as [images/README.md](images/README.md) describes, then follow the commands at the top of the Compose file; `footfall test /repo/demo-app` tests [Tiny Tasks](demo-app/README.md), the demo app with planted bugs. Docker Desktop on a Mac has no gVisor, and `FOOTFALL_RUNTIME=runc` starts the containers under test without it, with a warning from every command. Never set it on a server.
+`footfall test <folder>` sends the testers at an app in a local folder. It runs in the development stack in [deploy/dev/compose.yaml](deploy/dev/compose.yaml). The stack needs an Anthropic API key and Docker with gVisor. Docker has gVisor on Linux. Build the images as [images/README.md](images/README.md) describes. Then follow the commands at the top of the Compose file. `footfall test /repo/demo-app` tests the demo app, [Tiny Tasks](demo-app/README.md). It has planted bugs.
+
+Docker Desktop on a Mac has no gVisor. `FOOTFALL_RUNTIME=runc` starts the containers under test without it and every command prints a warning. Never set it on a server.
 
 ## Contributing and security
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) explains how to set up, test and propose changes.
-- Please report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
+- Please report vulnerabilities privately. [SECURITY.md](SECURITY.md) says how.
 - Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
 - [AGENTS.md](AGENTS.md) holds the working rules for AI coding agents.
 
 ## Licence
 
-Footfall is published by [Negroni Venture Studios](https://negroniventurestudios.com/) under the [MIT licence](LICENSE). The Footfall name identifies this project; if you ship a fork as your own product, please see [TRADEMARKS.md](TRADEMARKS.md). The third-party software and assets Footfall uses are listed in [THIRD_PARTY_LICENCES.md](THIRD_PARTY_LICENCES.md).
+Footfall is published by [Negroni Venture Studios](https://negroniventurestudios.com/) under the [MIT licence](LICENSE). The Footfall name identifies this project. If you ship a fork as your own product please see [TRADEMARKS.md](TRADEMARKS.md). The third-party software and assets Footfall uses are listed in [THIRD_PARTY_LICENCES.md](THIRD_PARTY_LICENCES.md).
