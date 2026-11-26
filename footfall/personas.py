@@ -186,7 +186,7 @@ def load_personas(devices: Mapping[str, Device], path: Path = PERSONAS) -> dict[
         persona_id = _text(path, label, entry, "id")
         if not _PERSONA_ID.fullmatch(persona_id):
             raise PersonaError(
-                f"{path}: {label}: id must be lower-case letters, digits and hyphens, "
+                f"{path}: {label}: id must be lower-case letters, digits, and hyphens, "
                 "starting with a letter, at most 32 characters"
             )
         if persona_id in personas:

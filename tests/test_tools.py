@@ -172,7 +172,7 @@ def test_tool_names_match_the_prompt() -> None:
     prompt = system_prompt(persona, devices[persona.device], brief, "App", None)
     match = re.search(r"small set of tools\s+\(([^)]*)\)", prompt)
     assert match is not None
-    named = re.split(r",\s*|\s+and\s+", match.group(1))
+    named = re.split(r",\s*(?:and\s+)?|\s+and\s+", match.group(1))
     assert set(named) == {t["name"] for t in TOOLS}
 
 
@@ -539,7 +539,7 @@ async def test_scroll_direction_is_checked(session: MakeSession) -> None:
     s = await session()
     outcome = await s.executor.run("scroll", {"direction": "sideways"})
     assert outcome.error is True
-    assert "up, down, left or right" in outcome.text
+    assert "up, down, left, or right" in outcome.text
 
 
 async def test_look_takes_a_new_screenshot(session: MakeSession) -> None:

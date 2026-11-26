@@ -414,7 +414,7 @@ class _Run:
         elif not isinstance(name, str) or name not in _TOOL_NAMES:
             problem, why = (
                 f"There is no tool called {quote(str(name), 40)}, so nothing was run. The "
-                "tools are look, tap, type, scroll, go and finish.",
+                "tools are look, tap, type, scroll, go, and finish.",
                 NOT_A_TOOL,
             )
         if problem is not None:

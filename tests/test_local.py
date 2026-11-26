@@ -1904,7 +1904,7 @@ def test_a_folder_that_cannot_be_listed_is_named_with_the_reason(
     else:
         assert said.startswith(f"cannot list {local._shown(folder)} (")
     assert "Permission denied" in said
-    assert "the changed, staged or assume-unchanged files" in said
+    assert "the changed, staged, or assume-unchanged files" in said
     assert "differs from the name on disk" not in said
 
 

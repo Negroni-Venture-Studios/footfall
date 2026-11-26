@@ -271,7 +271,7 @@ def _path_problem(value: str) -> str | None:
         unicodedata.category(ch) in _NOT_IN_PATHS for ch in value
     ):
         return (
-            "must not contain a backslash, whitespace, a # or a control or invisible "
+            "must not contain a backslash, whitespace, a #, or a control or invisible "
             f"character, not {value!r}"
         )
     path = value.split("?", 1)[0]
@@ -380,7 +380,7 @@ def _test_section(table: Mapping[str, Any], problems: list[str]) -> TestSection:
             if not _PERSONA_NAME.fullmatch(item):
                 problems.append(
                     f"{field}: must start with a lower-case letter and then use lower-case "
-                    f"letters, digits and hyphens, at most 32 characters in all, not {item!r}"
+                    f"letters, digits, and hyphens, at most 32 characters in all, not {item!r}"
                 )
         seen_ids: set[str] = set()
         for field, item in entries:
@@ -549,7 +549,7 @@ def load_brief(repo: Path, manifest: Manifest, name: str = "default") -> Brief:
     if not _BRIEF_NAME.fullmatch(name):
         raise ManifestError(
             [
-                f"brief name {name!r}: must be lower-case letters, digits and hyphens, "
+                f"brief name {name!r}: must be lower-case letters, digits, and hyphens, "
                 "starting with a letter or digit, at most 64 characters"
             ]
         )

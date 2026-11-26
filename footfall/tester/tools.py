@@ -110,7 +110,7 @@ _FINISH_FIELDS: Final = ("summary", "score", "goal_reached", "findings")
 _NET_ERROR: Final = re.compile(r"net::ERR_[A-Z0-9_]{1,60}")
 _DIRECTIONS: Final = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 _GO_HELP: Final = (
-    '`to` must be "back", "reload" or a path on the app that starts with a single /, '
+    '`to` must be "back", "reload", or a path on the app that starts with a single /, '
     "such as /settings or /search?q=socks; a full address is never accepted"
 )
 # Whether the focused element takes typed text, looking into open shadow roots and
@@ -819,7 +819,7 @@ class Executor:
         _check_fields(data, ("direction",), shown=self._key)
         direction = data["direction"]
         if not isinstance(direction, str) or direction not in _DIRECTIONS:
-            raise ToolError("`direction` must be one of up, down, left or right")
+            raise ToolError("`direction` must be one of up, down, left, or right")
         width, height = self._viewport()
         sx, sy = _DIRECTIONS[direction]
         dx, dy = sx * width * SCROLL_SHARE, sy * height * SCROLL_SHARE

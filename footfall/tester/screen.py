@@ -300,7 +300,7 @@ async def capture(
         raise _unexpected("`entries` or `title` is missing or of the wrong type")
     address = data.get("href")
     if not isinstance(address, str) or len(address) > MAX_ADDRESS:
-        raise _unexpected("`href` is missing, of the wrong type or too long")
+        raise _unexpected("`href` is missing, of the wrong type, or too long")
     listed_total = _count(total, 10**9)
     if listed_total is None:
         raise _unexpected("`total` is not a count")

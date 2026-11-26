@@ -627,7 +627,7 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
                 where = f"{_shown(inside)} in {_shown(folder)}" if inside.parts else _shown(folder)
                 raise LocalRunError(
                     f"cannot list {where} ({why}), so Footfall cannot tell whether the "
-                    "changed, staged or assume-unchanged files the branch tracks there are "
+                    "changed, staged, or assume-unchanged files the branch tracks there are "
                     "under their own names on disk; let it be listed, or pass --all-files"
                 ) from None
             if composes:
@@ -646,7 +646,7 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
         shown = ", ".join(_shown(name) for name in others[:_NAMED])
         more = f" and {len(others) - _NAMED} more" if len(others) > _NAMED else ""
         raise LocalRunError(
-            f"{shown}{more}: tracked by the branch and changed, staged or marked "
+            f"{shown}{more}: tracked by the branch and changed, staged, or marked "
             "assume-unchanged in this checkout, under a name that differs from the name on "
             "disk, by case or by the form of a letter, so your own git excludes cannot be "
             "matched to it and a file of yours may be under the branch's name; "
@@ -1251,7 +1251,9 @@ def _copy_name(
                 f"{_GIT_ADVICE}"
             )
         if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
-            raise LocalRunError(f"cannot copy {_shown(name)}: it is not a file, a link or a folder")
+            raise LocalRunError(
+                f"cannot copy {_shown(name)}: it is not a file, a link, or a folder"
+            )
         target = _open_folders(target_top, parents, create=True, name=name)
         try:
             if stat.S_ISLNK(info.st_mode):

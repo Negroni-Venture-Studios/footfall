@@ -533,7 +533,7 @@ def _entries(
             ):
                 raise RunnerError(
                     f"{what} contains {_kind(info.st_mode)} at {show(here / name)}; "
-                    "only files, folders and symbolic links are copied"
+                    "only files, folders, and symbolic links are copied"
                 )
             yield here, dirfd, name, info  # one at a time: a folder may hold millions
     except _Deep as deep:
@@ -899,7 +899,7 @@ class RunnerService:
         if not 1 <= proxy_port <= 65535:
             raise ValueError(f"proxy_port out of range: {proxy_port}")
         if step_timeout <= 0 or disk_budget <= 0 or disk_interval <= 0:
-            raise ValueError("step_timeout, disk_budget and disk_interval must be positive")
+            raise ValueError("step_timeout, disk_budget, and disk_interval must be positive")
         if lifetime <= 0:
             raise ValueError("a run's lifetime must be positive")
         if not runs.is_absolute():
