@@ -615,6 +615,38 @@ def _refuse_yours(
         )
 
 
+def _refuse_a_link_into(folder: Path) -> None:
+    """Refuse a tested folder whose path, as given, goes through a link inside a checkout.
+
+    The branch can commit the tested folder, or a folder between it and the checkout's top,
+    as a link out of the checkout. Every later step that resolves the path would then lose
+    the checkout, and with it the folders where a link is refused. So the path is walked as
+    it was given, from the root, one name at a time with lstat: once a folder on the way
+    holds a `.git`, a link below it is refused. Links above any checkout, such as /tmp on a
+    Mac, are the operator's own. Raises LocalRunError.
+    """
+    here = Path(folder.absolute().anchor)
+    inside: Path | None = None
+    for part in folder.absolute().parts[1:]:
+        here = here / part
+        try:
+            linked = stat.S_ISLNK(here.lstat().st_mode)
+        except FileNotFoundError:
+            return  # a folder that is not there; reading the manifest says so
+        except OSError as error:
+            why = error.strerror or type(error).__name__
+            raise LocalRunError(f"cannot look at {_shown(here)} ({why})") from None
+        if linked and inside is not None:
+            raise LocalRunError(
+                f"{_shown(here.relative_to(inside))} in the checkout at {_shown(inside)} is a "
+                f"link, and the folder to test, {_shown(folder)}, is reached through it; a "
+                "branch's link could lead the run out of its checkout, so name the folder by "
+                "its own path, if it is one to test at all"
+            )
+        if inside is None and not linked and os.path.lexists(here / ".git"):
+            inside = here
+
+
 def _default_excludes() -> list[Path]:
     """Where git reads the global excludes when core.excludesFile is unset: in
     $XDG_CONFIG_HOME, or in $HOME/.config without it; nowhere when neither is set."""
@@ -1513,6 +1545,7 @@ async def test_folder(
     """
     if all_files and untracked:
         raise ValueError("untracked and all_files cannot both be asked for")
+    _refuse_a_link_into(folder)
     spend = RunSpend(cost_ceiling_usd)
     manifest = load_manifest(folder)
     brief = load_brief(folder, manifest, brief_name)

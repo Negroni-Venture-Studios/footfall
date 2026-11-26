@@ -868,6 +868,49 @@ def test_outside_git_the_tested_folder_is_the_top(tmp_path: Path) -> None:
     assert local._worktree_top(folder) == folder
 
 
+async def test_a_tested_folder_reached_through_a_link_in_its_checkout_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 3's observation: the branch can commit the tested folder, or one between it and
+    the checkout's top, as a link out of the checkout. Every path that resolved the folder
+    then lost the checkout, and links above the results were followed. The folder's path
+    is walked as given, and a link inside a checkout on the way is refused."""
+    outside = tmp_path / "outside"
+    two_pages(outside)  # outside/app, where the branch's link leads
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    top = tmp_path / "checkout"
+    top.mkdir()
+    (top / "app").symlink_to(outside / "app")
+    (top / "x").symlink_to(elsewhere)
+    git(top, "init", "-q")
+    commit_all(top)
+    monkeypatch.chdir(top)
+
+    async def no_browsers(engine: str, endpoint: str) -> Browser:
+        raise BrowserConnectError("not reached in this test")
+
+    runner = FakeRunner(lambda copy: "127.0.0.1:9")
+    with pytest.raises(LocalRunError, match="link") as refused:
+        await test_folder(
+            top / "app",
+            persona_ids=["grace"],
+            brief_name="default",
+            focus=None,
+            model_spec=FINISHES,
+            out=Path("x") / "results",
+            runner=runner,
+            budget=Budget(),
+            connect_browser=no_browsers,
+            workspaces=tmp_path / "workspaces",
+            all_files=True,
+        )
+    assert '"app"' in str(refused.value)
+    assert runner.calls == []
+    assert list(elsewhere.iterdir()) == []
+    local._refuse_a_link_into(outside / "app")  # the control: named by its own path
+
+
 @pytest.fixture
 def search_only(tmp_path: Path) -> Iterator[Path]:
     """A folder its owner may search and write in but not read, mode 0o311, as a shared
