@@ -39,8 +39,25 @@ def test_no_built_diagram_is_left_without_a_source() -> None:
 @pytest.mark.parametrize("source", sorted(build.DIAGRAMS.glob("*.svg")), ids=lambda p: p.name)
 def test_sources_use_the_palette_not_colours(source: pathlib.Path) -> None:
     """Colours come from the classes, so one drawing serves both themes."""
-    text = source.read_text()
+    text = build.without_preview(source.read_text())
     assert not re.search(r"#[0-9a-fA-F]{3,6}\b|rgb\(|(fill|stroke)=\"(?!none)", text)
+
+
+@pytest.mark.parametrize("source", sorted(build.DIAGRAMS.glob("*.svg")), ids=lambda p: p.name)
+def test_each_source_carries_its_light_preview(source: pathlib.Path) -> None:
+    """GitHub shows a source on its own, so it carries the light palette to look right there."""
+    text = source.read_text()
+    assert text == build.with_preview(text), f"run python3 docs/diagrams/build.py: {source.name}"
+    assert text.count(build.PREVIEW_OPEN) == 1
+
+
+def test_the_preview_never_reaches_a_built_copy() -> None:
+    """The built copies are made from the drawing alone, whatever preview the source holds."""
+    source = next(iter(sorted(build.DIAGRAMS.glob("*.svg")))).read_text()
+    bare = build.without_preview(source)
+    for theme in (0, 1):
+        assert build.build(source, theme) == build.build(bare, theme)
+        assert build.PREVIEW_OPEN not in build.build(source, theme)
 
 
 def test_every_diagram_is_used_in_the_documents() -> None:

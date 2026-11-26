@@ -1,4 +1,44 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 680" width="1000" height="680" role="img" aria-labelledby="t d">
+<style id="preview">svg { --bg: #fdfbf9; --surface: #ffffff; --tint: #f7efe8; --border: #ece3db; --border-strong: #d8cabe; --text: #1A0B00; --text-2: #6a5141; --text-3: #7a6253; --link: #B24400; --action: #FF6200; --on-action: #1A0B00; --ok: #127D47; --warn: #8a5a00; --danger: #a8322b; }
+svg { background: var(--bg); }
+text { font-family: Geist, sans-serif; font-size: 14px; fill: var(--text); }
+.bg { fill: var(--bg); }
+.box { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; }
+.zone { fill: var(--tint); stroke: var(--border); stroke-width: 1; }
+.zone-dashed {
+  fill: none; stroke: var(--border-strong); stroke-width: 1.25; stroke-dasharray: 6 5;
+}
+.box-dashed {
+  fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; stroke-dasharray: 6 5;
+}
+.key { fill: var(--surface); stroke: var(--link); stroke-width: 1.75; }
+.solid-action { fill: var(--action); }
+.solid-ok { fill: var(--ok); }
+.solid-warn { fill: var(--warn); }
+.solid-danger { fill: var(--danger); }
+.line { fill: none; stroke: var(--text-3); stroke-width: 1.5; }
+.line-accent { fill: none; stroke: var(--link); stroke-width: 1.75; }
+.line-ok { fill: none; stroke: var(--ok); stroke-width: 1.5; }
+.line-danger { fill: none; stroke: var(--danger); stroke-width: 1.5; }
+.line-dashed { fill: none; stroke: var(--text-3); stroke-width: 1.25; stroke-dasharray: 4 4; }
+.arrow { fill: var(--text-3); }
+.arrow-accent { fill: var(--link); }
+.arrow-ok { fill: var(--ok); }
+.arrow-danger { fill: var(--danger); }
+.title { font-size: 15px; font-weight: 600; }
+.label { font-size: 13px; fill: var(--text-2); }
+.small { font-size: 12px; fill: var(--text-3); }
+.heading { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; fill: var(--text-3); }
+.mono {
+  font-family: "Geist Mono", monospace; font-size: 12.5px; fill: var(--text-2);
+  font-variant-ligatures: none;
+}
+.accent { fill: var(--link); }
+.ok { fill: var(--ok); }
+.warn { fill: var(--warn); }
+.danger { fill: var(--danger); }
+.on-action { fill: var(--on-action); font-weight: 600; }
+</style>
 <title id="t">Footfall on one droplet: the parts that hold secrets never touch the code under test, and the parts that touch it hold nothing</title>
 <desc id="d">Agents and people reach Footfall through Caddy. The web process serves the pages, sign-in, the MCP endpoint and live updates. The orchestrator runs the queue, clones repositories, runs the testers and merges their findings; it alone talks to the Anthropic API and fetches code from GitHub. Both share the database and screenshots. Only the runner holds the Docker socket, and for each run it starts an app container for every persona and one browser container, all under gVisor with no secrets. The orchestrator drives the browsers through Playwright; the browsers reach the app; anything else either container fetches goes through the egress proxy, which allows only the hosts the run's manifest names.</desc>
 <defs>
