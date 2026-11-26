@@ -1625,7 +1625,7 @@ def test_a_copy_is_charged_what_the_measure_finds(tmp_path: Path) -> None:
         (source / "wide" / f"entry-{index:05d}").touch()
     (source / "small.txt").write_bytes(b"x" * 5000)
     (source / "link").symlink_to("small.txt")
-    assert _size(os.lstat(source / "wide")) > PAGE  # the case that matters
+    assert _size(os.lstat(source / "wide")) > PAGE  # a folder bigger than one page
     written = copy_tree(tmp_path, "source", tmp_path / "copy", limit=10**9)
     assert written == _disk_usage(source)
 

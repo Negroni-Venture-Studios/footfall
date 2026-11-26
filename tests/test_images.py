@@ -115,9 +115,10 @@ def test_the_browsers_image_serves_nothing_without_the_runners_command() -> None
 def test_dependabot_moves_playwright_on_its_own() -> None:
     """A Playwright update needs the browser image in the same pull request.
 
-    So Dependabot proposes Playwright apart from the weekly Python group, where its failing
-    image test would hold back every other update, and never moves the image by itself.
-    CONTRIBUTING.md says how a person adds the image to Dependabot's pull request.
+    So Dependabot opens Playwright's update on its own, apart from the weekly Python group.
+    In that group its failing image test would hold back every other update. Dependabot
+    never moves the browser image by itself. CONTRIBUTING.md says how a person adds the
+    image to Dependabot's pull request.
     """
     text = (ROOT / ".github" / "dependabot.yml").read_text()
     uv = text.split('package-ecosystem: "uv"', 1)[1].split("package-ecosystem:", 1)[0]

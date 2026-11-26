@@ -1,8 +1,8 @@
-# Footfall's own image: the runner, the egress proxy and the orchestrator all
-# run from it. Build from the repository root, as with Snug's image.
+# Footfall's own image. The runner, the egress proxy, and the orchestrator all
+# run from it. Build it from the repository root.
 #
-# Base images are pinned by digest, so a build always starts from the same
-# bytes; Dependabot proposes new digests.
+# Base images are pinned by digest. A build always starts from the same bytes.
+# Dependabot opens a pull request when a newer digest is published.
 
 FROM ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d AS uv
 
