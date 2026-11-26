@@ -1633,6 +1633,21 @@ def test_before_the_first_commit_every_tracked_file_counts_as_changed(tmp_path: 
     local._git_files(folder)  # the control: committed and unchanged, it is the branch's own
 
 
+def test_a_tracked_file_named_head_does_not_stop_the_run(tmp_path: Path) -> None:
+    """Fix round 5, Minor 1: without `--` after it, git cannot tell the commit HEAD from a
+    tracked file of that name, and exits 128 for the whole tree."""
+    folder = tracked_two_pages(tmp_path)
+    (folder / "HEAD").write_text("a file, not a commit\n")
+    commit_all(folder)
+    (folder / "HEAD").write_text("changed and staged\n")
+    git(folder, "add", "HEAD")
+    assert PurePosixPath("HEAD") in local._git_files(folder).names
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("HEAD\n")
+    with pytest.raises(LocalRunError, match='"HEAD"'):
+        local._git_files(folder)
+
+
 def test_a_case_variant_of_an_excluded_name_is_refused_on_any_volume(tmp_path: Path) -> None:
     """Ruling R79: with core.ignoreCase false, git matches the developer's `prod.env` to the
     branch's PROD.ENV on no volume, though on a volume that ignores case both names open

@@ -575,7 +575,8 @@ def _staged(git: str, folder: Path, tracked: Collection[PurePosixPath]) -> set[P
     asked = ["rev-parse", "--verify", "--quiet", "HEAD"]
     if not _run_git(git, folder, asked, ok=frozenset({0, 1})).strip():
         return set(tracked)
-    asked = ["diff-index", "--cached", "--name-only", "-z", "--relative", "HEAD"]
+    # The "--" keeps a tracked file named HEAD from being taken for the commit.
+    asked = ["diff-index", "--cached", "--name-only", "-z", "--relative", "HEAD", "--"]
     output = _run_git(git, folder, asked)
     return {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
 
