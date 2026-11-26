@@ -585,7 +585,8 @@ def _composed(name: bytes) -> bytes | None:
     """`name` as a folder lists it, as git reads it with core.precomposeUnicode true, where
     that is known: `name` itself when it is composed already, and its NFC form when `name`
     is exactly that form decomposed. Any other name git may compose in some other way, so
-    it is None, and matches no tracked name."""
+    it is None, and matches no tracked name. A bare singleton such as the KELVIN SIGN is
+    None as well, though git reads it unchanged."""
     text = os.fsdecode(name)
     nfc = unicodedata.normalize("NFC", text)
     if nfc == text:
@@ -599,17 +600,20 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
     """Refuse each of `names`, tracked files in `folder`, that the disk holds under another
     name: one whose path has a part its folder does not list byte for byte.
 
-    On a volume that folds case, or the form of a letter, a file of the
-    developer's answers to a name the branch tracks that differs from its own, and git's
-    excludes, which fold ASCII case at most, do not match the two. With every part listed as
-    it is tracked, the excludes are matched against the names the disk holds. Each folder is
-    listed once. With core.precomposeUnicode true, on macOS, where alone git honours it, git
-    composes each name it reads from a folder, so a listed name is composed here too where
-    the result is sure: a composed name is kept, and a name that is exactly its NFC form
-    decomposed is replaced by that form.
-    A name that is neither, such as one partly decomposed or one that holds a singleton
-    like the KELVIN SIGN beside a decomposed letter, is left out of the listing, since git
-    may read it as some other name; the tracked name is then refused. Raises LocalRunError.
+    On a volume that folds case, or the form of a letter, a file of the developer's can sit
+    under a name the branch tracks that is spelt differently from the file's own. git's
+    excludes fold ASCII case at most, so they do not match the two. With every part listed
+    as it is tracked, the excludes are matched against the names the disk holds. Each folder
+    is listed once.
+
+    With core.precomposeUnicode true, on macOS, where alone git honours it, git composes
+    each name it reads from a folder, so a listed name is composed here too where the result
+    is sure: a composed name is kept, and a name that is exactly its NFC form decomposed is
+    replaced by that form. A name that is neither, such as one partly decomposed or one that
+    holds a singleton like the KELVIN SIGN, is left out of the listing, since git may read
+    it as some other name; the tracked name is then refused. git reads a bare singleton
+    unchanged. Refusing a tracked name that holds one is stricter than git, and safe.
+    Raises LocalRunError.
     """
     asked = ["config", "--bool", "--default", "false", "--get", "core.precomposeUnicode"]
     # git honours the setting on macOS alone.
@@ -651,8 +655,9 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
             "disk, by case or by the form of a letter, so your own git excludes cannot be "
             "matched to it and a file of yours may be under the branch's name; "
             "remove or rename it, and check the branch out again. If a fresh checkout is "
-            "refused the same way, the branch tracks two names that this volume holds as "
-            "one: fix that on the branch, or test from a volume that keeps them apart"
+            "refused the same way, this volume cannot keep the name as the branch spells "
+            "it: rename it on the branch, or test from a volume that keeps names exactly "
+            "as they are spelt"
         )
 
 
@@ -677,8 +682,8 @@ def _refuse_yours(
 
     The excludes are matched with core.ignoreCase true, whatever the repository says, so
     that git folds the case of ASCII letters; it folds no other. A changed file whose
-    tracked name is not the name on disk, by case of any kind or by the form of an accented
-    letter, is refused before that, by `_refuse_other_names`, so the match is exact for
+    tracked name is not the name on disk, by case of any kind or by the form of a letter,
+    is refused before that, by `_refuse_other_names`, so the match is exact for
     every file that reaches it.
     """
 

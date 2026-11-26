@@ -1785,10 +1785,12 @@ def test_a_tracked_name_the_folder_lists_differently_is_refused(
         local._git_files(folder)
     assert local._shown(PurePosixPath(sub + tracked)) in str(refused.value)
     # Pass 6, item 5: a clone of a branch that tracks both names would be refused the same
-    # way, and checking it out again would not help, so the refusal says what would.
+    # way, and checking it out again would not help, so the refusal says what would. So
+    # would a clone of a branch that tracks one name this volume cannot keep as spelt.
     assert "by case or by the form of a letter," in str(refused.value)
-    assert "two names that this volume holds as one" in str(refused.value)
-    assert "a volume that keeps them apart" in str(refused.value)
+    assert "this volume cannot keep the name as the branch spells it" in str(refused.value)
+    assert "rename it on the branch" in str(refused.value)
+    assert "a volume that keeps names exactly as they are spelt" in str(refused.value)
 
 
 def listed_as(monkeypatch: pytest.MonkeyPatch, tracked: str, on_disk: str) -> None:
@@ -1846,7 +1848,7 @@ def test_a_name_git_does_not_compose_is_not_composed_before_the_match(
     ("raw", "as_git_reads_it"),
     [
         pytest.param("\u00e9e\u0301.env", "\u00e9\u00e9.env", id="partly decomposed"),
-        pytest.param("a\u0301\u0323.env", "\u1ea1\u0301.env", id="marks out of order"),
+        pytest.param("a\u0301\u0323.env", "\u00e1\u0323.env", id="marks out of order"),
         pytest.param("\u212ae\u0301.env", "\u212a\u00e9.env", id="singleton by a decomposed"),
     ],
 )
