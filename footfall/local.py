@@ -555,7 +555,7 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
         )
     tracked = {PurePosixPath(os.fsdecode(entry[2:])) for entry in entries}
     assumed = {PurePosixPath(os.fsdecode(entry[2:])) for entry in entries if entry[:1].islower()}
-    _refuse_yours(git, folder, listed, assumed)
+    _refuse_yours(git, folder, listed, tracked, assumed)
     others = listed("--others", "--exclude-standard") - tracked if untracked else set()
     paths = _git_folder_paths(git, folder)
     named = [*paths, *_superproject_git_folders(git, folder)]
@@ -568,10 +568,22 @@ def _git_files(folder: Path, *, untracked: bool = False) -> _Listing:
     )
 
 
+def _staged(git: str, folder: Path, tracked: Collection[PurePosixPath]) -> set[PurePosixPath]:
+    """The files in `folder` whose staged content differs from the last commit's, by their
+    names from `folder`; every one of `tracked` when there is no commit yet."""
+    asked = ["rev-parse", "--verify", "--quiet", "HEAD"]
+    if not _run_git(git, folder, asked, ok=frozenset({0, 1})).strip():
+        return set(tracked)
+    asked = ["diff-index", "--cached", "--name-only", "-z", "--relative", "HEAD"]
+    output = _run_git(git, folder, asked)
+    return {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
+
+
 def _refuse_yours(
     git: str,
     folder: Path,
     listed: Callable[..., set[PurePosixPath]],
+    tracked: Collection[PurePosixPath],
     assumed: Collection[PurePosixPath],
 ) -> None:
     """Refuse a tracked file that is changed in the checkout and that the developer's own
@@ -580,16 +592,24 @@ def _refuse_yours(
     keeps out of git, and a checkout can leave the developer's file there, as one does once a
     sparse checkout is disabled; it would then be copied as the branch's.
 
-    A file marked assume-unchanged (`assumed`) counts as changed, since git does not look at
-    it to say. A deleted file does not: the copy skips a tracked file that is missing.
+    A file is changed when the working tree's differs from the index, or when the index
+    differs from the last commit, as it does once `git add -u` has staged the developer's
+    file; with no commit, every one of `tracked` is. A file marked assume-unchanged
+    (`assumed`) counts as changed too, since git does not look at it to say. A file that is
+    gone does not: the copy skips a tracked file that is missing.
 
     The excludes are matched without regard to case, whatever core.ignoreCase says: on a
     volume that ignores case, a name that differs only by case opens the same file.
     """
 
+    def present(names: Collection[PurePosixPath]) -> set[PurePosixPath]:
+        return {name for name in names if os.path.lexists(folder / name)}
+
+    changed = present(_staged(git, folder, tracked))
     modified = listed("-m")
-    changed = modified - listed("-d") if modified else set()
-    marked = {name for name in assumed if os.path.lexists(folder / name)} - changed
+    if modified:
+        changed |= modified - listed("-d")
+    marked = present(assumed) - changed
     if not changed and not marked:
         return
     where = _run_git(
@@ -620,9 +640,9 @@ def _refuse_yours(
     yours = sorted(changed & excluded)
     if yours:
         refusals.append(
-            f"{named(yours)}: tracked by the branch, changed in this checkout, and named by "
-            "your own git excludes, so a file of yours may be under the branch's name; "
-            "remove or rename it, and check the branch out again"
+            f"{named(yours)}: tracked by the branch, changed or staged in this checkout, and "
+            "named by your own git excludes, so a file of yours may be under the branch's "
+            "name; remove or rename it, and check the branch out again"
         )
     yours = sorted(marked & excluded)
     if yours:

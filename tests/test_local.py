@@ -1574,6 +1574,64 @@ def test_a_refusal_tells_a_changed_file_from_one_marked_assume_unchanged(tmp_pat
     assert "--no-assume-unchanged" in marked
 
 
+def reset_and_staged(tmp_path: Path) -> Path:
+    """Ruling R79, the reviewer's sequence: the developer keeps app/prod.env out of git by
+    .git/info/exclude; a branch tracks that name; after a mixed `git reset` to the branch, a
+    routine `git add -u` stages the developer's file. Nothing is then modified in the
+    working tree, and the developer's content is under the branch's tracked name. Returns
+    the tested folder, one below the checkout's top."""
+    top = tmp_path / "checkout"
+    folder = two_pages(top)
+    git(top, "init", "-q", "-b", "main")
+    commit_all(top)
+    git(top, "checkout", "-q", "-b", "evil")
+    (folder / "prod.env").write_text("FROM_THE_BRANCH=1\n")
+    commit_all(top)
+    git(top, "checkout", "-q", "main")
+    with (top / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("prod.env\n")
+    (folder / "prod.env").write_text(DEVELOPERS_SECRET)
+    git(top, "reset", "-q", "evil")
+    git(top, "add", "-u")
+    assert git_output(top, "ls-files", "-m") == ""
+    assert git_output(top, "status", "--porcelain").splitlines() == ["M  app/prod.env"]
+    assert (folder / "prod.env").read_text() == DEVELOPERS_SECRET
+    return folder
+
+
+def test_a_staged_file_your_own_excludes_name_is_refused(tmp_path: Path) -> None:
+    """Ruling R79: a staged change counts as a change, by its name from the tested folder."""
+    folder = reset_and_staged(tmp_path)
+    with pytest.raises(LocalRunError, match=r'"prod\.env"') as refused:
+        local._git_files(folder)
+    assert "remove or rename" in str(refused.value)
+    assert "app/prod.env" not in str(refused.value)
+
+
+def test_a_staged_file_nobodys_excludes_name_is_copied(tmp_path: Path) -> None:
+    folder = reset_and_staged(tmp_path)
+    (folder.parent / ".git" / "info" / "exclude").write_text("")
+    assert PurePosixPath("prod.env") in local._git_files(folder).names
+
+
+def test_a_staged_file_that_is_gone_does_not_stop_the_run(tmp_path: Path) -> None:
+    """The copy skips a tracked file that is missing, staged or not."""
+    folder = reset_and_staged(tmp_path)
+    (folder / "prod.env").unlink()
+    local._git_files(folder)
+
+
+def test_before_the_first_commit_every_tracked_file_counts_as_changed(tmp_path: Path) -> None:
+    """Ruling R79: with no HEAD to compare with, every entry in the index is a change."""
+    folder = tracked_two_pages(tmp_path)
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("serve.py\n")
+    with pytest.raises(LocalRunError, match=r'"serve\.py"'):
+        local._git_files(folder)
+    commit_all(folder)
+    local._git_files(folder)  # the control: committed and unchanged, it is the branch's own
+
+
 def test_a_case_variant_of_an_excluded_name_is_refused_on_any_volume(tmp_path: Path) -> None:
     """Ruling R79: with core.ignoreCase false, git matches the developer's `prod.env` to the
     branch's PROD.ENV on no volume, though on a volume that ignores case both names open
@@ -2308,10 +2366,11 @@ def test_git_runs_with_a_bare_environment_and_no_input(
     monkeypatch.setattr(subprocess, "run", run)
     listing = local._git_files(folder, untracked=True)
     assert PurePosixPath("footfall.toml") in listing.names
-    # ls-files with each name's status, the sparse-checkout setting, ls-files for changed
-    # files, ls-files for the untracked files, then rev-parse for the git folder, the common
-    # one and a superproject, each run the same safe way.
-    assert len(calls) == 7
+    # ls-files with each name's status, the sparse-checkout setting, rev-parse for the last
+    # commit, of which there is none, ls-files for changed files, ls-files for the untracked
+    # files, then rev-parse for the git folder, the common one and a superproject, each run
+    # the same safe way.
+    assert len(calls) == 8
     assert "--show-superproject-working-tree" in calls[-1][0]
     allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL"}
     for command, options in calls:
