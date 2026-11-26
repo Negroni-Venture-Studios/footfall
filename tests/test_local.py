@@ -1522,11 +1522,14 @@ def test_a_relative_core_excludes_file_is_read_from_the_checkouts_top(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Fix round 3, Minor 2: git opens a relative core.excludesFile from the worktree's top,
-    not from wherever Footfall runs."""
-    folder = tracked_two_pages(tmp_path)
-    commit_all(folder)
-    (folder / ".git" / "my-excludes").write_text("serve.py\n")
-    git(folder, "config", "core.excludesFile", ".git/my-excludes")
+    not from wherever Footfall runs, and not from the tested folder, which here lies one
+    folder below the top."""
+    top = tmp_path / "checkout"
+    folder = two_pages(top)
+    git(top, "init", "-q")
+    commit_all(top)
+    (top / "my-excludes").write_text("serve.py\n")
+    git(top, "config", "core.excludesFile", "my-excludes")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
