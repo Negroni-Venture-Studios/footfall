@@ -46,10 +46,9 @@ pytestmark = pytest.mark.isolation
 PROXY_URL: Final = "http://footfall-proxy:3128"  # as footfall test gives it
 ASSETS: Final = ("example.com",)
 NOT_LISTED: Final = "is not on this client's allow list"
-# Fresh Chromium launches in the test of Chromium's own requests, and how long each is left
-# on the app after a persona has typed into it. The request one end-to-end run saw came
-# within seconds of the browser starting, so many short launches beat one long wait.
-LAUNCHES: Final = 6
+# Fresh Chromium launches in the test of Chromium's own requests, and how long each stays on
+# the app once the persona has typed.
+LAUNCHES: Final = 3
 QUIET: Final = 10.0
 # The trace categories that carry Chromium's network log, its own requests included.
 NETLOG: Final = ["disabled-by-default-netlog", "netlog"]
@@ -312,13 +311,14 @@ def traced_urls(trace: bytes) -> list[str]:
 async def test_chromium_asks_for_nothing_outside_the_app_while_a_persona_types(
     browsers: Browsers, proxy_log: ProxyLog
 ) -> None:
-    """Full Chromium makes no request of its own while personas fill in a form.
+    """Full Chromium makes no request of its own while a persona types into a form.
 
-    One end-to-end run saw the proxy refuse redirector.gvt1.com, Google's download host,
-    from the browser container within seconds of the browser starting. The proxy sees only
-    the host of an encrypted connection, so this test reads Chromium's own network log from
-    a trace and names each URL it tried. Each round launches a fresh Chromium, as each run
-    does, because the request came early in a browser's life.
+    Chromium's spellchecker downloads a dictionary from redirector.gvt1.com, Google's
+    download host, when a fresh profile first sees a key press in a text field. Playwright's
+    `fill` does not wake the spellchecker. A key press does, and the tester's type tool
+    sends key presses. The proxy sees only the host of an encrypted connection, so this test
+    reads Chromium's own network log from a trace and names each URL Chromium tried. Each
+    round launches a fresh Chromium, as each run does.
 
     The control: each round's trace must hold the form page itself, so that a trace that
     recorded nothing cannot pass.
@@ -334,7 +334,8 @@ async def test_chromium_asks_for_nothing_outside_the_app_while_a_persona_types(
             assert await _goto(page, form) == 200
             await page.get_by_label("Username").fill("tester")
             await page.get_by_label("Password").fill("not a real password")
-            await page.get_by_label("Notes").fill("A short note with a mispelt word.")
+            await page.get_by_label("Notes").click()
+            await page.keyboard.type("A short note with a mispelt word.")
             await page.screenshot(type="jpeg")
             async with page.expect_navigation(timeout=30_000):
                 await page.get_by_role("button", name="Sign in").click()
