@@ -604,3 +604,41 @@ async def test_install_twice_is_refused(loopback_browser: Browser) -> None:
             await guard.install(context)
     finally:
         await context.close()
+
+
+# ---------------------------------------------------------------- a secret on the page
+
+PAGE_SECRET = "Pw9-kQ2_xZ7vRm4LtB8nC3sY6hJ1dF5g"  # gitleaks:allow
+
+
+class _Dialog:
+    type = "alert"
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    async def dismiss(self) -> None:
+        return None
+
+
+class _Download:
+    def __init__(self, name: str) -> None:
+        self.suggested_filename = name
+
+    async def cancel(self) -> None:
+        return None
+
+
+async def test_a_dialog_or_download_is_redacted_before_it_is_cut() -> None:
+    """Fix round 2, Minor 1: a dialog's message and a download's name are page text, cut to
+    `DETAIL_CAP` as they are recorded, so the guard redacts them, after cleaning, before
+    the cut; a secret split by a control character is found too."""
+    from footfall.tester.tools import Redactor
+
+    guard = Guard("http://127.0.0.1:8000", frozenset(), redact=Redactor({PAGE_SECRET}))
+    split = PAGE_SECRET[:7] + "\x01" + PAGE_SECRET[7:]
+    await guard._dismiss(_Dialog("m" * (DETAIL_CAP - 20) + split))  # type: ignore[arg-type]
+    await guard._cancel(_Download("d" * (DETAIL_CAP - 20) + split))  # type: ignore[arg-type]
+    details = [event.detail for event in guard.drain()]
+    assert len(details) == 2
+    assert not any(PAGE_SECRET[:7] in detail for detail in details), details

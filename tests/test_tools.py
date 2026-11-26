@@ -1577,7 +1577,7 @@ def no_browser_executor(tmp_path: Path) -> tuple[Executor, Trace]:
         touch=False,
         redact=frozenset({SECRET_32}),
     )
-    executor._screen = cast(Screen, SimpleNamespace(path="/"))
+    executor._screen = cast(Screen, SimpleNamespace(path="/", traced_path=""))
     executor._shot = "01"
     executor._shots.append("01")
     return executor, trace

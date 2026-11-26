@@ -35,7 +35,8 @@ The guard has known gaps, and the egress proxy and the container's network cover
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import SplitResult, urlsplit
@@ -53,6 +54,7 @@ from playwright.async_api import (
 )
 from playwright.async_api import Error as PlaywrightError
 
+from footfall.tester.report import clean_text
 from footfall.tester.screen import quote
 
 __all__ = ["DETAIL_CAP", "MAX_EVENTS", "Guard", "GuardEvent", "Kind"]
@@ -156,8 +158,17 @@ async def _quietly(action: Awaitable[object], what: str) -> None:
 class Guard:
     """The allow rule for one browser context, and the record of what it refused."""
 
-    def __init__(self, app_origin: str, assets: frozenset[str]) -> None:
+    def __init__(
+        self,
+        app_origin: str,
+        assets: frozenset[str],
+        *,
+        redact: Callable[[str], str] = lambda text: text,
+    ) -> None:
+        """`redact` takes the run's secrets out of page text, a dialog's message, say, after
+        it is cleaned and before it is cut, so that no cut leaves part of one."""
         self.origin, self._app = _parse_origin(app_origin)
+        self._redact = redact
         self._assets = frozenset(host.lower() for host in assets)
         self._events: dict[tuple[Kind, str], int] = {}
         self._distinct = 0
@@ -194,6 +205,10 @@ class Guard:
         return True
 
     # ------------------------------------------------------------------ the record
+
+    def _quote(self, text: str) -> str:
+        """Page text for a detail: made one line, redacted, then cut and quoted."""
+        return quote(self._redact(clean_text(text, sys.maxsize, single_line=True)), DETAIL_CAP)
 
     def record(self, kind: Kind, detail: str) -> None:
         """Add an event. Repeats are counted; past `MAX_EVENTS`, new ones are summed by kind."""
@@ -304,7 +319,7 @@ class Guard:
         if self.on_app(page.url):
             parts = urlsplit(page.url)
             path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
-            self.record("popup", f"closed a new window for {quote(path, DETAIL_CAP)}")
+            self.record("popup", f"closed a new window for {self._quote(path)}")
         else:
             self.record("popup", "closed a new window")
         task = asyncio.get_running_loop().create_task(_quietly(page.close(), "close a window"))
@@ -325,7 +340,7 @@ class Guard:
             what = _DIALOGS.get(dialog.type, "a dialog")
             message = dialog.message
             if message.strip():
-                self.record("dialog", f"dismissed {what}: {quote(message, DETAIL_CAP)}")
+                self.record("dialog", f"dismissed {what}: {self._quote(message)}")
             else:
                 self.record("dialog", f"dismissed {what}")
         finally:
@@ -335,7 +350,7 @@ class Guard:
         try:
             name = download.suggested_filename
             if name.strip():
-                self.record("download", f"cancelled a download of {quote(name, DETAIL_CAP)}")
+                self.record("download", f"cancelled a download of {self._quote(name)}")
             else:
                 self.record("download", "cancelled a download")
         finally:

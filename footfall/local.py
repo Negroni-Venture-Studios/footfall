@@ -70,7 +70,7 @@ from footfall.tester.loop import Budget, RunSpend, run_persona
 from footfall.tester.model import model_from_spec
 from footfall.tester.report import OBSERVATIONS, PersonaReport, clean_text, strip_invisible
 from footfall.tester.screen import quote
-from footfall.tester.tools import REDACTED, Executor
+from footfall.tester.tools import REDACTED, Executor, Redactor
 from footfall.tester.trace import Trace
 
 __all__ = [
@@ -1109,7 +1109,11 @@ class _Run:
                 context = await open_context(
                     browser, persona, device, self.descriptors, app_origin, self.proxy_url
                 )
-                guard = Guard(app_origin, frozenset(self.manifest.browser.assets))
+                guard = Guard(
+                    app_origin,
+                    frozenset(self.manifest.browser.assets),
+                    redact=Redactor(self.redact),
+                )
                 await guard.install(context)
                 page = await context.new_page()
                 await page.goto(app_origin + "/", timeout=GOTO_TIMEOUT_MS)

@@ -568,7 +568,7 @@ def without_a_browser(monkeypatch: pytest.MonkeyPatch) -> Connect:
         return stand_in
 
     monkeypatch.setattr(local, "open_context", opened)
-    monkeypatch.setattr(local, "Guard", lambda origin, assets: stand_in)
+    monkeypatch.setattr(local, "Guard", lambda origin, assets, **options: stand_in)
     monkeypatch.setattr(local, "Executor", lambda *arguments, **options: stand_in)
     return connect_browser
 

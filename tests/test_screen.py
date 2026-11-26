@@ -671,3 +671,36 @@ def test_the_tap_centre_is_floored_as_the_snapshot_floors_its_hit_test() -> None
     assert parsed is not None
     assert parsed.centre == (10, 10)  # 10.9 floored; rounded, it would be 11
     assert "Math.floor((Math.max(r.left, 0) + Math.min(r.right, width)) / 2)" in SNAPSHOT_JS
+
+
+# ---------------------------------------------------------------- a secret on the page
+
+PAGE_SECRET = "Pw9-kQ2_xZ7vRm4LtB8nC3sY6hJ1dF5g"  # gitleaks:allow
+SPLIT = PAGE_SECRET[:7] + "\x01" + PAGE_SECRET[7:]  # split by a character cleaning drops
+
+
+async def test_page_text_is_cleaned_and_redacted_before_it_is_cut() -> None:
+    """Fix round 2, Minor 1: the path a page is at and the names of its elements reach the
+    trace cut to their caps, and the trace redacted them only then, so a secret the page
+    showed beside padding left a prefix. capture now makes the trace's copies with the
+    executor's fit, which cleans, redacts and then cuts. What the model sees is unchanged:
+    it may show what the model typed."""
+    from footfall.tester.report import PAGE_CAP
+    from footfall.tester.tools import Redactor
+
+    redactor = Redactor({PAGE_SECRET})
+    page = ShotPage(JPEG_START + bytes(10))
+    page.url = "http://127.0.0.1:8000/" + "p" * (PAGE_CAP - 20) + SPLIT
+    padding = "n" * (screen_module.TEXT_CAP - 20)
+    screen = await capture(
+        cast(Page, page),
+        evaluate=snapshot_of(good(name=padding + SPLIT)),
+        fit=lambda text, cap: redactor.fit(text, cap, single_line=True),
+    )
+    (element,) = screen.elements
+    traced = [screen.traced_path, element.traced_name]
+    assert not any(PAGE_SECRET[:7] in text for text in traced), traced
+    assert all("[password]" in text or text.endswith("…") for text in traced), traced
+    # The model's view: cleaned and cut, unredacted.
+    assert element.name.startswith(padding + PAGE_SECRET[:7])
+    assert screen.path.startswith("/" + "p" * (PAGE_CAP - 20) + PAGE_SECRET[:7])

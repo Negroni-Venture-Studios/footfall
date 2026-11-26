@@ -440,6 +440,11 @@ def _check_finish(data: Mapping[str, Any], shown: Callable[[str], str] = _cut_ke
                     raise ToolError(f"finding {index}: unexpected field `{shown(str(key))}`")
 
 
+def _traced_path(screen: Screen) -> str:
+    """A screen's path as the trace keeps it, redacted before it was cut."""
+    return screen.traced_path or screen.path
+
+
 def _failure(error: BaseException, fit: Callable[[str, int], str]) -> str:
     """What the trace says about an exception that ended a step, its message as `fit` makes
     it one line, redacts and cuts it."""
@@ -631,8 +636,8 @@ class Executor:
             target_name=None,
             x=None,
             y=None,
-            path_before=self._screen.path,
-            path_after=self._screen.path,
+            path_before=_traced_path(self._screen),
+            path_after=_traced_path(self._screen),
             screenshot_before=self._shot,
             screenshot_after=None,
             error=None,
@@ -674,7 +679,7 @@ class Executor:
                 events,
                 error=" ".join(action.failures) or None,
                 action=action,
-                path_after=screen.path,
+                path_after=_traced_path(screen),
                 screenshot_after=shot,
             )
             lines = [action.summary, *action.failures, *notes]
@@ -703,7 +708,7 @@ class Executor:
         if self._screen is None or self._shot is None:
             raise RuntimeError("call first_look before refuse")
         self._steps += 1
-        path = self._scrub(self._screen.path)
+        path = self._scrub(_traced_path(self._screen))
         self._trace.append(
             Step(
                 number=self._steps,
@@ -758,7 +763,8 @@ class Executor:
         if element is not None and x is None and y is None:
             target = self._element(element)
             x, y = target.centre
-            action = _Action(f"Tapped element {element}.", role=target.role, name=target.name)
+            name = target.traced_name or target.name
+            action = _Action(f"Tapped element {element}.", role=target.role, name=name)
         elif element is None and x is not None and y is not None:
             width, height = self._viewport()
             if not (0 <= x < width and 0 <= y < height):
@@ -769,7 +775,7 @@ class Executor:
             action = _Action(f"Tapped the point ({x}, {y}).")
             hit = _element_at(self._current(), x, y)
             if hit is not None:
-                action.role, action.name = hit.role, hit.name
+                action.role, action.name = hit.role, hit.traced_name or hit.name
         else:
             raise ToolError(
                 "give either an element number or both x and y, and set the rest to null"
@@ -944,7 +950,7 @@ class Executor:
         for attempt in range(2):
             before = self._page.url
             try:
-                screen = await capture(self._page, timeout=CAPTURE_TIMEOUT)
+                screen = await capture(self._page, timeout=CAPTURE_TIMEOUT, fit=self._line)
             except CaptureError as error:
                 # A navigation destroys the page's context mid-read, or changes the address
                 # while the page is read: it is read once more, even after a timeout. A

@@ -83,6 +83,9 @@ class Element:
     covered: bool = False  # something else is on top of its centre
     disabled: bool = False
     readonly: bool = False
+    # The name as the trace keeps it: cleaned, with the run's secrets redacted, then cut. The
+    # model sees `name`, which may show what it typed; "" means the same as `name`.
+    traced_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,8 @@ class Screen:
     # The address of the document the snapshot read, as the page itself gave it. Never shown
     # to the model; the executor compares it with the page's address before and after.
     address: str = ""
+    # The path as the trace keeps it, as `Element.traced_name` is kept; "" means `path`.
+    traced_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,7 @@ class _Parsed:
     kind: Kind
     role: str
     name: str
+    traced_name: str
     value: str
     centre: tuple[int, int]
     size: tuple[int, int]
@@ -134,15 +140,25 @@ def _count(value: object, limit: int) -> int | None:
     return value
 
 
-def _parse_entry(raw: object, width: int, height: int) -> _Parsed | None:
+# Makes page text one line and cuts it to a cap, for the trace's copy of a name or a path.
+# The executor's own also redacts the run's secrets, after cleaning and before cutting, so
+# that no cut leaves part of one for the trace's later redaction to miss.
+type Fit = Callable[[str, int], str]
+
+
+def _plain(text: str, cap: int) -> str:
+    return clean_text(text, cap, single_line=True)
+
+
+def _parse_entry(raw: object, width: int, height: int, fit: Fit = _plain) -> _Parsed | None:
     """Check one entry from the page; `None` if it is malformed. It never raises."""
     try:
-        return _parse_checked(raw, width, height)
+        return _parse_checked(raw, width, height, fit)
     except (TypeError, ValueError, OverflowError, KeyError):
         return None
 
 
-def _parse_checked(raw: object, width: int, height: int) -> _Parsed | None:
+def _parse_checked(raw: object, width: int, height: int, fit: Fit) -> _Parsed | None:
     if not isinstance(raw, dict):
         return None
     kind, role, name, value = (raw.get(k) for k in ("kind", "role", "name", "value"))
@@ -177,6 +193,7 @@ def _parse_checked(raw: object, width: int, height: int) -> _Parsed | None:
         kind=kind,  # type: ignore[arg-type]  # checked against _KINDS above
         role=role,
         name=clean_text(name, TEXT_CAP, single_line=True),
+        traced_name=fit(name, TEXT_CAP),
         value=clean_text(value, TEXT_CAP, single_line=True),
         centre=centre,
         size=(min(math.floor(w), MAX_SIZE), min(math.floor(h), MAX_SIZE)),
@@ -227,12 +244,13 @@ def _accessibility_warnings(items: list[tuple[int, _Parsed]], width: int, height
     return warnings
 
 
-def _path(url: str) -> str:
+def _path(url: str, fit: Fit = _plain) -> str:
+    """The page's path and query, from its address, made one line and cut by `fit`."""
     parts = urlsplit(url[:MAX_STRING])
     if parts.scheme not in {"http", "https"}:
         return "/"
     path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
-    return clean_text(path, PAGE_CAP, single_line=True)
+    return fit(path, PAGE_CAP)
 
 
 async def _default_evaluate(page: Page) -> object:
@@ -244,13 +262,20 @@ def _unexpected(what: str) -> CaptureError:
 
 
 async def capture(
-    page: Page, *, evaluate: Evaluate | None = None, timeout: float = SNAPSHOT_TIMEOUT
+    page: Page,
+    *,
+    evaluate: Evaluate | None = None,
+    timeout: float = SNAPSHOT_TIMEOUT,
+    fit: Fit = _plain,
 ) -> Screen:
     """Take the screenshot and the list of what is on screen.
 
     `evaluate` replaces the call that runs `snapshot.js`, so a test can stand in for a page
-    that lies. Nothing the page returns is believed until it has been checked here, the
-    screenshot included, which must be a JPEG of at most `MAX_SCREENSHOT` bytes.
+    that lies. `fit` makes the trace's copies of the page's path and of each element's name
+    one line and cuts them; the executor's redacts its secrets between the two. What the
+    model sees is cleaned and cut alone, as it may show what the model typed. Nothing the page
+    returns is believed until it has been checked here, the screenshot included, which must
+    be a JPEG of at most `MAX_SCREENSHOT` bytes.
 
     After a `CaptureError` for a timeout the caller must close the browser context: the
     page's renderer may be stuck in a loop and will not answer anything else.
@@ -288,13 +313,23 @@ async def capture(
         raise _unexpected("the viewport has no size")
 
     ignored = max(0, len(entries) - MAX_ENTRIES)
-    parsed = [_parse_entry(raw, width, height) for raw in entries[:MAX_ENTRIES]]
+    parsed = [_parse_entry(raw, width, height, fit) for raw in entries[:MAX_ENTRIES]]
     good = [p for p in parsed if p is not None]
     malformed = len(parsed) - len(good)
     kept = list(enumerate(good[:MAX_ELEMENTS], start=1))
     elements = [
         Element(
-            n, p.kind, p.role, p.name, p.value, p.centre, p.size, p.covered, p.disabled, p.readonly
+            n,
+            p.kind,
+            p.role,
+            p.name,
+            p.value,
+            p.centre,
+            p.size,
+            p.covered,
+            p.disabled,
+            p.readonly,
+            p.traced_name,
         )
         for n, p in kept
     ]
@@ -347,6 +382,7 @@ async def capture(
         jpeg=jpeg,
         notes=notes,
         address=address,
+        traced_path=_path(page.url, fit),
     )
 
 
