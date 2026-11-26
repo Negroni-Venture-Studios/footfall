@@ -1439,6 +1439,59 @@ def test_a_deleted_tracked_file_your_excludes_name_does_not_stop_the_run(tmp_pat
     local._git_files(folder)
 
 
+@pytest.mark.parametrize("where", ["XDG_CONFIG_HOME", "HOME"])
+def test_the_default_global_excludes_are_read_where_git_reads_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """Fix round 3, Minor 2: with core.excludesFile unset, git reads
+    $XDG_CONFIG_HOME/git/ignore, or $HOME/.config/git/ignore without it."""
+    folder = tracked_two_pages(tmp_path)
+    commit_all(folder)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    config = home / ".config"
+    if where == "XDG_CONFIG_HOME":
+        config = tmp_path / "xdg"
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    (config / "git").mkdir(parents=True)
+    (config / "git" / "ignore").write_text("serve.py\n")
+    (folder / "serve.py").write_text("print('mine')\n")
+    with pytest.raises(LocalRunError, match=r'"serve\.py"'):
+        local._git_files(folder)
+
+
+def test_with_no_home_a_changed_tracked_file_is_read_without_a_git_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 3, Minor 2: with HOME and XDG_CONFIG_HOME unset, a default of "~/..." made
+    git exit 128, so any run with a changed tracked file stopped on git's error."""
+    folder = tracked_two_pages(tmp_path)
+    commit_all(folder)
+    (folder / "serve.py").write_text("print('mine')\n")
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert PurePosixPath("serve.py") in local._git_files(folder).names
+
+
+def test_a_relative_core_excludes_file_is_read_from_the_checkouts_top(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 3, Minor 2: git opens a relative core.excludesFile from the worktree's top,
+    not from wherever Footfall runs."""
+    folder = tracked_two_pages(tmp_path)
+    commit_all(folder)
+    (folder / ".git" / "my-excludes").write_text("serve.py\n")
+    git(folder, "config", "core.excludesFile", ".git/my-excludes")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    (folder / "serve.py").write_text("print('mine')\n")
+    with pytest.raises(LocalRunError, match=r'"serve\.py"'):
+        local._git_files(folder)
+
+
 def test_a_changed_tracked_file_the_global_excludes_name_is_refused(tmp_path: Path) -> None:
     folder = tracked_two_pages(tmp_path)
     commit_all(folder)

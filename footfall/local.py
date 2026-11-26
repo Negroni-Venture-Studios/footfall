@@ -394,7 +394,12 @@ def _git_env() -> dict[str, str]:
 
 
 def _run_git(
-    git: str, folder: Path, arguments: Sequence[str], *, advice: str = _GIT_ADVICE
+    git: str,
+    folder: Path,
+    arguments: Sequence[str],
+    *,
+    advice: str = _GIT_ADVICE,
+    ok: frozenset[int] = frozenset({0}),
 ) -> bytes:
     """Run git in `folder` with `_git_env`, no input and a time limit; return its output.
 
@@ -404,7 +409,7 @@ def _run_git(
     the footfall image trusts its mount point, /repo. git runs in a session of its own, with
     no controlling terminal, so a configuration that names /dev/tty fails at once rather than
     read the developer's terminal. Raises LocalRunError when git hangs, cannot start or
-    fails, ending with `advice`.
+    fails, with an exit status not in `ok`, ending with `advice`.
     """
     command = [git, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *arguments]
     try:
@@ -425,7 +430,7 @@ def _run_git(
     except OSError as error:
         why = error.strerror or type(error).__name__
         raise LocalRunError(f"git could not be started ({why}); {advice}") from None
-    if done.returncode != 0:
+    if done.returncode not in ok:
         said = done.stderr.decode("utf-8", "replace").strip().splitlines()
         why = clean_text(said[0], 200, single_line=True) if said else "no reason given"
         raise LocalRunError(f"git cannot read the files in {_shown(folder)} ({why}); {advice}")
@@ -585,11 +590,16 @@ def _refuse_yours(
     where = _run_git(
         git, folder, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
     )
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    default = f"{xdg}/git/ignore" if xdg else "~/.config/git/ignore"
-    asked = ["config", "--type=path", f"--default={default}", "--get", "core.excludesFile"]
-    configured = _run_git(git, folder, asked)
-    sources = [Path(os.fsdecode(path.removesuffix(b"\n"))) for path in (where, configured)]
+    sources = [Path(os.fsdecode(where.removesuffix(b"\n")))]
+    # Unset, the setting exits 1, and git reads its default file instead.
+    asked = ["config", "--type=path", "--get", "core.excludesFile"]
+    configured = os.fsdecode(_run_git(git, folder, asked, ok=frozenset({0, 1})).strip(b"\n"))
+    if configured:
+        # git opens a relative one from the worktree's top, not from where Footfall runs.
+        path = Path(configured)
+        sources.append(path if path.is_absolute() else _worktree_top(folder) / path)
+    else:
+        sources += _default_excludes()
     readable = [path for path in sources if path.is_file()]
     if not readable:
         return
@@ -603,6 +613,16 @@ def _refuse_yours(
             "your own git excludes, so a file of yours may be under the branch's name; "
             "remove or rename it, and check the branch out again"
         )
+
+
+def _default_excludes() -> list[Path]:
+    """Where git reads the global excludes when core.excludesFile is unset: in
+    $XDG_CONFIG_HOME, or in $HOME/.config without it; nowhere when neither is set."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return [Path(xdg) / "git" / "ignore"]
+    home = os.environ.get("HOME")
+    return [Path(home) / ".config" / "git" / "ignore"] if home else []
 
 
 def _worktree_top(folder: Path) -> Path:
