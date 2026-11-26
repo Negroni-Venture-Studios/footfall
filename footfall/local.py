@@ -581,7 +581,11 @@ def _refuse_yours(
     sparse checkout is disabled; it would then be copied as the branch's.
 
     A file marked assume-unchanged (`assumed`) counts as changed, since git does not look at
-    it to say. A deleted file does not: the copy skips a tracked file that is missing."""
+    it to say. A deleted file does not: the copy skips a tracked file that is missing.
+
+    The excludes are matched without regard to case, whatever core.ignoreCase says: on a
+    volume that ignores case, a name that differs only by case opens the same file.
+    """
     changed = {name for name in assumed if os.path.lexists(folder / name)}
     modified = listed("-m")
     if modified:
@@ -604,7 +608,9 @@ def _refuse_yours(
     readable = [path for path in sources if path.is_file()]
     if not readable:
         return
-    excluded = listed("--cached", "--ignored", *(f"--exclude-from={path}" for path in readable))
+    asked = ["-c", "core.ignoreCase=true", "ls-files", "-z", "--cached", "--ignored"]
+    output = _run_git(git, folder, [*asked, *(f"--exclude-from={path}" for path in readable)])
+    excluded = {PurePosixPath(os.fsdecode(n)) for n in output.split(b"\0") if n}
     yours = sorted(changed & excluded)
     if yours:
         names = ", ".join(_shown(name) for name in yours[:_NAMED])

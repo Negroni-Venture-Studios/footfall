@@ -1548,6 +1548,22 @@ def test_a_tracked_file_marked_assume_unchanged_counts_as_changed(tmp_path: Path
         local._git_files(folder)
 
 
+def test_a_case_variant_of_an_excluded_name_is_refused_on_any_volume(tmp_path: Path) -> None:
+    """Ruling R79: with core.ignoreCase false, git matches the developer's `prod.env` to the
+    branch's PROD.ENV on no volume, though on a volume that ignores case both names open
+    the one file. The listing of excluded names ignores case whatever the setting."""
+    folder = tracked_two_pages(tmp_path)
+    (folder / "PROD.ENV").write_text("FROM_THE_BRANCH=1\n")
+    commit_all(folder)
+    git(folder, "config", "core.ignoreCase", "false")
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("prod.env\n")
+    (folder / "PROD.ENV").write_text(DEVELOPERS_SECRET)
+    assert git_output(folder, "ls-files", "-m").splitlines() == ["PROD.ENV"]
+    with pytest.raises(LocalRunError, match=r'"PROD\.ENV"'):
+        local._git_files(folder)
+
+
 def test_a_deleted_tracked_file_your_excludes_name_does_not_stop_the_run(tmp_path: Path) -> None:
     """Fix round 3, Minor 1: `ls-files -m` lists an unstaged deletion, but the copy skips a
     tracked file that is missing, so a deleted file your excludes name is no reason to stop."""
