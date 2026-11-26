@@ -1426,6 +1426,19 @@ def test_a_tracked_file_marked_assume_unchanged_counts_as_changed(tmp_path: Path
         local._git_files(folder)
 
 
+def test_a_deleted_tracked_file_your_excludes_name_does_not_stop_the_run(tmp_path: Path) -> None:
+    """Fix round 3, Minor 1: `ls-files -m` lists an unstaged deletion, but the copy skips a
+    tracked file that is missing, so a deleted file your excludes name is no reason to stop."""
+    folder = tracked_two_pages(tmp_path)
+    (folder / "prod.env").write_text("FROM_THE_BRANCH=1\n")
+    commit_all(folder)
+    with (folder / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("prod.env\n")
+    (folder / "prod.env").unlink()
+    assert git_output(folder, "ls-files", "-m").splitlines() == ["prod.env"]
+    local._git_files(folder)
+
+
 def test_a_changed_tracked_file_the_global_excludes_name_is_refused(tmp_path: Path) -> None:
     folder = tracked_two_pages(tmp_path)
     commit_all(folder)

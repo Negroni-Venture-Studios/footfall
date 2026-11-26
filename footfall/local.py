@@ -575,8 +575,11 @@ def _refuse_yours(
     sparse checkout is disabled; it would then be copied as the branch's.
 
     A file marked assume-unchanged (`assumed`) counts as changed, since git does not look at
-    it to say."""
-    changed = {name for name in assumed if os.path.lexists(folder / name)} | listed("-m")
+    it to say. A deleted file does not: the copy skips a tracked file that is missing."""
+    changed = {name for name in assumed if os.path.lexists(folder / name)}
+    modified = listed("-m")
+    if modified:
+        changed |= modified - listed("-d")
     if not changed:
         return
     where = _run_git(
