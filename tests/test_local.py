@@ -637,6 +637,41 @@ async def test_every_persona_of_a_run_shares_its_cost_ceiling(
     assert spends[0].ceiling_usd == 4.25
 
 
+async def test_a_browser_that_never_closes_does_not_hold_the_run(
+    tmp_path: Path, app_server: AppServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Observation 8 of fix round 2: closing the run's browsers at the end of the run had no
+    timer of Footfall's, so a browser container that stopped answering held the run open,
+    against the rule that every wait on it is bounded."""
+    serve_two_pages(app_server)
+
+    class NeverCloses(NoBrowser):
+        async def close(self) -> None:
+            await asyncio.Event().wait()
+
+    without_a_browser(monkeypatch)
+
+    async def connect_browser(engine: str, endpoint: str) -> Any:
+        return NeverCloses()
+
+    async def fails(**options: Any) -> Any:
+        raise CaptureError("the page could not be read")
+
+    monkeypatch.setattr(local, "run_persona", fails)
+    monkeypatch.setattr(local, "CLOSE_TIMEOUT", 0.2)
+    runner = FakeRunner(lambda copy: f"127.0.0.1:{app_server.port}")
+    task = asyncio.create_task(run_folder(two_pages(tmp_path), runner, connect_browser, tmp_path))
+    done, _ = await asyncio.wait({task}, timeout=5)
+    if not done:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        pytest.fail("the run was still waiting for its browser to close")
+    (report,) = task.result()
+    assert report.status == "failed"
+    assert runner.ops()[-1] == "stop"
+
+
 async def test_a_context_that_never_closes_closes_the_connection_to_the_browsers(
     tmp_path: Path,
     app_server: AppServer,

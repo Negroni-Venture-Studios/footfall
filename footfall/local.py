@@ -1596,9 +1596,12 @@ async def _go(
             reports.append(outcome)
         return reports
     finally:
+        # Each within CLOSE_TIMEOUT: a browser container that has stopped answering must not
+        # hold the run open, and the run is stopped next however this ends.
         for browser in browsers.values():
-            with contextlib.suppress(PlaywrightError):
-                await browser.close()
+            with contextlib.suppress(PlaywrightError, TimeoutError):
+                async with asyncio.timeout(CLOSE_TIMEOUT):
+                    await browser.close()
 
 
 async def _finish(runner: Runner, run_id: str, workspace: Path, *, quiet: bool) -> None:
