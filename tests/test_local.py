@@ -1834,15 +1834,20 @@ def test_a_decomposed_tracked_name_is_refused_where_git_composes_what_it_reads(
 
 @pytest.mark.usefixtures("own_git_home")
 def test_a_composed_tracked_name_over_a_decomposed_file_is_read_where_git_composes(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The usual state on a Mac: the index holds the composed name, the folder may hold
-    either form, and git composes what it reads, so the two are one name to its excludes."""
+    """The usual state on a Mac: the index holds the composed name, the folder lists the
+    decomposed one, and git composes what it reads, so the two are one name to its
+    excludes. The listing is stood in for, so that this is reached on any volume."""
     folder = tracked_two_pages(tmp_path)
     git(folder, "config", "core.precomposeUnicode", "true")
-    (folder / NFD_NAME).write_text("FROM_THE_BRANCH=1\n")
+    (folder / NFC_NAME).write_text("FROM_THE_BRANCH=1\n")
     tracked_under(folder, NFC_NAME)
+    listed_as(monkeypatch, NFC_NAME, NFD_NAME)
     assert PurePosixPath(NFC_NAME) in local._git_files(folder).names
+    git(folder, "config", "core.precomposeUnicode", "false")
+    with pytest.raises(LocalRunError, match="differs from the name on disk"):
+        local._git_files(folder)  # the control: uncomposed, the listing differs
 
 
 @pytest.mark.usefixtures("own_git_home")
