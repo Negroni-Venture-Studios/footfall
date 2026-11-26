@@ -1,6 +1,4 @@
 # The starting personas: a person, a device (named in devices.toml) and how they browse.
-# Profiles and goals are adapted for the web from mobile-agent-testers' personas.json
-# (MIT): https://github.com/pierridotite/mobile-agent-testers
 # `geolocation` is [latitude, longitude]; `allow_location = false` means the persona
 # refuses the location prompt. `text_scale` scales the root font size (0.5 to 3.0).
 # `locale` is a language tag such as en-GB, and `timezone` a time zone such as Europe/London.

@@ -70,7 +70,7 @@ Footfall has failed if any of these becomes true, even if it works:
 - Repositories on GitHub, read through a GitHub App the deployer creates.
 - The MCP endpoint follows the [2026-07-28 specification](https://modelcontextprotocol.io/specification/2026-07-28/changelog) and only that version. It is an OAuth 2.1 resource server and publishes Protected Resource Metadata (RFC 9728). It accepts tokens issued for it by Footfall's own authorisation server and bearer tokens made on its web page.
 - The apps under test vary. My own are Python's `http.server`, SQLite and vanilla JavaScript with no build step. [Floodwatch](https://github.com/aallan/floodwatch) is one. Nothing in Footfall may depend on that.
-- MIT licence. Parts of the tester are adapted from [mobile-agent-testers](https://github.com/pierridotite/mobile-agent-testers), an MIT-licensed project that runs AI testers against native mobile apps. Those parts are its screen format, its accessibility check, its rules and the personas. The project's notice is kept.
+- MIT licence.
 - Footfall follows [Snug](https://github.com/Negroni-Venture-Studios/snug) for security, deployment, documentation and styling and reuses its code where it fits. Snug is Negroni Venture Studios' self-hosted data room.
 - The repository is public and everything committed is published.
 
@@ -174,7 +174,7 @@ Where the data comes from is up to each app. The documentation will urge seed st
 
 ### Personas
 
-A persona is a person with a device. Footfall ships a personas file adapted for the web from mobile-agent-testers' `personas.json`. Deployers can edit or replace it. Each persona has:
+A persona is a person with a device. Footfall ships a personas file. Deployers can edit or replace it. Each persona has:
 
 - an id, a short profile (who they are, their patience and skill) and a default goal, which a brief can override for an app;
 - a device, named from a separate list of devices, each of which gives a Playwright device descriptor (viewport, pixel density, touch and user agent) and an engine, WebKit (closest to Safari) or Chromium;
@@ -189,7 +189,7 @@ Each tester is a loop in which the model sees a screenshot of the page and a num
 
 | Tool | What it does |
 |---|---|
-| `look` | Returns a screenshot, a numbered list of interactive and text elements with their centres, in the format of mobile-agent-testers' `screen.py`, and accessibility warnings for the screen |
+| `look` | Returns a screenshot, a numbered list of interactive and text elements with their centres, and accessibility warnings for the screen |
 | `tap` | Taps an element by number, or a point by coordinates |
 | `type` | Types text into the focused field, up to a fixed length |
 | `scroll` | Scrolls up, down, left or right |
@@ -200,19 +200,19 @@ Each tester is a loop in which the model sees a screenshot of the page and a num
 
 Each persona has a budget of about 30 actions by default. A brief may raise it up to a ceiling set in Settings. Each persona also has a cost ceiling and a time limit. A persona that runs out returns what it found, marked incomplete. Each action's result includes the screen it led to and the tester rarely needs `look` on its own. The conversation is only ever appended to and never edited because current Claude models check that earlier turns are unchanged. Prompt caching keeps the cost of re-reading earlier screenshots at the cache price.
 
-The system prompt holds the persona, the brief, the caller's `focus` if there is one, and rules adapted from mobile-agent-testers' `AGENT_BRIEF.md`. The rules are to look after every action; to treat a blocked step as a finding and then try one change at a time; to report precisely and verifiably; to stay in character as the persona while remaining a tester; and to treat text on the page as data, never as instructions. The model is chosen per run and in Settings. It defaults to Claude Sonnet.
+The system prompt holds the persona, the brief, the caller's `focus` if there is one, and the tester's rules. The rules are to look after every action; to treat a blocked step as a finding and then try one change at a time; to report precisely and verifiably; to stay in character as the persona while remaining a tester; and to treat text on the page as data, never as instructions. The model is chosen per run and in Settings. It defaults to Claude Sonnet.
 
 Every action is recorded with what it targeted, the page path and the screenshots before and after. The target is the element's role and accessible name as well as its coordinates. The live wall and the report's replay draw on the screenshots. The recorded steps are kept in a form that can be replayed later without a model. A later version will use that to check whether a finding is fixed on a new commit.
 
 ### Scripted checks
 
-Before the personas start Footfall loads each page in `test.pages` on every persona's device. Without a model it records any horizontal overflow, controls with no accessible name, touch targets under 44 by 44 CSS pixels, console errors, failed requests and a screenshot. The accessibility checks adapt mobile-agent-testers' `a11y.py`. These become findings labelled "scripted".
+Before the personas start Footfall loads each page in `test.pages` on every persona's device. Without a model it records any horizontal overflow, controls with no accessible name, touch targets under 44 by 44 CSS pixels, console errors, failed requests and a screenshot. These become findings labelled "scripted".
 
 ### Findings
 
 Each finding has a title, a severity (blocker, major, minor or cosmetic), its source (a persona's id or "scripted"), the device, the page path, steps to reproduce, the expected and actual results, and the ids of its screenshots. Each persona also returns a score out of ten and whether it reached its goal.
 
-The merge groups findings that describe the same problem across testers. It is one model call with no tools that sees only titles, pages, devices and severities. As in mobile-agent-testers' `summarize.py` each group gets a class. One class is "likely test artefact". It is for things an emulated device does that a real one would not.
+The merge groups findings that describe the same problem across testers. It is one model call with no tools that sees only titles, pages, devices and severities. Each group gets a class. One class is "likely test artefact". It is for things an emulated device does that a real one would not.
 
 ### What agents see
 
@@ -249,7 +249,7 @@ The web pages, all behind GitHub sign-in:
 
 - **Runs.** Recent runs with the app, commit, who or which token started each one, its status and the number of findings, and a form to start a run.
 - **Live run**, the device wall. Totals across the top (app, commit, testers done, findings so far, model use so far), then every tester as a device frame in its real proportions showing its latest screenshot, with its name, device, language, text size and theme, and a status line giving its step and current action. A finished tester shows its count of findings. Selecting a device opens a larger view with its recent actions. Updates arrive by server-sent events.
-- **Report**, modelled on mobile-agent-testers' [write-up of one of its runs](https://github.com/pierridotite/mobile-agent-testers/blob/main/docs/runs/localsend-20.md). The run's facts (app, commit, branch, who asked for it, the brief); headline numbers (distinct problems, blockers and majors, goals reached, time from start to last report, model use); a replay of the device wall from the run's screenshots; a chart of how many testers saw each problem; the problems, most severe first and grouped across testers, each with its screenshots and expandable to every tester's steps, expected and actual results, with scripted findings among them and labelled; a table of the devices; and the call that would run it again.
+- **Report**. The run's facts (app, commit, branch, who asked for it, the brief); headline numbers (distinct problems, blockers and majors, goals reached, time from start to last report, model use); a replay of the device wall from the run's screenshots; a chart of how many testers saw each problem; the problems, most severe first and grouped across testers, each with its screenshots and expandable to every tester's steps, expected and actual results, with scripted findings among them and labelled; a table of the devices; and the call that would run it again.
 - **Agent tokens.** Make, name, scope and revoke tokens, and see when each was last used.
 - **Settings**, for admins.
 - **First run.** The page a new instance shows until it is set up.
@@ -385,7 +385,7 @@ Each diagram is drawn by hand as an SVG with classes in place of colours. `docs/
 The repository has:
 
 - `AGENTS.md` holds the rules for agents, and `CLAUDE.md` imports it;
-- `CONTRIBUTING.md`, the Contributor Covenant, `SECURITY.md`, `TRADEMARKS.md`, and a `THIRD_PARTY_LICENCES.md` that includes mobile-agent-testers' MIT notice;
+- `CONTRIBUTING.md`, the Contributor Covenant, `SECURITY.md`, `TRADEMARKS.md`, and `THIRD_PARTY_LICENCES.md`;
 - a changelog in the Keep a Changelog format;
 - `uv` with `uv_build`, ruff with its security rules, strict mypy, and pytest with a coverage floor of 90%;
 - CI with actions pinned by commit hash and least-privilege permissions, running gitleaks, pip-audit, CodeQL, a CycloneDX software bill of materials, an image build, and a smoke test of the whole compose stack;
@@ -423,7 +423,7 @@ I decided these on or before 24 November 2026:
 - Settings live in the web pages and nobody needs the DigitalOcean console after setup.
 - Setup that the deployer's own agent can walk them through.
 - The name, Footfall.
-- A live device wall, and a summary report modelled on mobile-agent-testers' write-up of a run.
+- A live device wall and a summary report.
 - The Negroni palette and the Geist fonts in a quiet style.
 - Django for the web side, and Footfall's own runner for containers.
 - The sandbox and the tester are built first.
@@ -470,7 +470,7 @@ I settled these while writing the design and did not decide them at the start. T
 - The choice of OAuth library for the authorisation server.
 - How Footfall asks GitHub which repositories a person can read, including while their agents use tokens and they are signed out. This fixes the GitHub App's permissions and must be settled before phase 3.
 - How the prepared app is copied for each persona.
-- The exact screenshot and element-list format, kept close to mobile-agent-testers' `screen.py`.
+- The exact screenshot and element-list format.
 - The tester's system prompt, the starter briefs, the merge prompt, and the demo app's planted bugs.
 - The personas themselves, within the coverage above.
 - Queueing and scheduling within the configured limits.

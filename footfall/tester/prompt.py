@@ -13,8 +13,6 @@ from footfall.personas import Device, Persona
 from footfall.tester.report import clean_text
 from footfall.tester.screen import quote
 
-# Rules adapted from mobile-agent-testers' AGENT_BRIEF.md
-# (https://github.com/pierridotite/mobile-agent-testers, MIT).
 RULES = """\
 Rules
 

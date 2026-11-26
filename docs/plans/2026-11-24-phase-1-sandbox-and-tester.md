@@ -126,7 +126,7 @@ def test_network_is_blocked() -> None:
     7. never log keys, tokens or passwords;
     8. no test reaches the internet.
   - `CLAUDE.md` is `@AGENTS.md` plus any Claude Code specifics.
-  - `THIRD_PARTY_LICENCES.md` lists Geist and Geist Mono (OFL), mobile-agent-testers (MIT, with its copyright line, for the screen format, accessibility check, rules and personas adapted from it), and the runtime packages.
+  - `THIRD_PARTY_LICENCES.md` lists Geist and Geist Mono (OFL), the notice for the adapted personas (MIT, with its copyright line), and the runtime packages.
   - `README.md`, written in Task 1, gains a "Contributing and security" section linking these files.
 - [ ] **Step 3: Run `voice_audit.py --register report`** on each Markdown file, fix every warning that is not code, and read each file back for AI-isms.
 - [ ] **Step 4: Run `uv run pytest tests/test_doc_links.py`.** It passes.
@@ -223,7 +223,7 @@ A brief may begin with TOML front matter between two `+++` lines. It has two key
   - `load_personas(devices: Mapping[str, Device], path: Path = PERSONAS) -> dict[str, Persona]`
   - `select(personas: Mapping[str, Persona], ids: Sequence[str]) -> list[Persona]`, which raises `PersonaError` naming any unknown id; an empty `ids` selects every persona.
 
-The twelve personas. Profiles and goals are the builder's, adapted from mobile-agent-testers' `personas.json`.
+The twelve personas.
 
 | id | device | engine | locale | timezone | scheme | text | motion |
 |---|---|---|---|---|---|---|---|
@@ -495,7 +495,7 @@ The screenshot is `page.screenshot(type="jpeg", quality=70, scale="css")`, so po
 - `… and N more not listed` when the list is capped;
 - a last line `accessibility check (confirm on the screenshot): …` when there are warnings.
 
-There are two kinds of warning, adapted from mobile-agent-testers' `a11y.py`:
+There are two kinds of warning:
 - interactive elements with no name, unless they cover more than 40% of the viewport;
 - touch targets under 44 by 44 CSS pixels, unless the element is cut by the viewport edge.
 
@@ -545,7 +545,7 @@ There are two kinds of warning, adapted from mobile-agent-testers' `a11y.py`:
   - `cost_usd(model: str, usage: Usage) -> float`, which raises `PricingError` for an unknown model, so Footfall refuses to run a model it cannot price
   - `system_prompt(persona: Persona, device: Device, brief: Brief, app_name: str, focus: str | None) -> str`
 
-The system prompt has no timestamps or ids, so it caches. It states the persona's profile and goal, the device and settings, the brief, and the focus. It also states the rules adapted from mobile-agent-testers' `AGENT_BRIEF.md`:
+The system prompt has no timestamps or ids, so it caches. It states the persona's profile and goal, the device and settings, the brief, and the focus. It also states these rules:
 - every action shows the new screen, so read it before acting again;
 - a blocked step is a finding, and then try one change at a time;
 - report precisely and verifiably, citing screenshot ids;

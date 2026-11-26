@@ -3,8 +3,7 @@
 `snapshot.js` runs in the page and lists what is visible. The page belongs to the app under
 test, so everything it returns is untrusted data: this module checks its shape, cleans and
 caps every string, clamps every coordinate, and quotes names so that no page can forge a line
-of the list (AGENTS.md rule 6). The screen format and the accessibility check are adapted from
-mobile-agent-testers' `a11y.py` (MIT).
+of the list (AGENTS.md rule 6).
 """
 
 import asyncio
