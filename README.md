@@ -40,7 +40,7 @@ Docker Desktop on a Mac has no gVisor. To develop on a Mac set `FOOTFALL_RUNTIME
 
 ## Contributing and security
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) explains how to set up, test and propose changes.
+- [CONTRIBUTING.md](CONTRIBUTING.md) explains how to set up Footfall, run the tests and send a pull request.
 - Please report vulnerabilities privately. [SECURITY.md](SECURITY.md) says how.
 - Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
 - [AGENTS.md](AGENTS.md) holds the working rules for AI coding agents.

@@ -1,6 +1,6 @@
 # Container images
 
-Footfall builds four images. They are tagged `dev` when built locally. Every base image is pinned by digest and Dependabot proposes new ones.
+Footfall builds four images. They are tagged `dev` when built locally. The base images are pinned by digest. Dependabot opens a pull request when a newer one is published.
 
 ## footfall
 

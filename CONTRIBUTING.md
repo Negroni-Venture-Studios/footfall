@@ -75,7 +75,7 @@ Footfall keeps its dependencies few and well maintained.
 
 ### Updating Playwright
 
-Playwright's server in the browser image refuses a client of another release. `uv.lock` and `images/browsers/Dockerfile` move together and `tests/test_images.py` fails while they differ. Dependabot proposes every Playwright release in a pull request of its own outside the weekly group. It never moves the browser image by itself. That pull request fails the image test until someone adds the image to it:
+Playwright's server in the browser image refuses a client of another release. `uv.lock` and `images/browsers/Dockerfile` move together and `tests/test_images.py` fails while they differ. Dependabot opens a separate pull request for each Playwright release. It does not group them with the weekly updates and never moves the browser image itself. That pull request fails the image test until someone updates the browser image in it:
 
 1. Wait until Microsoft has published the image for the new release, `mcr.microsoft.com/playwright:v<version>-noble`. It can appear a day or two after the release on PyPI.
 2. On Dependabot's branch change the base image in `images/browsers/Dockerfile` to the new release's tag with the digest that `docker buildx imagetools inspect mcr.microsoft.com/playwright:v<version>-noble` prints. Change `npm install --global playwright@<version>` to match.
