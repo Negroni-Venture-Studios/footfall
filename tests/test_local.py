@@ -1467,6 +1467,14 @@ def git_output(folder: Path, *arguments: str) -> str:
 DEVELOPERS_SECRET = "DEVELOPERS_SECRET_5e1f\n"
 
 
+@pytest.fixture
+def own_git_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty home for git, so that the global excludes of whoever runs the tests, which
+    may well name `*.env`, decide nothing in a test of the developer's excludes."""
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+
 def sparse_repository(tmp_path: Path) -> Path:
     """Part B's Minor 1, as the reviewer reproduced it with git 2.54.0: a sparse checkout of
     `app`, the developer's own secrets/prod.env kept out by .git/info/exclude, and a branch
@@ -1491,6 +1499,7 @@ def sparse_repository(tmp_path: Path) -> Path:
     return folder
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_sparse_checkout_is_refused_without_all_files(tmp_path: Path) -> None:
     """Ruling R76: a sparse checkout can leave the developer's file under a name the branch
     tracks, which would then be copied, so outside --all-files it is refused."""
@@ -1504,6 +1513,7 @@ def test_a_sparse_checkout_is_refused_without_all_files(tmp_path: Path) -> None:
     assert "full checkout" in str(refused.value)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_tracked_file_your_own_excludes_name_is_refused_once_changed(tmp_path: Path) -> None:
     """Ruling R77, after the reviewer's sequence: with the sparse checkout disabled, git
     leaves the developer's excluded secrets/prod.env in place under the branch's tracked
@@ -1536,6 +1546,7 @@ def test_a_tracked_file_your_own_excludes_name_is_refused_once_changed(tmp_path:
         local._git_files(folder)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_tracked_file_marked_assume_unchanged_counts_as_changed(tmp_path: Path) -> None:
     """Ruling R78, the reviewer's sequence on git 2.54.0: a repository tracks prod.env, which
     .git/info/exclude names; marked assume-unchanged and given new content, it is listed by
@@ -1561,6 +1572,7 @@ def test_a_tracked_file_marked_assume_unchanged_counts_as_changed(tmp_path: Path
     assert "remove or rename" in said
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_refusal_tells_a_changed_file_from_one_marked_assume_unchanged(tmp_path: Path) -> None:
     """One refusal names both kinds, each with its own reason."""
     folder = tracked_two_pages(tmp_path)
@@ -1605,6 +1617,7 @@ def reset_and_staged(tmp_path: Path) -> Path:
     return folder
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_staged_file_your_own_excludes_name_is_refused(tmp_path: Path) -> None:
     """Ruling R79: a staged change counts as a change, by its name from the tested folder."""
     folder = reset_and_staged(tmp_path)
@@ -1614,12 +1627,14 @@ def test_a_staged_file_your_own_excludes_name_is_refused(tmp_path: Path) -> None
     assert "app/prod.env" not in str(refused.value)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_staged_file_nobodys_excludes_name_is_copied(tmp_path: Path) -> None:
     folder = reset_and_staged(tmp_path)
     (folder.parent / ".git" / "info" / "exclude").write_text("")
     assert PurePosixPath("prod.env") in local._git_files(folder).names
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_staged_file_that_is_gone_does_not_stop_the_run(tmp_path: Path) -> None:
     """The copy skips a tracked file that is missing, staged or not."""
     folder = reset_and_staged(tmp_path)
@@ -1627,6 +1642,7 @@ def test_a_staged_file_that_is_gone_does_not_stop_the_run(tmp_path: Path) -> Non
     local._git_files(folder)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_before_the_first_commit_every_tracked_file_counts_as_changed(tmp_path: Path) -> None:
     """Ruling R79: with no HEAD to compare with, every entry in the index is a change."""
     folder = tracked_two_pages(tmp_path)
@@ -1638,6 +1654,7 @@ def test_before_the_first_commit_every_tracked_file_counts_as_changed(tmp_path: 
     local._git_files(folder)  # the control: committed and unchanged, it is the branch's own
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_tracked_file_named_head_does_not_stop_the_run(tmp_path: Path) -> None:
     """Fix round 5, Minor 1: without `--` after it, git cannot tell the commit HEAD from a
     tracked file of that name, and exits 128 for the whole tree."""
@@ -1653,6 +1670,7 @@ def test_a_tracked_file_named_head_does_not_stop_the_run(tmp_path: Path) -> None
         local._git_files(folder)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_your_repository_excludes_outrank_your_global_ones(tmp_path: Path) -> None:
     """Fix round 5, Minor 4: git reads core.excludesFile first and info/exclude last, so
     info/exclude wins. A negation in the global file does not undo the repository's own
@@ -1673,6 +1691,7 @@ def test_your_repository_excludes_outrank_your_global_ones(tmp_path: Path) -> No
     assert PurePosixPath("prod.env") in local._git_files(folder).names
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_case_variant_of_an_excluded_name_is_refused_on_any_volume(tmp_path: Path) -> None:
     """Ruling R79: with core.ignoreCase false, git matches the developer's `prod.env` to the
     branch's PROD.ENV on no volume, though on a volume that ignores case both names open
@@ -1714,6 +1733,7 @@ def tracked_under(folder: Path, tracked: str, sub: str = "") -> None:
 
 @pytest.mark.parametrize(("tracked", "on_disk"), ALIASES)
 @pytest.mark.parametrize("sub", ["", "footfall/"])
+@pytest.mark.usefixtures("own_git_home")
 def test_a_tracked_name_the_folder_lists_differently_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracked: str, on_disk: str, sub: str
 ) -> None:
@@ -1741,6 +1761,7 @@ def test_a_tracked_name_the_folder_lists_differently_is_refused(
 
 
 @pytest.mark.parametrize(("tracked", "on_disk"), ALIASES)
+@pytest.mark.usefixtures("own_git_home")
 def test_a_tracked_name_that_opens_your_file_by_another_name_is_refused(
     tmp_path: Path, tracked: str, on_disk: str
 ) -> None:
@@ -1759,6 +1780,7 @@ def test_a_tracked_name_that_opens_your_file_by_another_name_is_refused(
     assert local._shown(PurePosixPath(tracked)) in str(refused.value)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_decomposed_tracked_name_is_refused_where_git_composes_what_it_reads(
     tmp_path: Path,
 ) -> None:
@@ -1782,6 +1804,7 @@ def test_a_decomposed_tracked_name_is_refused_where_git_composes_what_it_reads(
         local._git_files(folder)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_composed_tracked_name_over_a_decomposed_file_is_read_where_git_composes(
     tmp_path: Path,
 ) -> None:
@@ -1794,6 +1817,7 @@ def test_a_composed_tracked_name_over_a_decomposed_file_is_read_where_git_compos
     assert PurePosixPath(NFC_NAME) in local._git_files(folder).names
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_deleted_tracked_file_your_excludes_name_does_not_stop_the_run(tmp_path: Path) -> None:
     """Fix round 3, Minor 1: `ls-files -m` lists an unstaged deletion, but the copy skips a
     tracked file that is missing, so a deleted file your excludes name is no reason to stop."""
@@ -1808,6 +1832,7 @@ def test_a_deleted_tracked_file_your_excludes_name_does_not_stop_the_run(tmp_pat
 
 
 @pytest.mark.parametrize("where", ["XDG_CONFIG_HOME", "HOME"])
+@pytest.mark.usefixtures("own_git_home")
 def test_the_default_global_excludes_are_read_where_git_reads_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
 ) -> None:
@@ -1830,6 +1855,7 @@ def test_the_default_global_excludes_are_read_where_git_reads_them(
         local._git_files(folder)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_with_no_home_a_changed_tracked_file_is_read_without_a_git_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1843,6 +1869,7 @@ def test_with_no_home_a_changed_tracked_file_is_read_without_a_git_error(
     assert PurePosixPath("serve.py") in local._git_files(folder).names
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_relative_core_excludes_file_is_read_from_the_checkouts_top(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1863,6 +1890,7 @@ def test_a_relative_core_excludes_file_is_read_from_the_checkouts_top(
         local._git_files(folder)
 
 
+@pytest.mark.usefixtures("own_git_home")
 def test_a_changed_tracked_file_the_global_excludes_name_is_refused(tmp_path: Path) -> None:
     folder = tracked_two_pages(tmp_path)
     commit_all(folder)
@@ -1878,6 +1906,7 @@ def test_a_changed_tracked_file_the_global_excludes_name_is_refused(tmp_path: Pa
 
 
 @pytest.mark.parametrize("flags", [["--skip-worktree"], ["--skip-worktree", "--assume-unchanged"]])
+@pytest.mark.usefixtures("own_git_home")
 def test_a_file_git_skips_in_the_working_tree_is_refused_without_all_files(
     tmp_path: Path, flags: list[str]
 ) -> None:
