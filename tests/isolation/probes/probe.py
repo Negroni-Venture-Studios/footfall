@@ -627,6 +627,16 @@ _PAGES: Final[dict[str, str]] = {
         "f.src = new URLSearchParams(location.search).get('src');\n"
         "document.body.append(f);\n</script>"
     ),
+    # A sign-in form like an app's, for a persona to type into. It posts back to "/".
+    "/form": (
+        "<!doctype html><html lang='en'><title>Sign in</title><h1>Sign in</h1>"
+        "<form action='/' method='post'>"
+        "<label>Username <input name='username' autocomplete='username'></label>"
+        "<label>Password <input name='password' type='password'"
+        " autocomplete='current-password'></label>"
+        "<label>Notes <textarea name='notes'></textarea></label>"
+        "<button>Sign in</button></form></html>"
+    ),
 }
 
 
