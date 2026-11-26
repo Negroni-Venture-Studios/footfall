@@ -2,7 +2,7 @@
 
 Footfall tests web apps that AI coding agents build and maintain. It runs on a server the deployer owns. One instance serves a GitHub organisation or one developer. An agent that has pushed a change asks Footfall to test it. Footfall clones that commit, runs the app in a sandbox and sends a dozen AI testers at it. Each tester plays a different person on a different emulated phone, tablet or laptop. The agent gets structured findings back and can fix what the testers found before a person looks. People watch each run live, read its report and manage Footfall from its web pages.
 
-Status: design for approval, 24 November 2026, before any code is written.
+Status: phase 1 is built and in review in [pull request #1](https://github.com/Negroni-Venture-Studios/footfall/pull/1).
 
 ## Summary
 
