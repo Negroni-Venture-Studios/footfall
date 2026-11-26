@@ -4,7 +4,7 @@ Footfall builds four images. They are tagged `dev` when built locally. The base 
 
 ## footfall
 
-`footfall` is Footfall's own image and is built from the repository root. The runner, the egress proxy, and the orchestrator all start from it and Docker Compose runs them. It has a locked install without development dependencies, precompiled bytecode for a read-only root file system and an unprivileged user with uid 10001. It also has git from its Debian release. `footfall test` uses git to copy only the files git tracks.
+`footfall` is Footfall's own image and is built from the repository root. The runner, the egress proxy, and the orchestrator all start from it and Docker Compose runs them. It has a locked install without development dependencies, precompiled bytecode for a read-only root file system, and an unprivileged user with uid 10001. It also has git from its Debian release. `footfall test` uses git to copy only the files git tracks.
 
 ## python3.13
 
@@ -20,4 +20,4 @@ In both images `/tmp` is a 256 MiB memory file system that holds no runnable fil
 
 ## browsers
 
-`footfall-browsers` serves [Playwright](https://playwright.dev/)'s `run-server`. That is a WebSocket endpoint that lets a client drive Chromium or WebKit in another container. The runner starts one for each run and the tester connects to it on port 3000. run-server listens on loopback alone behind `gate.js`. The gate passes on only a WebSocket upgrade for the run's own secret path and answers everything else with an empty 404. The image also installs a Chromium managed policy. The policy turns off Encrypted Client Hello because the egress proxy refuses it. It also turns off the features that call Google, such as autofill's server and Safe Browsing. The Playwright version in this image must equal the one in `uv.lock` because the server refuses a client of a different release. A test checks that they match.
+`footfall-browsers` serves [Playwright](https://playwright.dev/)'s `run-server`. That is a WebSocket endpoint that lets a client drive Chromium or WebKit in another container. The runner starts one for each run and the tester connects to it on port 3000. run-server listens on loopback alone behind `gate.js`. The gate passes on only a WebSocket upgrade for the run's own secret path and answers everything else with an empty 404. The image also installs a Chromium managed policy. The policy turns off Encrypted Client Hello because the egress proxy refuses it. It also turns off the features that call Google. Autofill's server, Safe Browsing, and the spellcheck dictionaries are among them. The Playwright version in this image must equal the one in `uv.lock` because the server refuses a client of a different release. A test checks that they match.

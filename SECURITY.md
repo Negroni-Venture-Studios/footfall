@@ -4,9 +4,9 @@ Footfall runs other people's code in containers and sends what it sees to a mode
 
 ## Reporting a vulnerability
 
-**Please do not open a public issue.** Report privately in either of these ways:
+Please do not open a public issue. Report it privately, preferably through GitHub:
 
-1. **GitHub private vulnerability reporting** (preferred). Go to the [Security tab](https://github.com/Negroni-Venture-Studios/footfall/security/advisories/new) and choose "Report a vulnerability".
+1. **GitHub private vulnerability reporting.** Go to the [Security tab](https://github.com/Negroni-Venture-Studios/footfall/security/advisories/new) and choose "Report a vulnerability".
 2. **Email** alasdair@negroniventurestudios.com.
 
 Please include:
@@ -21,7 +21,7 @@ I'll reply within 72 hours. I'll work with you on a fix and agree the timing of 
 
 In scope:
 
-- Footfall's own code: the runner and its container settings, the egress proxy, the tester's tools and its guard, how a run's results reach a calling agent, and any code handling an API key, a token or a password.
+- Footfall's own code: the runner and its container settings, the egress proxy, the tester's tools and its guard, how a run's results reach a calling agent, and any code handling an API key, a token, or a password.
 - The deployment files Footfall ships: its container images, the Compose files, and the scripts that set up a server.
 
 Out of scope:
@@ -46,6 +46,6 @@ Every change to `main` goes through a pull request that must pass CI. That inclu
 - a CycloneDX software bill of materials;
 - a build of the four container images;
 - CodeQL analysis of the Python code and the workflows;
-- the isolation tests, which start the development stack with gVisor and check what an app container and the browsers can reach.
+- isolation tests that start the development stack with gVisor and check what an app container and the browsers can reach.
 
 Third-party GitHub Actions are pinned to commit SHAs and kept current by Dependabot. GitHub secret scanning with push protection is enabled on the repository.

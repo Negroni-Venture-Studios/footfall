@@ -19,7 +19,7 @@ uv sync
 uv run pre-commit install
 ```
 
-The tests never reach the internet. The tests that start containers need Docker with gVisor on Linux. They run only in the isolation workflow, `.github/workflows/isolation.yml`. Docker Desktop on a Mac has no gVisor. For development there the runner accepts `FOOTFALL_RUNTIME=runc`. Every command then prints a warning and the isolation tests refuse to run. Never set it on a server.
+The tests never reach the internet. The tests that start containers need Docker with gVisor on Linux. They run only in the isolation workflow (`.github/workflows/isolation.yml`). Docker Desktop on a Mac has no gVisor. For development there the runner accepts `FOOTFALL_RUNTIME=runc`. Footfall warns you while it is set. The isolation tests refuse to run at all. Never set it on a server.
 
 ## Everyday commands
 
@@ -46,9 +46,9 @@ python3 docs/diagrams/build.py     # after changing a diagram in docs/diagrams/
   - `security`
   - `dependency-audit`
   - `sbom`
-  - `images`, which builds the four container images
-  - `analyze (python)` and `analyze (actions)`, from CodeQL
-  - `isolation`, which runs the sandbox's own tests under gVisor
+  - `images`: a build of the four container images
+  - CodeQL's `analyze (python)` and `analyze (actions)`
+  - `isolation`: the sandbox's own tests under gVisor
 - Every conversation on the pull request must be resolved.
 - Force pushes and deletion of `main` are blocked.
 - CI is the gate. No approving review count is required. Stale reviews are dismissed when new commits arrive.
@@ -59,16 +59,16 @@ Merge with a squash or a merge commit. Branches are deleted after merging.
 
 - **Test first.** Write the test that proves your change, watch it fail for the reason you expect, then make it pass. A test that passes both before and after a change proves nothing about it.
 - **Keep to the security requirements.** [AGENTS.md](AGENTS.md) lists them: only the runner talks to Docker, container settings come from one file, no secrets in containers, tools that take paths and never URLs, an append-only conversation, tester text labelled as observations, no secrets in logs, and no test on the internet. Every requirement gets tests as it is built. Keep them passing and extend them.
-- **Type hints throughout**, checked by mypy in strict mode.
-- **British English** in documentation and interface text, in sentence case, with no em or en dashes.
-- **Commit messages** use the imperative mood ("Add the egress proxy", not "Added …"), with a first line under 72 characters.
+- **Type hints throughout.** mypy checks them in strict mode.
+- **British English** in documentation and interface text. Write it in sentence case with no em or en dashes.
+- **Commit messages** are in the imperative mood. Write "Add the egress proxy", not "Added the egress proxy". Keep the first line under 72 characters.
 - **Changelog.** Add a line under `[Unreleased]` in CHANGELOG.md for anything a user or operator would notice.
 
 ## Dependencies
 
 Footfall keeps its dependencies few and well maintained.
 
-- **Ask before adding one.** Open an issue or say so in the pull request, with the reason and its licence.
+- **Ask before adding one.** Open an issue or say so in the pull request. Give the reason and the dependency's licence.
 - Every direct or transitive dependency must have a licence compatible with distributing Footfall as MIT. `scripts/check_licences.py` enforces this in CI. GPL and AGPL are ruled out.
 - Every direct or transitive package Footfall installs to run has its own row in [THIRD_PARTY_LICENCES.md](THIRD_PARTY_LICENCES.md). A test fails until a new one is added there.
 - Pin new tools and actions to released versions. Pin actions by commit SHA. I review and merge Dependabot's pull requests as they arrive once CI is green.
@@ -81,7 +81,7 @@ Playwright's server in the browser image refuses a client of another release. `u
 2. On Dependabot's branch change the base image in `images/browsers/Dockerfile` to the new release's tag with the digest that `docker buildx imagetools inspect mcr.microsoft.com/playwright:v<version>-noble` prints. Change `npm install --global playwright@<version>` to match.
 3. Push to the same branch. Dependabot stops rebasing a pull request once someone else has pushed to it. Bring the branch up to date with `main` by hand if it falls behind.
 
-The pull request then moves `uv.lock` and the browser image together. It is merged once every check is green, including the isolation workflow's.
+The pull request then moves `uv.lock` and the browser image together. It is merged once every check is green.
 
 ## Code of conduct
 
