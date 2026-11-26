@@ -2589,7 +2589,9 @@ async def test_a_crafted_index_cannot_copy_the_git_folder(
     names = [spelling, "footfall.toml", "footfall/briefs/default.md"]
     craft_index(folder / ".git" / "index", names)
     runner = FakeRunner(lambda copy: "127.0.0.1:9")
-    with pytest.raises(LocalRunError, match="git folder"):
+    # On a volume that folds case, .GIT is the git folder under another name than the disk
+    # holds, and ruling R80 refuses it for that before the copy can.
+    with pytest.raises(LocalRunError, match=r"git folder|differs from the name on disk"):
         await run_folder(folder, runner, connect[0], tmp_path, all_files=False)
     assert "prepare" not in runner.ops()
 
