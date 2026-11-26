@@ -1,5 +1,12 @@
 # Footfall
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/mockups/live-run-device-wall-dark.png">
+  <img alt="A mockup of Footfall's live device wall for an app on 12 devices. A bar across the top gives the commit and branch, how many testers are done, the findings so far and the model use. Below it are five device frames in their real proportions: a small phone, a large phone, a tablet, another phone and a laptop. Each frame is labelled with what its tester checks, the device, the language, the text size and the theme. A finished tester shows how many issues it found. The others show their current step." src="docs/images/mockups/live-run-device-wall-light.png">
+</picture>
+
+*A mockup of the live device wall. Each frame shows one tester's latest screen.*
+
 Coding agents now build and change web apps in minutes. But most of the code they write is never read by a person. While tests check what the app is expected to do they won't show whether someone with their text at its largest can still sign up on a small phone, or whether the arrows point the right way for someone who reads Arabic.
 
 Developers have always found those problems by watching someone use the app. The cheapest version is hallway testing. You grab whoever is walking past, hand them your phone and watch where they get stuck. Larger teams pay for QA, usability studies and beta testers. All of it assumes people write the code at the speed people work and that somebody remembers to ask.

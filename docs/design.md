@@ -258,7 +258,7 @@ Two mockups fix the layout and content of the device wall and the report. They d
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/mockups/live-run-device-wall-dark.png">
-  <img alt="Mockup of the live run page for an app on 12 devices. A bar across the top gives the commit and branch, 8 of 12 testers done, 14 findings so far and the model use so far. Below it, five device frames in their real proportions (a small phone, a large phone, a tablet, another phone and a laptop), each labelled with the tester's name, device, language, text size and theme. Finished testers show a badge with their count of issues; the others show their step and current action, such as step 14 of 30, tapping Gauges." src="images/mockups/live-run-device-wall-light.png">
+  <img alt="A mockup of Footfall's live device wall for an app on 12 devices. A bar across the top gives the commit and branch, how many testers are done, the findings so far and the model use. Below it are five device frames in their real proportions: a small phone, a large phone, a tablet, another phone and a laptop. Each frame is labelled with what its tester checks, the device, the language, the text size and the theme. A finished tester shows how many issues it found. The others show their current step." src="images/mockups/live-run-device-wall-light.png">
 </picture>
 
 <picture>
