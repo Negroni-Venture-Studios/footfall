@@ -79,7 +79,7 @@ Footfall has failed if any of these becomes true, even if it works:
 | Area | Options | Chosen | Why |
 |---|---|---|---|
 | Tester | Claude Code per persona, limited to Microsoft's Playwright MCP server; Footfall's own loop on the Anthropic API with tools it defines; scripted checks only | Footfall's own loop | No shell exists anywhere, every persona has a hard budget, and results come back in exactly the shape Footfall needs. Claude Code with Playwright MCP would depend on two fast-moving tools staying pinned and locked down. Scripted checks alone lose the personas, so they run before the personas instead. |
-| Web framework | Django, as Snug uses; Starlette, which the MCP SDK is built on; the standard library | Django | Sessions, CSRF protection, forms, migrations and security headers are built in and long audited, and Snug's security code (fail-closed configuration, the rate limiter, hashed tokens, the append-only audit log, the tests that walk every URL) can be reused nearly as it is. Starlette would mean assembling those by hand. The standard library cannot hold MCP's long-lived connections without the same SDK. |
+| Web framework | Django; Starlette, which the MCP SDK is built on; the standard library | Django | Sessions, CSRF protection, forms, migrations and security headers are built in and long audited, and Snug's security code (fail-closed configuration, the rate limiter, hashed tokens, the append-only audit log, the tests that walk every URL) can be reused nearly as it is. Starlette would mean assembling those by hand. The standard library cannot hold MCP's long-lived connections without the same SDK. |
 | Starting containers | A small runner of Footfall's own, the only holder of the Docker socket; an off-the-shelf Docker socket proxy; a virtual machine per run | Footfall's own runner | A socket proxy filters which API call is made, not what it asks for, so allowing "create container" allows a privileged container that mounts the host's disk. Firecracker needs nested virtualisation, which DigitalOcean [does not officially support](https://www.digitalocean.com/community/questions/does-digitalocean-support-nested-kvm-now). The runner writes every container's settings itself and ignores anything else. |
 | Sandbox runtime | Docker's default runtime; gVisor; Kata Containers | gVisor | gVisor puts its own kernel between the code under test and the host's, needs no hardware virtualisation, and Snug already runs it on DigitalOcean for its LibreOffice converter. Kata needs nested virtualisation. |
 
@@ -316,23 +316,23 @@ The code under test is untrusted, even when the deployer's own agent wrote it. I
 | A page steers the tester | The tools accept paths, never URLs; requests to any other host are aborted; the tester holds nothing worth leaking; the prompt says page text is data |
 | A tester's text steers the calling agent | Length limits on every field; tool descriptions that call findings observations; the merge sees titles only |
 | A hostile page attacks the browser | Browsers run in their own container per run, under gVisor, with no secrets |
-| Someone on the internet | Sign-in only for the organisation's members; hashed tokens; rate limits; Snug's security headers and content security policy; no published ports except Caddy's; a firewall on the droplet and SSH by key only |
+| Someone on the internet | Sign-in only for the organisation's members; hashed tokens; rate limits; strict security headers and a content security policy; no published ports except Caddy's; a firewall on the droplet and SSH by key only |
 | The web process is compromised | It holds neither the Anthropic key nor the GitHub App's private key, and cannot start containers |
 | Spending runs away | The limits above, checked after every model call |
 
-Hosts in `app.egress` and `browser.assets` must be host names, never addresses or wildcards. The proxy refuses any host that resolves to a private, loopback or link-local address. It connects to the address it checked and does not look the name up again, as Snug does for email. Anyone who can push to a tested repository can therefore widen what that repository's runs may reach but only to public hosts. Each run's page lists every host its containers reached.
+Hosts in `app.egress` and `browser.assets` must be host names, never addresses or wildcards. The proxy refuses any host that resolves to a private, loopback or link-local address. It connects to the address it checked and does not look the name up again. Anyone who can push to a tested repository can therefore widen what that repository's runs may reach but only to public hosts. Each run's page lists every host its containers reached.
 
-Footfall cannot protect against someone with root on the droplet, against DigitalOcean itself, or against a compromised GitHub account belonging to an organisation owner. A tester can also be wrong and that is why every finding has screenshots. A plain-English `docs/security.md` for deployers will set this out in the manner of Snug's.
+Footfall cannot protect against someone with root on the droplet, against DigitalOcean itself, or against a compromised GitHub account belonging to an organisation owner. A tester can also be wrong and that is why every finding has screenshots. A plain-English `docs/security.md` for deployers will set this out.
 
 ### Data and retention
 
-State lives in SQLite in WAL mode: runs, the personas in each run, findings, recorded steps, spend, tokens (hashed), people and their cached roles, sessions, settings other than keys, and an append-only audit log protected by triggers, as in Snug. Screenshots are files on a volume. Runs are deleted after 14 days by default and the audit log after a year.
+State lives in SQLite in WAL mode: runs, the personas in each run, findings, recorded steps, spend, tokens (hashed), people and their cached roles, sessions, settings other than keys, and an append-only audit log protected by triggers. Screenshots are files on a volume. Runs are deleted after 14 days by default and the audit log after a year.
 
 Version 1 has no backups. Everything except settings and tokens expires within two weeks and both of those can be made again in a few minutes. DigitalOcean's own droplet backups are an option for anyone who wants them.
 
 ### Deployment
 
-One `docker compose` file runs Caddy, the web process, the orchestrator, the runner and the egress proxy. The runner starts the per-run containers. Images are built in CI, published to GitHub's container registry and pinned by digest. A `cloud-init` file prepares a fresh Ubuntu 24.04 droplet: Docker from its own apt repository, gVisor installed and registered, a firewall, unattended upgrades, swap, and SSH by key only. It contains no secrets, because DigitalOcean's metadata service serves it back to anything on the droplet that asks. An update script follows Snug's. It fetches release files, checks them against published checksums, pins images by digest and refuses to downgrade. The runner gives each run a disk budget of `FOOTFALL_DISK_BUDGET_MIB` MiB, which is 8192 unless set. The budget counts every copy of the run's app. The runner also gives each run a lifetime of `FOOTFALL_RUN_LIFETIME_MINUTES` minutes, which is 90 unless set. After that it stops the run whether or not its caller is still there. The runner does not start with a disk budget that is not a whole number of MiB from 1 to 16,777,216 (16 TiB). It does not start with a lifetime that is not a whole number of minutes from 1 to 10,080 (a week). An empty value stops it too. Each run's files are in `/var/lib/footfall-runs`. That folder must belong to root and be writable by root alone. So must every folder above it on the host because the runner writes there as root and names its folders to Docker. Only the runner mounts it. The runner refuses to start unless `/var/lib/footfall-runs` as mounted passes that check. Each folder above it must pass too, as the runner's own container shows it. The runner cannot see the host's folders above it. Docker goes through those to find the mount and the deployment keeps them root's. Before it serves the runner removes every container, network and run folder an earlier runner left. One Footfall stack owns each Docker daemon. That sweep removes every container and network on the daemon that carries Footfall's run label, whichever stack made it. The egress proxy listens only at its own address on each run's network when the runner tells it.
+One `docker compose` file runs Caddy, the web process, the orchestrator, the runner and the egress proxy. The runner starts the per-run containers. Images are built in CI, published to GitHub's container registry and pinned by digest. A `cloud-init` file prepares a fresh Ubuntu 24.04 droplet: Docker from its own apt repository, gVisor installed and registered, a firewall, unattended upgrades, swap, and SSH by key only. It contains no secrets, because DigitalOcean's metadata service serves it back to anything on the droplet that asks. An update script fetches release files, checks them against published checksums, pins images by digest and refuses to downgrade. The runner gives each run a disk budget of `FOOTFALL_DISK_BUDGET_MIB` MiB, which is 8192 unless set. The budget counts every copy of the run's app. The runner also gives each run a lifetime of `FOOTFALL_RUN_LIFETIME_MINUTES` minutes, which is 90 unless set. After that it stops the run whether or not its caller is still there. The runner does not start with a disk budget that is not a whole number of MiB from 1 to 16,777,216 (16 TiB). It does not start with a lifetime that is not a whole number of minutes from 1 to 10,080 (a week). An empty value stops it too. Each run's files are in `/var/lib/footfall-runs`. That folder must belong to root and be writable by root alone. So must every folder above it on the host because the runner writes there as root and names its folders to Docker. Only the runner mounts it. The runner refuses to start unless `/var/lib/footfall-runs` as mounted passes that check. Each folder above it must pass too, as the runner's own container shows it. The runner cannot see the host's folders above it. Docker goes through those to find the mount and the deployment keeps them root's. Before it serves the runner removes every container, network and run folder an earlier runner left. One Footfall stack owns each Docker daemon. That sweep removes every container and network on the daemon that carries Footfall's run label, whichever stack made it. The egress proxy listens only at its own address on each run's network when the runner tells it.
 
 A `footfall doctor` command checks that gVisor runs, that a test container cannot reach the internet or the metadata address, that the proxy refuses a host it should, that the browsers start, and that the disk space and the certificate are in order.
 
@@ -352,14 +352,14 @@ The repository's `AGENTS.md` has a section an agent can follow to set Footfall u
 
 ### Front end and branding
 
-Footfall is a Negroni Venture Studios project and follows Snug's adaptation of the Negroni brand, with Footfall's own mark:
+Footfall is a Negroni Venture Studios project. It uses the Negroni brand with its own mark:
 
 - the Negroni palette in CSS `light-dark()` tokens, dark by default, with a light, dark and system toggle;
 - Geist and Geist Mono (SIL Open Font Licence) in place of the brand's commercial fonts, which cannot ship in an MIT repository;
 - Phosphor icons, server-rendered pages, a strict content security policy with no inline scripts, and pages that work without JavaScript, apart from the live updates on the device wall;
-- contrast measured by a test, as in Snug.
+- contrast measured by a test.
 
-Footfall steps back further than Snug. Its pages exist to show other people's apps. The brand's colour stays in the bar across the top and on the primary button. The device wall and report use neutral frames that leave the screenshots to dominate. Campari already marks what to press and the severity colours are distinct from it. The stylesheet will define them with contrast checked in both themes.
+Footfall keeps the brand quiet. Its pages exist to show other people's apps. The brand's colour stays in the bar across the top and on the primary button. The device wall and report use neutral frames that leave the screenshots to dominate. Campari already marks what to press and the severity colours are distinct from it. The stylesheet will define them with contrast checked in both themes.
 
 ### Documentation
 
@@ -378,11 +378,11 @@ Documentation grows with each phase:
 | `docs/personas.md` | Anyone editing the personas | 2 |
 | `docs/using-footfall.md` | People using the web pages | 5 |
 
-Diagrams follow Snug's method. Each is drawn by hand as an SVG with classes in place of colours. `docs/diagrams/build.py` writes a light and a dark copy with the palette and fonts inside and the Markdown shows the one that suits the reader's theme. Each diagram's title says what the diagram shows. A diagram whose information appears nowhere else in the text gets a text version beside it in a collapsed block. Agents read these documents to set Footfall up and cannot see images. Every embed uses a path relative to the repository. Charts use measured data only, such as memory against personas and the cost of real runs. A test fails if a built diagram is out of date. The screenshots of the web pages are generated by Playwright tests against the demo app in both themes.
+Each diagram is drawn by hand as an SVG with classes in place of colours. `docs/diagrams/build.py` writes a light and a dark copy with the palette and fonts inside and the Markdown shows the one that suits the reader's theme. Each diagram's title says what the diagram shows. A diagram whose information appears nowhere else in the text gets a text version beside it in a collapsed block. Agents read these documents to set Footfall up and cannot see images. Every embed uses a path relative to the repository. Charts use measured data only, such as memory against personas and the cost of real runs. A test fails if a built diagram is out of date. The screenshots of the web pages are generated by Playwright tests against the demo app in both themes.
 
 ### The repository
 
-The repository follows Snug's:
+The repository has:
 
 - `AGENTS.md` holds the rules for agents, and `CLAUDE.md` imports it;
 - `CONTRIBUTING.md`, the Contributor Covenant, `SECURITY.md`, `TRADEMARKS.md`, and a `THIRD_PARTY_LICENCES.md` that includes mobile-agent-testers' MIT notice;
@@ -424,7 +424,7 @@ I decided these on or before 24 November 2026:
 - Setup that the deployer's own agent can walk them through.
 - The name, Footfall.
 - A live device wall, and a summary report modelled on mobile-agent-testers' write-up of a run.
-- The Negroni palette with Snug's fonts, stepping back further than Snug does.
+- The Negroni palette and the Geist fonts in a quiet style.
 - Django for the web side, and Footfall's own runner for containers.
 - The sandbox and the tester are built first.
 - Each person sees runs only for the repositories they can read on GitHub.
@@ -440,7 +440,7 @@ I decided these on or before 24 November 2026:
 
 I settled these while writing the design and did not decide them at the start. They are listed so they can be revisited:
 
-- This document lives at `docs/design.md`, as Snug's does.
+- This document lives at `docs/design.md`.
 - Organisation owners are Footfall's admins. Other members run tests and make tokens.
 - A daily spend ceiling for each person as well as for the instance.
 - The web process and the orchestrator are separate containers. Keys typed into Settings are write-only.
