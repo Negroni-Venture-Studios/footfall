@@ -46,9 +46,11 @@ pytestmark = pytest.mark.isolation
 PROXY_URL: Final = "http://footfall-proxy:3128"  # as footfall test gives it
 ASSETS: Final = ("example.com",)
 NOT_LISTED: Final = "is not on this client's allow list"
-# How long Chromium is left on the app once a persona has typed into it. The download one
-# end-to-end run saw came within seconds; a minute gives it every chance.
-QUIET: Final = 60.0
+# Fresh Chromium launches in the test of Chromium's own requests, and how long each is left
+# on the app after a persona has typed into it. The request one end-to-end run saw came
+# within seconds of the browser starting, so many short launches beat one long wait.
+LAUNCHES: Final = 6
+QUIET: Final = 10.0
 # The trace categories that carry Chromium's network log, its own requests included.
 NETLOG: Final = ["disabled-by-default-netlog", "netlog"]
 # Every code point of Encrypted Client Hello and of the encrypted SNI before it.
@@ -292,8 +294,8 @@ def _gate_verdict(answer: dict[str, Any]) -> str:
     return "other"
 
 
-def outside_urls(trace: bytes, origin: str) -> list[str]:
-    """Each http or https URL in a Chromium trace's network log that is not on `origin`."""
+def traced_urls(trace: bytes) -> list[str]:
+    """Each http or https URL in a Chromium trace's network log."""
     found = set()
     for event in json.loads(trace).get("traceEvents", []):
         args = event.get("args")
@@ -302,8 +304,7 @@ def outside_urls(trace: bytes, origin: str) -> list[str]:
             continue
         for key in ("url", "original_url", "new_location"):
             url = params.get(key)
-            outside = not (url == origin or str(url).startswith(origin + "/"))
-            if isinstance(url, str) and url.startswith(("http://", "https://")) and outside:
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
                 found.add(url)
     return sorted(found)
 
@@ -311,32 +312,44 @@ def outside_urls(trace: bytes, origin: str) -> list[str]:
 async def test_chromium_asks_for_nothing_outside_the_app_while_a_persona_types(
     browsers: Browsers, proxy_log: ProxyLog
 ) -> None:
-    """Full Chromium makes no request of its own while a persona fills in a form and waits.
+    """Full Chromium makes no request of its own while personas fill in a form.
 
     One end-to-end run saw the proxy refuse redirector.gvt1.com, Google's download host,
-    from the browser container. The proxy sees only the host of an encrypted connection, so
-    this test reads Chromium's own network log from a trace and names each URL it tried.
+    from the browser container within seconds of the browser starting. The proxy sees only
+    the host of an encrypted connection, so this test reads Chromium's own network log from
+    a trace and names each URL it tried. Each round launches a fresh Chromium, as each run
+    does, because the request came early in a browser's life.
+
+    The control: each round's trace must hold the form page itself, so that a trace that
+    recorded nothing cannot pass.
     """
-    browser = await browsers.connect("chromium")
-    try:
-        await browser.start_tracing(categories=NETLOG)
-        context = await browsers.context(browser, "chromium")
-        page = await context.new_page()
-        assert await _goto(page, f"{browsers.app}/form") == 200
-        await page.get_by_label("Username").fill("tester")
-        await page.get_by_label("Password").fill("not a real password")
-        await page.get_by_label("Notes").fill("A short note with a mispelt word.")
-        await page.screenshot(type="jpeg")
-        async with page.expect_navigation(timeout=30_000):
-            await page.get_by_role("button", name="Sign in").click()
-        await page.screenshot(type="jpeg")
-        await asyncio.sleep(QUIET)
-        trace = await browser.stop_tracing()
-    finally:
-        await browser.close()
-    tried = outside_urls(trace, browsers.app)
+    form = f"{browsers.app}/form"
+    outside: set[str] = set()
+    for _ in range(LAUNCHES):
+        browser = await browsers.connect("chromium")
+        try:
+            await browser.start_tracing(categories=NETLOG)
+            context = await browsers.context(browser, "chromium")
+            page = await context.new_page()
+            assert await _goto(page, form) == 200
+            await page.get_by_label("Username").fill("tester")
+            await page.get_by_label("Password").fill("not a real password")
+            await page.get_by_label("Notes").fill("A short note with a mispelt word.")
+            await page.screenshot(type="jpeg")
+            async with page.expect_navigation(timeout=30_000):
+                await page.get_by_role("button", name="Sign in").click()
+            await page.screenshot(type="jpeg")
+            await asyncio.sleep(QUIET)
+            trace = await browser.stop_tracing()
+        finally:
+            await browser.close()
+        urls = traced_urls(trace)
+        assert form in urls, f"the trace recorded {len(urls)} URLs and not the form page"
+        outside.update(
+            u for u in urls if u != browsers.app and not u.startswith(browsers.app + "/")
+        )
     decisions = proxy_log.decisions(browsers.address)
-    assert (tried, decisions) == ([], []), (tried, decisions)
+    assert (sorted(outside), decisions) == ([], []), (sorted(outside), decisions)
 
 
 async def test_the_gate_shows_an_app_container_nothing(browsers: Browsers) -> None:
