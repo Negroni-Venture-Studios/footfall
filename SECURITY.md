@@ -1,10 +1,10 @@
 # Security policy
 
-Footfall runs other people's code in containers and sends what it sees to a model, so security reports come before all other work.
+Footfall runs other people's code in containers and sends what it sees to a model. Security reports come before all other work.
 
 ## Reporting a vulnerability
 
-**Please do not open a public issue.** Report privately, in either of these ways:
+**Please do not open a public issue.** Report privately in either of these ways:
 
 1. **GitHub private vulnerability reporting** (preferred). Go to the [Security tab](https://github.com/Negroni-Venture-Studios/footfall/security/advisories/new) and choose "Report a vulnerability".
 2. **Email** alasdair@negroniventurestudios.com.
@@ -15,31 +15,31 @@ Please include:
 - the steps to reproduce it, against a local instance if you can;
 - the Footfall version or commit.
 
-You will get a response within 72 hours. We will work with you on a fix and agree the timing of any public disclosure. We are happy to credit you in the advisory.
+I'll reply within 72 hours. I'll work with you on a fix and agree the timing of any public disclosure. I'm happy to credit you in the advisory.
 
 ## Scope
 
 In scope:
 
 - Footfall's own code: the runner and its container settings, the egress proxy, the tester's tools and its guard, how a run's results reach a calling agent, and any code handling an API key, a token or a password.
-- The deployment files we ship: Footfall's container images, the Compose files, and the scripts that set a server up.
+- The deployment files Footfall ships: its container images, the Compose files and the scripts that set a server up.
 
 Out of scope:
 
-- The apps Footfall tests. A bug in an app under test is what Footfall exists to find, and an app's own weaknesses are its author's to fix.
+- The apps Footfall tests. A bug in an app under test is what Footfall exists to find. An app's own weaknesses are its author's to fix.
 - Weaknesses in an operator's own infrastructure or configuration that Footfall's documentation already warns against.
 
 ## Supported versions
 
-Security fixes go into the next release, and only the latest release is supported. Footfall has no release yet.
+Security fixes go into the next release. Only the latest release is supported. Footfall has no release yet.
 
 ## How changes are checked
 
-Every change to `main`, an administrator's included, goes through a pull request that must pass CI. CI runs:
+Every change to `main` goes through a pull request that must pass CI. That includes an administrator's changes. CI runs:
 
 - ruff's security rules;
 - strict type checking;
-- the test suite, with no network access;
+- the test suite with no network access;
 - gitleaks over the full git history;
 - pip-audit against known vulnerabilities;
 - a licence check;
