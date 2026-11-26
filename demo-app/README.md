@@ -24,5 +24,3 @@ The session cookie has no `Secure` flag only because Footfall's sandbox serves p
 ## Run Footfall against it
 
 `footfall.toml` is the app's manifest, and `footfall/briefs/default.md` is the brief the testers read. Footfall makes a username and password for each run and passes them to `seed.py`, as it does for any app with its own sign-in.
-
-The testers are adapted from [mobile-agent-testers](https://github.com/pierridotite/mobile-agent-testers), an MIT-licensed project that runs AI testers against native mobile apps.
