@@ -603,15 +603,17 @@ def _refuse_other_names(git: str, folder: Path, names: Collection[PurePosixPath]
     developer's answers to a name the branch tracks that differs from its own, and git's
     excludes, which fold ASCII case at most, do not match the two. With every part listed as
     it is tracked, the excludes are matched against the names the disk holds. Each folder is
-    listed once. With core.precomposeUnicode true, git composes each name it reads from a
-    folder, so a listed name is composed here too where the result is sure: a composed name
-    is kept, and a name that is exactly its NFC form decomposed is replaced by that form.
+    listed once. With core.precomposeUnicode true, on macOS, where alone git honours it, git
+    composes each name it reads from a folder, so a listed name is composed here too where
+    the result is sure: a composed name is kept, and a name that is exactly its NFC form
+    decomposed is replaced by that form.
     A name that is neither, such as one partly decomposed or one that holds a singleton
     like the KELVIN SIGN beside a decomposed letter, is left out of the listing, since git
     may read it as some other name; the tracked name is then refused. Raises LocalRunError.
     """
     asked = ["config", "--bool", "--default", "false", "--get", "core.precomposeUnicode"]
-    composes = _run_git(git, folder, asked).strip() == b"true"
+    # git honours the setting on macOS alone.
+    composes = sys.platform == "darwin" and _run_git(git, folder, asked).strip() == b"true"
     listings: dict[PurePosixPath, frozenset[bytes]] = {}
 
     def listing(inside: PurePosixPath) -> frozenset[bytes]:

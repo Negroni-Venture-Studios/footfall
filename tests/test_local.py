@@ -1475,6 +1475,13 @@ def own_git_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.M
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
 
+@pytest.fixture
+def on_a_mac(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the platform, so that core.precomposeUnicode counts, as git makes it
+    count on macOS alone."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
 def sparse_repository(tmp_path: Path) -> Path:
     """Part B's Minor 1, as the reviewer reproduced it with git 2.54.0: a sparse checkout of
     `app`, the developer's own secrets/prod.env kept out by .git/info/exclude, and a branch
@@ -1797,7 +1804,7 @@ def test_a_tracked_folder_the_disk_lists_differently_is_refused(
 KELVIN_NAME = "\u212aey.env"  # KELVIN SIGN, which NFC makes a plain K and git leaves alone
 
 
-@pytest.mark.usefixtures("own_git_home")
+@pytest.mark.usefixtures("own_git_home", "on_a_mac")
 def test_a_name_git_does_not_compose_is_not_composed_before_the_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1825,7 +1832,7 @@ def test_a_name_git_does_not_compose_is_not_composed_before_the_match(
         pytest.param("\u212ae\u0301.env", "\u212a\u00e9.env", id="singleton by a decomposed"),
     ],
 )
-@pytest.mark.usefixtures("own_git_home")
+@pytest.mark.usefixtures("own_git_home", "on_a_mac")
 def test_a_name_git_may_compose_some_other_way_matches_no_tracked_name(
     tmp_path: Path, raw: str, as_git_reads_it: str
 ) -> None:
@@ -1903,7 +1910,28 @@ def test_a_tracked_name_that_opens_your_file_by_another_name_is_refused(
     assert local._shown(PurePosixPath(tracked)) in str(refused.value)
 
 
+@pytest.mark.parametrize(("platform", "composes"), [("linux", False), ("darwin", True)])
 @pytest.mark.usefixtures("own_git_home")
+def test_listed_names_are_composed_only_where_git_composes_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, composes: bool
+) -> None:
+    """Ruling R82: git honours core.precomposeUnicode on macOS alone. Elsewhere a decomposed
+    name the branch tracks is the name git reads from the folder, whatever the setting, and
+    is no reason to refuse."""
+    folder = tracked_two_pages(tmp_path)
+    git(folder, "config", "core.precomposeUnicode", "false")
+    (folder / NFD_NAME).write_text("FROM_THE_BRANCH=1\n")
+    tracked_under(folder, NFD_NAME)
+    git(folder, "config", "core.precomposeUnicode", "true")
+    monkeypatch.setattr(sys, "platform", platform)
+    if composes:
+        with pytest.raises(LocalRunError, match="differs from the name on disk"):
+            local._git_files(folder)
+    else:
+        assert PurePosixPath(NFD_NAME) in local._git_files(folder).names
+
+
+@pytest.mark.usefixtures("own_git_home", "on_a_mac")
 def test_a_decomposed_tracked_name_is_refused_where_git_composes_what_it_reads(
     tmp_path: Path,
 ) -> None:
@@ -1927,7 +1955,7 @@ def test_a_decomposed_tracked_name_is_refused_where_git_composes_what_it_reads(
         local._git_files(folder)
 
 
-@pytest.mark.usefixtures("own_git_home")
+@pytest.mark.usefixtures("own_git_home", "on_a_mac")
 def test_a_composed_tracked_name_over_a_decomposed_file_is_read_where_git_composes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
