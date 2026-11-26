@@ -660,19 +660,21 @@ def _refuse_yours(
     if not changed and not marked:
         return
     _refuse_other_names(git, folder, changed | marked)
-    where = _run_git(
-        git, folder, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
-    )
-    sources = [Path(os.fsdecode(where.removesuffix(b"\n")))]
     # Unset, the setting exits 1, and git reads its default file instead.
     asked = ["config", "--type=path", "--get", "core.excludesFile"]
     configured = os.fsdecode(_run_git(git, folder, asked, ok=frozenset({0, 1})).strip(b"\n"))
     if configured:
         # git opens a relative one from the worktree's top, not from where Footfall runs.
         path = Path(configured)
-        sources.append(path if path.is_absolute() else _worktree_top(folder) / path)
+        sources = [path if path.is_absolute() else _worktree_top(folder) / path]
     else:
-        sources += _default_excludes()
+        sources = _default_excludes()
+    # The repository's own file goes last: a later file's pattern wins, and git lets
+    # info/exclude outrank the global file.
+    where = _run_git(
+        git, folder, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
+    )
+    sources.append(Path(os.fsdecode(where.removesuffix(b"\n"))))
     readable = [path for path in sources if path.is_file()]
     if not readable:
         return

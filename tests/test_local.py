@@ -1648,6 +1648,26 @@ def test_a_tracked_file_named_head_does_not_stop_the_run(tmp_path: Path) -> None
         local._git_files(folder)
 
 
+def test_your_repository_excludes_outrank_your_global_ones(tmp_path: Path) -> None:
+    """Fix round 5, Minor 4: git reads core.excludesFile first and info/exclude last, so
+    info/exclude wins. A negation in the global file does not undo the repository's own
+    exclude, and the other way round it does."""
+    folder = tracked_two_pages(tmp_path)
+    (folder / "prod.env").write_text("FROM_THE_BRANCH=1\n")
+    commit_all(folder)
+    excludes = tmp_path / "global-ignore"
+    git(folder, "config", "core.excludesFile", str(excludes))
+    (folder / "prod.env").write_text(DEVELOPERS_SECRET)
+    excludes.write_text("!prod.env\n")
+    (folder / ".git" / "info" / "exclude").write_text("prod.env\n")
+    git(folder, "check-ignore", "-q", "--no-index", "prod.env")  # git's own answer: ignored
+    with pytest.raises(LocalRunError, match=r'"prod\.env"'):
+        local._git_files(folder)
+    excludes.write_text("prod.env\n")
+    (folder / ".git" / "info" / "exclude").write_text("!prod.env\n")
+    assert PurePosixPath("prod.env") in local._git_files(folder).names
+
+
 def test_a_case_variant_of_an_excluded_name_is_refused_on_any_volume(tmp_path: Path) -> None:
     """Ruling R79: with core.ignoreCase false, git matches the developer's `prod.env` to the
     branch's PROD.ENV on no volume, though on a volume that ignores case both names open
