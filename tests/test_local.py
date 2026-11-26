@@ -935,7 +935,10 @@ def link_in_a_checkout(tmp_path: Path) -> Path:
     outside = tmp_path / "outside"
     two_pages(outside)
     top = tmp_path / "code" / "checkout"
-    (top / "sub").mkdir(parents=True)
+    (top / "sub" / "real").mkdir(parents=True)
+    (top / "real").mkdir()
+    (top / "real" / "kept").write_text("")
+    (top / "sub" / "real" / "kept").write_text("")
     (top / "app").symlink_to(outside / "app")
     (top / "sub" / "app").symlink_to(outside / "app")
     git(top, "init", "-q")
@@ -968,6 +971,8 @@ def test_a_branchs_link_is_refused_when_the_operator_names_the_checkout_by_a_lin
     with pytest.raises(LocalRunError, match="is a link") as refused:
         local._refuse_a_link_into(tmp_path / named)
     assert 'app" in the checkout at' in str(refused.value)
+    # The control: the operator's own link is no reason to refuse a real folder below it.
+    local._refuse_a_link_into((tmp_path / named).with_name("real"))
 
 
 def test_a_link_that_leads_back_to_itself_is_refused_not_followed_for_ever(
