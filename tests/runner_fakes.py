@@ -37,6 +37,9 @@ class FakeEngine:
         self.exit_codes: dict[str, int] = {}  # by role
         self.output: dict[str, str] = {}  # log text, by role
         self.slow: set[str] = set()  # roles whose wait times out
+        # Roles whose container has stopped by the time its address is read, as a step that
+        # fails at once can. Docker has cleared its network details by then.
+        self.stopped_early: set[str] = set()
         self.during_wait: dict[str, Callable[[Path], object]] = {}  # by role, given the workspace
         self.failures: dict[tuple[str, str | None], BaseException] = {}
         self._count = 9
@@ -114,11 +117,20 @@ class FakeEngine:
             name = self._name(container)
             self.calls.append(("address", name, network))
             self._maybe_fail("address", self._role(name))
+            if self._role(name) in self.stopped_early:
+                raise EngineError(f"container {name} has no address on network {network}")
             if name in self.live and self.configs[name]["HostConfig"]["NetworkMode"] == network:
                 return self.ips[name]
             if (network, name) in self.attached:
                 return OUTSIDE_IPS[name]
             raise EngineError(f"container {name} has no address on network {network}")
+
+    def has_stopped(self, container: str) -> bool:
+        with self._lock:
+            name = self._name(container)
+            self.calls.append(("has_stopped", name))
+            self._maybe_fail("has_stopped", self._role(name))
+            return self._role(name) in self.stopped_early
 
     def remove(self, container: str) -> None:
         with self._lock:
