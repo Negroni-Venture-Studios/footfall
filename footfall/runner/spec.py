@@ -42,7 +42,9 @@ LIMITS: Final[Mapping[Role, Limits]] = MappingProxyType(
         "install": Limits(memory_bytes=_GIB, nano_cpus=1_000_000_000, pids=256),
         "seed": Limits(memory_bytes=512 * _MIB, nano_cpus=1_000_000_000, pids=256),
         "app": Limits(memory_bytes=512 * _MIB, nano_cpus=1_000_000_000, pids=256),
-        "browsers": Limits(memory_bytes=2 * _GIB, nano_cpus=2_000_000_000, pids=1024),
+        # Every persona in a run shares one browsers container. Twelve peaked at 1,985 MiB
+        # under the old 2 GiB on a droplet in phase 1. #26 makes the limits follow the personas.
+        "browsers": Limits(memory_bytes=4 * _GIB, nano_cpus=2_000_000_000, pids=1024),
     }
 )
 
