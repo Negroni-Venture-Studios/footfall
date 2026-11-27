@@ -41,7 +41,8 @@ def test_limits_table() -> None:
         "install": (gib, 10**9, 256),
         "seed": (gib // 2, 10**9, 256),
         "app": (gib // 2, 10**9, 256),
-        "browsers": (2 * gib, 2 * 10**9, 1024),
+        # Twelve personas peaked at 1,985 MiB under the old 2 GiB on a droplet in phase 1.
+        "browsers": (4 * gib, 2 * 10**9, 1024),
     }
     assert APP_UID == 10010
 
