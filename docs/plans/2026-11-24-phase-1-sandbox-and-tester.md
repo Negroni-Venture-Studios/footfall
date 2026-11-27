@@ -1,5 +1,7 @@
 # Phase 1: the sandbox and the tester. Implementation plan
 
+**Status:** done on 27 November 2026. The runs on a droplet are in [docs/phase-1-run.md](../phase-1-run.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Run Footfall's persona testers against the demo app from the command line, with the app, its dependencies and the browsers sealed in gVisor containers that hold no secrets and reach nothing but the hosts the manifest names.

@@ -30,7 +30,7 @@ The agent asks Footfall over MCP to test its change. Each app's repository holds
 
 ## Status
 
-Footfall is at phase 1 of the [design](docs/design.md). That is the sandbox and the tester. Nothing here is ready to deploy. Phase 1 builds the runner, the gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and a demo app with planted bugs. All of it is driven from the command line. Later phases add runs, deployment, the MCP endpoint, and the live device wall.
+Phase 1 of the [design](docs/design.md) is done. That is the sandbox and the tester. Phase 1 built the runner, the gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and a demo app with planted bugs. All of it is driven from the command line. Phase 2 is next and adds runs: a queue, scripted checks, merged findings, and spend limits. Later phases add deployment, the MCP endpoint, and the live device wall. Nothing here is ready to deploy yet.
 
 ## Trying phase 1
 
