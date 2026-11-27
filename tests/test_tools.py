@@ -467,6 +467,32 @@ async def test_type_preserves_unicode(session: MakeSession) -> None:
     assert field.value == text
 
 
+SIGN_IN = """<!doctype html><title>Sign in</title>
+<form><label for="u">Username</label><input id="u">
+<label for="p">Password</label><input id="p" type="password"><button>Sign in</button></form>
+<script>
+document.forms[0].addEventListener("submit", (event) => {
+  event.preventDefault();
+  window.sent = [document.getElementById("u").value, document.getElementById("p").value];
+});
+</script>"""
+
+
+@pytest.mark.parametrize("touch", [False, True], ids=["mouse", "touch"])
+async def test_type_moves_to_the_next_field_at_a_tab(
+    session: MakeSession, app_server: AppServer, touch: bool
+) -> None:
+    # The tool says a tab moves to the next field. Playwright's keyboard types one into the
+    # field as a character, so a username, a tab and a password all land in the username.
+    app_server.page("/sign-in", SIGN_IN)
+    s = await session("/sign-in", has_touch=touch, is_mobile=touch)
+    await tap_name(s, s.first, "Username")
+    outcome = await s.executor.run("type", {"text": "tester-abc\tsecret-xyz\n"})
+    assert outcome.error is False
+    assert outcome.text.splitlines()[0] == "Typed 22 characters."
+    assert await s.page.evaluate("window.sent") == ["tester-abc", "secret-xyz"]
+
+
 async def test_type_too_long_is_error(session: MakeSession) -> None:
     s = await session()
     await tap_name(s, s.first, "Name")

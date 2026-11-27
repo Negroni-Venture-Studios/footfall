@@ -850,11 +850,18 @@ class Executor:
         noun = "character" if len(text) == 1 else "characters"
         action = _Action(f"Typed {len(text)} {noun}.")
         self._attempt = action
-        # Each chunk has its own timeout: a page that handles every keystroke slowly is not
-        # hung, but one that stops answering is.
-        for start in range(0, len(text), TYPE_CHUNK):
-            chunk = text[start : start + TYPE_CHUNK]
-            action.failures = await self._act(self._page.keyboard.type(chunk))
+        # Playwright types a tab into the field as a character. The tool promises that a tab
+        # moves to the next field. So each tab is pressed as the Tab key. Each chunk has its
+        # own timeout: a page that handles every keystroke slowly is not hung, but one that
+        # stops answering is.
+        for number, piece in enumerate(text.split("\t")):
+            if number:
+                action.failures = await self._act(self._page.keyboard.press("Tab"))
+            for start in range(0, len(piece), TYPE_CHUNK):
+                if action.failures:
+                    break
+                chunk = piece[start : start + TYPE_CHUNK]
+                action.failures = await self._act(self._page.keyboard.type(chunk))
             if action.failures:
                 break
         return action
