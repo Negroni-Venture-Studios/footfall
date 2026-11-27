@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 680" width="1000" height="680" role="img" aria-labelledby="t d">
+<style id="preview">svg { --bg: #fdfbf9; --surface: #ffffff; --tint: #f7efe8; --border: #ece3db; --border-strong: #d8cabe; --text: #1A0B00; --text-2: #6a5141; --text-3: #7a6253; --link: #B24400; --action: #FF6200; --on-action: #1A0B00; --ok: #127D47; --warn: #8a5a00; --danger: #a8322b; }
+svg { background: var(--bg); }
+text { font-family: Geist, sans-serif; font-size: 14px; fill: var(--text); }
+.bg { fill: var(--bg); }
+.box { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; }
+.zone { fill: var(--tint); stroke: var(--border); stroke-width: 1; }
+.zone-dashed {
+  fill: none; stroke: var(--border-strong); stroke-width: 1.25; stroke-dasharray: 6 5;
+}
+.box-dashed {
+  fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; stroke-dasharray: 6 5;
+}
+.key { fill: var(--surface); stroke: var(--link); stroke-width: 1.75; }
+.solid-action { fill: var(--action); }
+.solid-ok { fill: var(--ok); }
+.solid-warn { fill: var(--warn); }
+.solid-danger { fill: var(--danger); }
+.line { fill: none; stroke: var(--text-3); stroke-width: 1.5; }
+.line-accent { fill: none; stroke: var(--link); stroke-width: 1.75; }
+.line-ok { fill: none; stroke: var(--ok); stroke-width: 1.5; }
+.line-danger { fill: none; stroke: var(--danger); stroke-width: 1.5; }
+.line-dashed { fill: none; stroke: var(--text-3); stroke-width: 1.25; stroke-dasharray: 4 4; }
+.arrow { fill: var(--text-3); }
+.arrow-accent { fill: var(--link); }
+.arrow-ok { fill: var(--ok); }
+.arrow-danger { fill: var(--danger); }
+.title { font-size: 15px; font-weight: 600; }
+.label { font-size: 13px; fill: var(--text-2); }
+.small { font-size: 12px; fill: var(--text-3); }
+.heading { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; fill: var(--text-3); }
+.mono {
+  font-family: "Geist Mono", monospace; font-size: 12.5px; fill: var(--text-2);
+  font-variant-ligatures: none;
+}
+.accent { fill: var(--link); }
+.ok { fill: var(--ok); }
+.warn { fill: var(--warn); }
+.danger { fill: var(--danger); }
+.on-action { fill: var(--on-action); font-weight: 600; }
+</style>
+
+<title id="t">One run's network. The code under test reaches the egress proxy and nothing else outside its run.</title>
+<desc id="d">The runner makes an internal network for each run. It has no route to the internet. The host has no address on it. The runner connects the egress proxy and the orchestrator to it. On it are a copy of the app for each persona and one browsers container. Install and seed run there once before the copies start. The orchestrator drives the browsers through Playwright and checks that each copy answers. It listens on no port. The browsers' gate opens only for a path made fresh for the run. The runner makes the path and gives it only to the orchestrator. The browsers reach the app. Any other request from a page or from an app goes to the proxy. The proxy allows only the hosts listed in the run's manifest. During install it also allows the package registries. It logs each decision but never a path, a header, or a body. Only the orchestrator reaches the Anthropic API. It goes straight there over Docker's default bridge. The runner has no network and reaches Docker and the proxy by Unix socket. The code under test cannot reach a host off the run's list, the host machine, the metadata address, another run's containers, or the browsers without the run's path. Its name lookups and datagrams stay inside the run.</desc>
+<defs>
+  <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow"/></marker>
+  <marker id="tip-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-accent"/></marker>
+</defs>
+<rect class="bg" width="1000" height="680"/>
+
+<!-- Outside the run -->
+<rect class="box" x="20" y="30" width="240" height="64" rx="8"/>
+<text class="title" x="36" y="56">Anthropic API</text>
+<text class="mono" x="36" y="78">api.anthropic.com</text>
+
+<rect class="box" x="740" y="30" width="240" height="80" rx="8"/>
+<text class="title" x="756" y="56">Allowed hosts</text>
+<text class="label" x="756" y="78">the manifest's, and package</text>
+<text class="label" x="756" y="96">registries during install</text>
+
+<!-- Key -->
+<rect class="key" x="330" y="44" width="22" height="14" rx="3"/>
+<text class="small" x="362" y="56">holds a secret, or the Docker socket</text>
+<path class="line-dashed" d="M330,80 H352"/>
+<text class="small" x="362" y="84">a Unix socket</text>
+
+<text class="small" x="150" y="166">Docker's default bridge</text>
+<text class="small" x="850" y="166" text-anchor="end">Docker's default bridge</text>
+
+<!-- The run's network -->
+<rect class="zone" x="200" y="180" width="600" height="340" rx="12"/>
+<text class="heading" x="290" y="206">ONE RUN'S NETWORK</text>
+<text class="small" x="290" y="224">internal: no route to the internet, no address for the host</text>
+
+<rect class="box" x="330" y="250" width="200" height="88" rx="8"/>
+<text class="title" x="346" y="276">Browsers</text>
+<text class="label" x="346" y="298">every persona's page,</text>
+<text class="label" x="346" y="316">behind a gate</text>
+
+<rect class="box" x="346" y="370" width="200" height="96" rx="8"/>
+<rect class="box" x="338" y="378" width="200" height="96" rx="8"/>
+<rect class="box" x="330" y="386" width="200" height="96" rx="8"/>
+<text class="title" x="346" y="412">App copies</text>
+<text class="label" x="346" y="434">one per persona, each</text>
+<text class="label" x="346" y="452">from the same seed</text>
+
+<text class="small" x="290" y="504">Install and seed run here once, before the copies start.</text>
+
+<!-- Straddling the edge: on Docker's default bridge and on the run's network -->
+<rect class="key" x="20" y="250" width="240" height="200" rx="8"/>
+<text class="title" x="36" y="276">Orchestrator</text>
+<text class="label" x="36" y="298">holds the Anthropic key,</text>
+<text class="label" x="36" y="316">drives the browsers and</text>
+<text class="label" x="36" y="334">checks each copy answers</text>
+<text class="label" x="36" y="370">listens on no port</text>
+
+<rect class="box" x="740" y="250" width="240" height="200" rx="8"/>
+<text class="title" x="756" y="276">Egress proxy</text>
+<text class="label" x="756" y="298">allows each container</text>
+<text class="label" x="756" y="316">its run's hosts only, and</text>
+<text class="label" x="756" y="334">listens on no other network</text>
+<text class="label" x="756" y="370">logs each decision, never</text>
+<text class="label" x="756" y="388">a path, a header, or a body</text>
+
+<!-- Lines -->
+<path class="line" d="M140,250 V96" marker-end="url(#tip)"/>
+<path class="line" d="M860,250 V112" marker-end="url(#tip)"/>
+
+<path class="line-accent" d="M260,294 H328" marker-end="url(#tip-accent)"/>
+<text class="small" x="266" y="286">Playwright</text>
+<path class="line" d="M260,430 H328" marker-end="url(#tip)"/>
+<path class="line" d="M430,338 V368" marker-end="url(#tip)"/>
+
+<path class="line" d="M530,294 H738" marker-end="url(#tip)"/>
+<text class="small" x="552" y="286">a page's other requests</text>
+<path class="line" d="M546,418 H738" marker-end="url(#tip)"/>
+<text class="small" x="566" y="410">the app's own requests</text>
+
+<!-- The runner -->
+<path class="line-dashed" d="M100,452 V558"/>
+<rect class="key" x="20" y="560" width="170" height="98" rx="8"/>
+<text class="title" x="36" y="586">Runner</text>
+<text class="label" x="36" y="608">no network; reaches</text>
+<text class="label" x="36" y="626">Docker and the proxy</text>
+<text class="label" x="36" y="644">by Unix socket</text>
+
+<!-- Refused -->
+<text class="heading" x="230" y="576">OUT OF REACH OF THE CODE UNDER TEST</text>
+<text class="danger" x="230" y="604">×</text>
+<text class="label" x="246" y="604">hosts off the run's list</text>
+<text class="danger" x="230" y="630">×</text>
+<text class="label" x="246" y="630">the host, on any address</text>
+<text class="danger" x="480" y="604">×</text>
+<text class="label" x="496" y="604">the metadata address</text>
+<text class="danger" x="480" y="630">×</text>
+<text class="label" x="496" y="630">another run's containers</text>
+<text class="danger" x="730" y="604">×</text>
+<text class="label" x="746" y="604">lookups and datagrams out</text>
+<text class="danger" x="730" y="630">×</text>
+<text class="label" x="746" y="630">the browsers, without the path</text>
+</svg>

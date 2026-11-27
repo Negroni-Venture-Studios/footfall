@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460" width="1000" height="460" role="img" aria-labelledby="t d">
+<style id="preview">svg { --bg: #fdfbf9; --surface: #ffffff; --tint: #f7efe8; --border: #ece3db; --border-strong: #d8cabe; --text: #1A0B00; --text-2: #6a5141; --text-3: #7a6253; --link: #B24400; --action: #FF6200; --on-action: #1A0B00; --ok: #127D47; --warn: #8a5a00; --danger: #a8322b; }
+svg { background: var(--bg); }
+text { font-family: Geist, sans-serif; font-size: 14px; fill: var(--text); }
+.bg { fill: var(--bg); }
+.box { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; }
+.zone { fill: var(--tint); stroke: var(--border); stroke-width: 1; }
+.zone-dashed {
+  fill: none; stroke: var(--border-strong); stroke-width: 1.25; stroke-dasharray: 6 5;
+}
+.box-dashed {
+  fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; stroke-dasharray: 6 5;
+}
+.key { fill: var(--surface); stroke: var(--link); stroke-width: 1.75; }
+.solid-action { fill: var(--action); }
+.solid-ok { fill: var(--ok); }
+.solid-warn { fill: var(--warn); }
+.solid-danger { fill: var(--danger); }
+.line { fill: none; stroke: var(--text-3); stroke-width: 1.5; }
+.line-accent { fill: none; stroke: var(--link); stroke-width: 1.75; }
+.line-ok { fill: none; stroke: var(--ok); stroke-width: 1.5; }
+.line-danger { fill: none; stroke: var(--danger); stroke-width: 1.5; }
+.line-dashed { fill: none; stroke: var(--text-3); stroke-width: 1.25; stroke-dasharray: 4 4; }
+.arrow { fill: var(--text-3); }
+.arrow-accent { fill: var(--link); }
+.arrow-ok { fill: var(--ok); }
+.arrow-danger { fill: var(--danger); }
+.title { font-size: 15px; font-weight: 600; }
+.label { font-size: 13px; fill: var(--text-2); }
+.small { font-size: 12px; fill: var(--text-3); }
+.heading { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; fill: var(--text-3); }
+.mono {
+  font-family: "Geist Mono", monospace; font-size: 12.5px; fill: var(--text-2);
+  font-variant-ligatures: none;
+}
+.accent { fill: var(--link); }
+.ok { fill: var(--ok); }
+.warn { fill: var(--warn); }
+.danger { fill: var(--danger); }
+.on-action { fill: var(--on-action); font-weight: 600; }
+</style>
+
+<title id="t">Peak memory of each container in a run of twelve personas: browsers 1,985 MiB of a 4,096 MiB limit, each app copy 47 MiB of 512, orchestrator 200, egress proxy 96, runner 96, and seed 31 of 512. The whole stack peaked at 2,706 MiB.</title>
+<desc id="d">A bar chart of the first run of twelve personas on a droplet with 4 vCPUs and 8 GB. One browsers container served all twelve personas. It peaked at 1,985 MiB under an earlier limit of 2 GiB. Its limit is now 4 GiB. Each of the twelve app copies peaked at 47 MiB of its 512 MiB limit, 564 MiB in all. The orchestrator peaked at 200 MiB, the egress proxy at 96, and the runner at 96. None of them has a limit. The seed step runs once before the copies start. It peaked at 31 MiB of 512. At its busiest moment the whole stack used 2,706 MiB. Each container peaked at its own moment. Counting all twelve copies, their peaks add up to 2,972 MiB.</desc>
+<rect class="bg" width="1000" height="460"/>
+
+<text class="heading" x="20" y="36">PEAK MEMORY OF EACH CONTAINER, TWELVE PERSONAS</text>
+
+<!-- Key -->
+<rect class="zone" x="660" y="25" width="22" height="12" rx="3"/>
+<text class="small" x="690" y="36">its limit</text>
+<rect class="accent" x="790" y="25" width="22" height="12" rx="3"/>
+<text class="small" x="820" y="36">its peak</text>
+
+<!-- Gridlines at 0, 1,000, 2,000, 3,000 and 4,000 MiB: 0.15 px per MiB from x=240 -->
+<path class="zone" d="M240,60 V370"/>
+<path class="zone" d="M390,60 V370"/>
+<path class="zone" d="M540,60 V370"/>
+<path class="zone" d="M690,60 V370"/>
+<path class="zone" d="M840,60 V370"/>
+<text class="small" x="240" y="390" text-anchor="middle">0</text>
+<text class="small" x="390" y="390" text-anchor="middle">1,000</text>
+<text class="small" x="540" y="390" text-anchor="middle">2,000</text>
+<text class="small" x="690" y="390" text-anchor="middle">3,000</text>
+<text class="small" x="840" y="390" text-anchor="middle">4,000 MiB</text>
+
+<!-- Browsers: 1,985 of 4,096 -->
+<text class="title" x="20" y="82">Browsers</text>
+<text class="small" x="20" y="98">one, shared by all twelve</text>
+<rect class="zone" x="240" y="74" width="614.4" height="20" rx="4"/>
+<path class="accent" d="M240,74 H533.75 a4,4 0 0 1 4,4 V90 a4,4 0 0 1 -4,4 H240 Z"/>
+<text class="label" x="547.75" y="89">1,985 MiB</text>
+
+<!-- App copy: 47 of 512 -->
+<text class="title" x="20" y="134">App copy</text>
+<text class="small" x="20" y="150">each of twelve; 564 MiB in all</text>
+<rect class="zone" x="240" y="126" width="76.8" height="20" rx="4"/>
+<path class="accent" d="M240,126 H243.05 a4,4 0 0 1 4,4 V142 a4,4 0 0 1 -4,4 H240 Z"/>
+<text class="label" x="257.05" y="141">47 MiB</text>
+
+<!-- Orchestrator: 200 -->
+<text class="title" x="20" y="193">Orchestrator</text>
+<path class="accent" d="M240,178 H266 a4,4 0 0 1 4,4 V194 a4,4 0 0 1 -4,4 H240 Z"/>
+<text class="label" x="280" y="193">200 MiB</text>
+
+<!-- Egress proxy: 96 -->
+<text class="title" x="20" y="245">Egress proxy</text>
+<path class="accent" d="M240,230 H250.4 a4,4 0 0 1 4,4 V246 a4,4 0 0 1 -4,4 H240 Z"/>
+<text class="label" x="264.4" y="245">96 MiB</text>
+
+<!-- Runner: 96 -->
+<text class="title" x="20" y="297">Runner</text>
+<path class="accent" d="M240,282 H250.4 a4,4 0 0 1 4,4 V298 a4,4 0 0 1 -4,4 H240 Z"/>
+<text class="label" x="264.4" y="297">96 MiB</text>
+
+<!-- Seed: 31 of 512 -->
+<text class="title" x="20" y="342">Seed</text>
+<text class="small" x="20" y="358">once, before the copies</text>
+<rect class="zone" x="240" y="334" width="76.8" height="20" rx="4"/>
+<path class="accent" d="M240,334 H240.65 a4,4 0 0 1 4,4 V350 a4,4 0 0 1 -4,4 H240 Z"/>
+<text class="label" x="254.65" y="349">31 MiB</text>
+
+<!-- Notes -->
+<text class="small" x="20" y="422">At its busiest moment the whole stack used 2,706 MiB. Each container peaked at its own moment. Counting all twelve copies, their peaks add up to 2,972 MiB.</text>
+<text class="small" x="20" y="442">The browsers' peak was measured under an earlier limit of 2 GiB. The orchestrator, the proxy, and the runner have no limit.</text>
+</svg>
