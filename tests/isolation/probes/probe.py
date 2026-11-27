@@ -400,6 +400,15 @@ def _status(line: bytes) -> int | None:
     return None
 
 
+def _header(head: bytes, name: str) -> str | None:
+    """The value of the first header called `name`, in lower case, in a response head."""
+    for line in head.split(b"\r\n\r\n", 1)[0].split(b"\r\n")[1:]:
+        key, colon, value = line.partition(b":")
+        if colon and key.strip().lower() == name.encode():
+            return value.strip().decode("latin-1")
+    return None
+
+
 def _read_head(stream: socket.socket) -> bytes:
     head = b""
     while b"\r\n\r\n" not in head and len(head) < 65536:
@@ -414,6 +423,8 @@ def fetch(url: str) -> dict[str, Any]:
     """Fetch a URL through the container's egress proxy, as an app's HTTP client would.
 
     Returns the proxy's own status for a CONNECT, and the server's status for the request.
+    When the server's status over https is not 200, it returns the Server header as well. A
+    run's log then names whoever refused, such as a CDN in front of the site.
     """
     parts = urllib.parse.urlsplit(url)
     host = parts.hostname or ""
@@ -442,7 +453,10 @@ def fetch(url: str) -> dict[str, Any]:
                         f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: footfall-probe\r\n"
                         "Connection: close\r\n\r\n".encode()
                     )
-                    result["status"] = _status(_read_head(secure).split(b"\r\n", 1)[0])
+                    reply = _read_head(secure)
+                    result["status"] = _status(reply.split(b"\r\n", 1)[0])
+                    if result["status"] != 200:
+                        result["server"] = _header(reply, "server")
             else:
                 stream.sendall(
                     f"GET {url} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: footfall-probe\r\n"
