@@ -535,6 +535,78 @@ async def test_scroll_changes_screen(session: MakeSession, app_server: AppServer
     assert up.screen.elements[0].name == "Paragraph 0"
 
 
+# Rows that each log their own click. Their page scrolls over two seconds, as a browser's
+# smooth scrolling can when the machine is busy.
+SLOW_SCROLL = (
+    "<!doctype html><title>Slow scroll</title><body style='margin:0'>"
+    + "".join(
+        f"<button style='display:block;width:100%;height:80px'>Row {n}</button>" for n in range(60)
+    )
+    + """<script>
+window.log = [];
+for (const b of document.querySelectorAll("button")) {
+  b.addEventListener("click", () => log.push(b.textContent));
+}
+addEventListener("wheel", (event) => {
+  event.preventDefault();
+  const from = scrollY, by = event.deltaY, start = performance.now();
+  const step = (now) => {
+    const done = Math.min(1, (now - start) / 2000);
+    scrollTo(0, from + by * done);
+    if (done < 1) requestAnimationFrame(step); else window.still = true;
+  };
+  window.still = false;
+  requestAnimationFrame(step);
+}, {passive: false});
+</script>"""
+)
+
+
+async def test_a_tap_after_a_slow_scroll_lands_on_the_element_it_names(
+    session: MakeSession, app_server: AppServer
+) -> None:
+    # A screen read while the page still moved names each element where it was mid-scroll.
+    # The model answers seconds later, when the page has stopped. A tap at that point lands
+    # on whatever row has moved under it.
+    app_server.page("/slow-scroll", SLOW_SCROLL)
+    s = await session("/slow-scroll")
+    down = await s.executor.run("scroll", {"direction": "down"})
+    assert down.screen is not None and down.screen.elements[0].name != "Row 0"
+    middle = down.screen.elements[len(down.screen.elements) // 2].name
+    await s.page.wait_for_function("window.still === true")
+    await tap_name(s, down, middle)
+    assert await s.page.evaluate("log") == [middle]
+
+
+# A form that posts and is sent back to the same address, as Tiny Tasks' forms are. Each
+# document numbers itself. The test can then tell the page after the post from the one before.
+POST_BACK = """<!doctype html><title>Form</title>
+<form method="post" action="/save"><button>Save</button></form>
+<script>
+sessionStorage.n = Number(sessionStorage.n || 0) + 1;
+document.title = "Form " + sessionStorage.n;
+</script>"""
+
+
+async def test_a_tap_that_posts_a_form_waits_for_the_page_it_comes_back_to(
+    session: MakeSession, app_server: AppServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The app answers the post late, as a busy one does. Until it answers, the old page still
+    # counts as loaded at the same address. WebKit then reads the page the tap has already
+    # left; Chromium holds the read until the new page arrives and then fails it. Either way
+    # the screen is read once, after the app has answered.
+    app_server.page("/form", POST_BACK)
+    app_server.reply("/save", status=303, headers={"Location": "/form"}, delay=1.0)
+    s = await session("/form", has_touch=True, is_mobile=True)
+    assert s.first.screen is not None and s.first.screen.title == "Form 1"
+    read, reads = reading(times=0)
+    monkeypatch.setattr(tools, "capture", read)
+    saved = await tap_name(s, s.first, "Save")
+    assert saved.error is False
+    assert saved.screen is not None and saved.screen.title == "Form 2"
+    assert len(reads) == 1
+
+
 async def test_scroll_direction_is_checked(session: MakeSession) -> None:
     s = await session()
     outcome = await s.executor.run("scroll", {"direction": "sideways"})
@@ -702,6 +774,33 @@ async def test_a_page_that_leaves_the_app_between_snapshot_and_screenshot_is_not
     assert outcome.screen.address == app_server.origin + "/buttons"
     assert len(reads) == 2
     assert sorted(p.name for p in s.shots.iterdir()) == ["01.jpg", "02.jpg"]
+
+
+async def test_a_page_that_scrolls_between_snapshot_and_screenshot_is_read_again(
+    session: MakeSession, app_server: AppServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The elements would be where the page was. The screenshot would be where it went.
+    paragraphs = "".join(f"<p style='height:80px;margin:0'>Paragraph {n}</p>" for n in range(60))
+    app_server.page("/long", f"<title>Long</title><body style='margin:0'>{paragraphs}</body>")
+    s = await session("/long")
+    read, reads = reading(between=lambda page: page.evaluate("scrollBy(0, 400)"))
+    monkeypatch.setattr(tools, "capture", read)
+    outcome = await s.executor.run("look", {})
+    assert len(reads) == 2
+    assert outcome.screen is not None
+    assert outcome.screen.elements[0].name == "Paragraph 5"
+
+
+async def test_a_page_reloaded_between_snapshot_and_screenshot_is_read_again(
+    session: MakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The address is the same before and after. Only the document is new.
+    s = await session()
+    read, reads = reading(between=lambda page: page.reload())
+    monkeypatch.setattr(tools, "capture", read)
+    outcome = await s.executor.run("look", {})
+    assert len(reads) == 2
+    assert outcome.screen is not None and outcome.screen.title == "Buttons"
 
 
 async def test_a_read_of_another_host_is_not_shown_when_the_page_comes_back_to_the_app(
@@ -1567,10 +1666,10 @@ def finding_with(**fields: Any) -> dict[str, Any]:
 
 def no_browser_executor(tmp_path: Path) -> tuple[Executor, Trace]:
     """An executor with no browser behind it, past its first look, for the steps that fail
-    on their input before the page is touched."""
+    on their input before the page is touched. Its page only takes event handlers."""
     trace = Trace(tmp_path / "trace.jsonl")
     executor = Executor(
-        cast(Page, object()),
+        cast(Page, SimpleNamespace(on=lambda *_: None)),
         cast(Guard, _NoGuard()),
         trace,
         tmp_path / "shots",
