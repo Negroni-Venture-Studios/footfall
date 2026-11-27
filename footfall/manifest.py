@@ -37,7 +37,7 @@ __all__ = [
     "require_listed",
 ]
 
-RUNTIMES = ("python3.13", "node22")
+RUNTIMES = ("python3.13", "node26")
 
 MANIFEST_FILE = "footfall.toml"
 MAX_MANIFEST_BYTES = 64 * 1024

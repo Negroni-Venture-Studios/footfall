@@ -78,7 +78,7 @@ def test_every_problem_is_reported_at_once() -> None:
     text = MINIMAL.replace("python3.13", "ruby3").replace("port = 8080", "port = 80")
     text += 'egress = ["10.0.0.1"]\n'
     assert problems_of(text) == [
-        "app.runtime: must be one of python3.13, node22, not 'ruby3'",
+        "app.runtime: must be one of python3.13, node26, not 'ruby3'",
         "app.port: must be between 1024 and 65535, not 80",
         "app.egress: '10.0.0.1' is not a valid host name",
     ]

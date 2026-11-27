@@ -633,7 +633,7 @@ async def test_the_runner_socket_is_for_the_runner_and_its_group(
     assert options["browsers_image"] == "footfall-browsers:dev"
     assert options["images"] == {
         "python3.13": "footfall-python3.13:dev",
-        "node22": "footfall-node22:dev",
+        "node26": "footfall-node26:dev",
     }
 
 

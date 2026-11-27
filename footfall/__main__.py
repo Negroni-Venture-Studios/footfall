@@ -76,7 +76,7 @@ ALL_FILES_WARNING: Final = (
 )
 RUNTIMES: Final = ("runsc", "runc")
 # The images the runner starts, as `docker build` tags them for development.
-RUNTIME_IMAGES: Final = {"python3.13": "footfall-python3.13:dev", "node22": "footfall-node22:dev"}
+RUNTIME_IMAGES: Final = {"python3.13": "footfall-python3.13:dev", "node26": "footfall-node26:dev"}
 BROWSERS_IMAGE: Final = "footfall-browsers:dev"
 DEFAULT_OUT: Final = Path("footfall-results")
 _CONTAINER_NAME: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
