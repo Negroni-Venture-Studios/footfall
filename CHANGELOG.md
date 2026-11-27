@@ -26,3 +26,4 @@ All notable changes to Footfall are recorded here. The format follows [Keep a Ch
 - The egress proxy checks each connection. It allows public addresses only, port 80 for plain HTTP and port 443 for TLS, one request per connection, and a TLS server name that matches the host. It refuses Encrypted Client Hello. The browsers have Encrypted Client Hello and their own calls to Google turned off.
 - Text a tester writes is cleaned, capped, stripped of the run's password, and labelled as observations before it leaves Footfall. An agent reading a report must never take it as instructions.
 - In GitHub Actions Footfall masks each secret it makes. The job's log shows `***` in its place.
+- `docs/security.md` says what Footfall protects against and what it cannot, for anyone who runs it.
