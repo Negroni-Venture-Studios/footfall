@@ -1,5 +1,7 @@
 """The container images: what the Dockerfiles say, since CI builds them and tests cannot."""
 
+import importlib.metadata
+import importlib.resources
 import json
 import re
 import tomllib
@@ -118,11 +120,30 @@ def locked_playwright_version() -> str:
     return str(next(p["version"] for p in lock["package"] if p["name"] == "playwright"))
 
 
-def test_browsers_playwright_version_matches_lock() -> None:
-    version = locked_playwright_version()
+def bundled_driver_version() -> str:
+    """The Playwright release of the driver inside the installed Python package.
+
+    playwright-python numbers its releases apart from Playwright's own: its 1.65.2 bundles
+    Playwright 1.65.1. `playwright --version` prints the Python package's number. The
+    driver's version is in its own package.json.
+    """
+    package = importlib.resources.files("playwright").joinpath("driver", "package", "package.json")
+    return str(json.loads(package.read_text())["version"])
+
+
+def test_browsers_image_runs_the_driver_the_locked_client_bundles() -> None:
+    """The image's server and the client's driver are the same Playwright release.
+
+    Microsoft tags the image by Playwright's own release. The image follows the driver inside
+    the locked Python package, not that package's version.
+    """
+    locked = locked_playwright_version()
+    assert importlib.metadata.version("playwright") == locked, "run uv sync first"
+    driver = bundled_driver_version()
+    wanted = f"the browser image must be Playwright {driver}, the driver in playwright {locked}"
     text = (ROOT / "images" / "browsers" / "Dockerfile").read_text()
-    assert f"mcr.microsoft.com/playwright:v{version}-noble@sha256:" in text
-    assert f"npm install --global --ignore-scripts playwright@{version}" in text
+    assert f"mcr.microsoft.com/playwright:v{driver}-noble@sha256:" in text, wanted
+    assert f"npm install --global --ignore-scripts playwright@{driver}" in text, wanted
     assert re.search(r"^USER pwuser$", text, re.MULTILINE)
 
 

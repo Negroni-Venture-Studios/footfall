@@ -149,7 +149,8 @@ def _version_mismatch(message: str) -> str | None:
         return "the run's browsers run another Playwright version than Footfall's"
     return (
         f"the run's browsers run Playwright {server.group(1)}, and Footfall runs "
-        f"{client.group(1)}; the browser image and uv.lock must name the same version"
+        f"{client.group(1)}; the browser image must run the Playwright version of the driver "
+        "that Footfall's playwright package bundles"
     )
 
 
