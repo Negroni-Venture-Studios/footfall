@@ -15,6 +15,7 @@ All notable changes to Footfall are recorded here. The format follows [Keep a Ch
 - Whoever runs Footfall has three settings: `FOOTFALL_DISK_BUDGET_MIB` (8 GiB by default), `FOOTFALL_RUN_LIFETIME_MINUTES` (90), and `FOOTFALL_RUN_COST_CEILING_USD` ($12). `footfall test --cost-ceiling` sets the last one for a single run. The tested repository cannot raise any of them. Footfall stops on a value it cannot use rather than fall back to the default.
 - `deploy/dev/compose.yaml` runs the development stack.
 - The isolation workflow runs the whole stack under gVisor on a GitHub-hosted runner for each pull request. It checks what the app and browser containers can and cannot reach.
+- `docs/architecture.md` says how the runner, the egress proxy, the browsers, and the tester work. It has a diagram of one run's network and a chart of the memory each container used.
 
 ### Security
 
