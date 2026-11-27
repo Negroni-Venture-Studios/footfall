@@ -11,6 +11,7 @@ import hashlib
 import mimetypes
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,6 +39,7 @@ class Reply:
     status: int = 200
     body: bytes = b""
     headers: dict[str, str] = field(default_factory=dict)
+    delay: float = 0.0  # seconds to wait before answering, as a slow app would
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -65,6 +67,8 @@ class _Handler(BaseHTTPRequestHandler):
             reply = self.server.routes.get(path)
         if reply is None:
             reply = self._file(path)
+        if reply.delay:
+            time.sleep(reply.delay)
         self.send_response(reply.status)
         for name, value in reply.headers.items():
             self.send_header(name, value)
@@ -154,10 +158,11 @@ class AppServer:
         *,
         status: int = 200,
         headers: dict[str, str] | None = None,
+        delay: float = 0.0,
     ) -> None:
         data = body.encode() if isinstance(body, str) else body
         with self._server.lock:
-            self._server.routes[path] = Reply(status, data, dict(headers or {}))
+            self._server.routes[path] = Reply(status, data, dict(headers or {}), delay)
 
     def page(self, path: str, html: str) -> None:
         self.reply(path, html, headers={"Content-Type": "text/html; charset=utf-8"})

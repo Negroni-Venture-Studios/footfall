@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Page
+from playwright.async_api import Frame, Page, Request, Response
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from footfall.tester.folder import FILE_MODE, FOLDER_MODE, Folder
@@ -80,7 +80,40 @@ CAPTURE_TIMEOUT = SNAPSHOT_TIMEOUT
 NAVIGATION_TIMEOUT_MS: Final = 10_000
 LOAD_WAIT_MS: Final = 1_500
 QUIET: Final = 0.25  # seconds to let the page react, before and after waiting for it to load
+NAVIGATION_WAIT: Final = NAVIGATION_TIMEOUT_MS / 1000  # seconds for a started navigation to land
+STILL_WAIT: Final = 3.0  # seconds, at most, for a scroll or a document change to stop
+STILL_FRAMES: Final = 3  # frames in a row with nothing moving before the page counts as still
+POLL: Final = 0.05  # seconds between looks at whether a navigation has landed
 SCROLL_SHARE: Final = 0.8
+
+# Where the page is: its document, and how far it and every scroller under the middle of the
+# screen have scrolled, where a scroll starts. A screen is read only when none of it moves.
+_WHERE = """
+const where = () => {
+  const found = [performance.timeOrigin, scrollX, scrollY];
+  let e = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+  for (; e; e = e.parentElement) {
+    if (e.scrollHeight > e.clientHeight || e.scrollWidth > e.clientWidth) {
+      found.push(e.scrollTop, e.scrollLeft);
+    }
+  }
+  return JSON.stringify(found);
+};
+"""
+WHERE_JS: Final = f"() => {{ {_WHERE} return where(); }}"
+STILL_JS: Final = f"""(bound) => new Promise((resolve) => {{
+  {_WHERE}
+  const start = performance.now();
+  let last = where(), still = 0;
+  const frame = () => {{
+    const now = where();
+    still = now === last ? still + 1 : 0;
+    last = now;
+    if (still >= {STILL_FRAMES} || performance.now() - start > bound) resolve(still);
+    else requestAnimationFrame(frame);
+  }};
+  requestAnimationFrame(frame);
+}})"""
 TYPE_CHUNK: Final = 50  # characters typed under one timeout, so slow typing is not a hang
 # Above the longest detail the guard builds (about 240 characters), so no event is cut.
 EVENT_CAP: Final = 400
@@ -579,6 +612,17 @@ class Executor:
         self._attempt = _Action()
         self._home = guard.origin + "/"
         self._home_path = "/"
+        # A count of the main frame's navigation events, the latest request, and the latest
+        # landing: a new document, a failure, a download, or an answer with no page in it.
+        # While a request is newer than a landing, a navigation is on its way.
+        self._events = 0
+        self._requested = 0
+        self._landed = 0
+        page.on("request", self._on_request)
+        page.on("response", self._on_response)
+        page.on("requestfailed", self._on_request_failed)
+        page.on("framenavigated", self._on_frame_navigated)
+        page.on("download", self._on_download)
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -914,11 +958,73 @@ class Executor:
         return answer is True
 
     async def _settle(self) -> None:
-        """Let the page react, within about two seconds; never wait for the network to idle."""
+        """Let the page react and come to rest; never wait for the network to idle.
+
+        A tap can post a form that the app answers late, and until it answers the old page
+        still counts as loaded, at the same address when the app sends it back there. So a
+        navigation the action started is waited for, within `NAVIGATION_WAIT`. A scroll can
+        still be moving after the wheel has turned, and a screen read then names each element
+        where it was mid-scroll. So the page is waited for until nothing has moved for
+        `STILL_FRAMES` frames, within `STILL_WAIT`. A page that never comes to rest is read
+        anyway. `_look` keeps that read only if the page did not move during it.
+        """
         await asyncio.sleep(QUIET)
+        await self._wait_for_navigation()
         with contextlib.suppress(PlaywrightError):
             await self._page.wait_for_load_state("domcontentloaded", timeout=LOAD_WAIT_MS)
+        await self._wait_for_stillness()
         await asyncio.sleep(QUIET)
+
+    async def _wait_for_navigation(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + NAVIGATION_WAIT
+        while self._requested > self._landed and loop.time() < deadline:
+            await asyncio.sleep(POLL)
+
+    async def _wait_for_stillness(self) -> None:
+        # The page's own script times the wait; this bound is for a page that never answers.
+        with contextlib.suppress(PlaywrightError, TimeoutError):
+            async with asyncio.timeout(STILL_WAIT + 1):
+                await self._page.evaluate(STILL_JS, STILL_WAIT * 1000)
+
+    async def _where(self) -> object:
+        """Where the page is, as `WHERE_JS` says, or None if it cannot say."""
+        try:
+            async with asyncio.timeout(CAPTURE_TIMEOUT):
+                return await self._page.evaluate(WHERE_JS)
+        except (PlaywrightError, TimeoutError):
+            return None
+
+    def _is_main_navigation(self, request: Request) -> bool:
+        try:
+            return request.is_navigation_request() and request.frame == self._page.main_frame
+        except PlaywrightError:  # a request from a frame that has gone
+            return False
+
+    def _land(self) -> None:
+        self._events += 1
+        self._landed = self._events
+
+    def _on_request(self, request: Request) -> None:
+        if self._is_main_navigation(request):
+            self._events += 1
+            self._requested = self._events
+
+    def _on_response(self, response: Response) -> None:
+        # No content, or reset content: the page stays as it is and no document comes.
+        if response.status in (204, 205) and self._is_main_navigation(response.request):
+            self._land()
+
+    def _on_request_failed(self, request: Request) -> None:
+        if self._is_main_navigation(request):
+            self._land()
+
+    def _on_frame_navigated(self, frame: Frame) -> None:
+        if frame == self._page.main_frame:
+            self._land()
+
+    def _on_download(self, _: object) -> None:
+        self._land()
 
     async def _settle_on_app(self) -> list[str]:
         """Settle, and bring the browser back if it has left the app."""
@@ -939,8 +1045,10 @@ class Executor:
         them, by a redirect hop the guard never routes, and a read is then of another host's
         page, or of two pages at once. So the snapshot reports the address of the document
         it read, and a read is kept only when that address, the page's address before the
-        snapshot and its address after the screenshot are one and the same, on the app. Any
-        other read is thrown away unsaved, the browser brought back to the app, and the
+        snapshot and its address after the screenshot are one and the same, on the app. The
+        page must also be where it was, as `WHERE_JS` tells. The same address can hold a new
+        document. A scroll moves every element between the snapshot and the screenshot.
+        Any other read is thrown away unsaved, the browser brought back to the app, and the
         screen read once more; a read a navigation broke is read once more too. If the second
         read is no better, `_Unsteady` is raised with the notes so far, and if it fails
         outright, `CaptureError`. Returns the screen, its screenshot id, and the notes from
@@ -949,6 +1057,7 @@ class Executor:
         notes: list[str] = []
         for attempt in range(2):
             before = self._page.url
+            was = await self._where()
             try:
                 screen = await capture(self._page, timeout=CAPTURE_TIMEOUT, fit=self._line)
             except CaptureError as error:
@@ -965,7 +1074,10 @@ class Executor:
                 self._debug("the page moved while it was read, so it is read again", error)
             else:
                 after = self._page.url
-                if screen.address == before == after and self._guard.on_app(after):
+                # The same address can hold a new document. A page can also scroll between
+                # the snapshot and the screenshot. Either way the two would not match.
+                still = was is not None and was == await self._where()
+                if screen.address == before == after and still and self._guard.on_app(after):
                     shot = self._save(screen.jpeg)
                     self._screen, self._shot = screen, shot
                     self._home, self._home_path = after, screen.path
