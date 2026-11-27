@@ -156,6 +156,31 @@ def test_address_absent_raises(
         engine.address("c1", "net")
 
 
+@pytest.mark.parametrize(
+    ("state", "stopped"),
+    [
+        ({"Status": "exited", "Running": False}, True),
+        ({"Status": "running", "Running": True}, False),
+    ],
+)
+def test_has_stopped_reads_the_containers_state(
+    docker: tuple[FakeDocker, DockerEngine], state: dict[str, object], stopped: bool
+) -> None:
+    fake, engine = docker
+    fake.on("GET", "/containers/c1/json", json_reply(200, {"State": state}))
+    assert engine.has_stopped("c1") is stopped
+
+
+@pytest.mark.parametrize("info", [{}, {"State": {}}, {"State": {"Running": "no"}}])
+def test_has_stopped_without_a_state_raises(
+    docker: tuple[FakeDocker, DockerEngine], info: dict[str, object]
+) -> None:
+    fake, engine = docker
+    fake.on("GET", "/containers/c1/json", json_reply(200, info))
+    with pytest.raises(EngineError, match="whether"):
+        engine.has_stopped("c1")
+
+
 def test_remove_forces(docker: tuple[FakeDocker, DockerEngine]) -> None:
     fake, engine = docker
     fake.on("DELETE", "/containers/c1", Reply(204))
