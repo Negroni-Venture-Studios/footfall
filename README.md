@@ -26,6 +26,8 @@ The agent asks Footfall over MCP to test its change. Each app's repository holds
   <img alt="Agents and people reach Footfall through Caddy. The web process serves the pages, sign-in, the MCP endpoint and live updates. The orchestrator runs the queue, clones repositories, runs the testers and merges their findings. It alone talks to the Anthropic API and fetches code from GitHub. The web process and the orchestrator share the database and screenshots. Only the runner holds the Docker socket. For each run it starts an app container for every persona and one browser container. All of them run under gVisor and hold no secrets. The orchestrator drives the browsers through Playwright and the browsers reach the app. Anything else either container fetches goes through the egress proxy. The proxy allows only the hosts the run's manifest names." src="docs/images/diagrams/overview-light.svg">
 </picture>
 
+[docs/architecture.md](docs/architecture.md) says how phase 1's runner, egress proxy, and tester work.
+
 ## Status
 
 Footfall is at phase 1 of the [design](docs/design.md). That is the sandbox and the tester. Nothing here is ready to deploy. Phase 1 builds the runner, the gVisor containers, the egress proxy, the browsers, the tester's tools and loop, and a demo app with planted bugs. All of it is driven from the command line. Later phases add runs, deployment, the MCP endpoint, and the live device wall.
