@@ -75,13 +75,16 @@ Footfall keeps its dependencies few and well maintained.
 
 ### Updating Playwright
 
-Playwright's server in the browser image refuses a client of another release. `uv.lock` and `images/browsers/Dockerfile` move together and `tests/test_images.py` fails while they differ. Dependabot opens a separate pull request for each Playwright release. It does not group them with the weekly updates and never moves the browser image itself. That pull request fails the image test until someone updates the browser image in it:
+The browser image runs Playwright's server. The `playwright` package that `uv.lock` pins drives it through the Playwright driver it bundles. The server refuses a client of another minor release, and the image's npm package must match its browsers. So the image runs the driver's own release. playwright-python numbers its releases apart from Playwright's. Its 1.65.2 bundles Playwright 1.65.1. `tests/test_images.py` fails while the image and the driver differ.
 
-1. Wait until Microsoft has published the image for the new release, `mcr.microsoft.com/playwright:v<version>-noble`. It can appear a day or two after the release on PyPI.
-2. On Dependabot's branch change the base image in `images/browsers/Dockerfile` to the new release's tag with the digest that `docker buildx imagetools inspect mcr.microsoft.com/playwright:v<version>-noble` prints. Change `npm install --global playwright@<version>` to match.
-3. Push to the same branch. Dependabot stops rebasing a pull request once someone else has pushed to it. Bring the branch up to date with `main` by hand if it falls behind.
+Dependabot opens a separate pull request for each release of the `playwright` package. It does not group them with the weekly updates and never moves the browser image itself. When the bundled driver changes, that pull request fails the image test until someone updates the browser image in it:
 
-The pull request then moves `uv.lock` and the browser image together. It is merged once every check is green.
+1. On Dependabot's branch run `uv run pytest tests/test_images.py`. The failure names the Playwright release the image needs. `uv run playwright --version` prints the package's own number, not the driver's.
+2. Wait until Microsoft has published the image for that release, `mcr.microsoft.com/playwright:v<release>-noble`. It can appear a day or two after Playwright's release on npm.
+3. Change the base image in `images/browsers/Dockerfile` to that tag with the digest that `docker buildx imagetools inspect mcr.microsoft.com/playwright:v<release>-noble` prints. Change `npm install --global playwright@<release>` to match.
+4. Push to the same branch. Dependabot stops rebasing a pull request once someone else has pushed to it. Bring the branch up to date with `main` by hand if it falls behind.
+
+If the image already runs the driver's release, the image test passes and the Dockerfile stays as it is. The pull request is merged once every check is green.
 
 ## Code of conduct
 

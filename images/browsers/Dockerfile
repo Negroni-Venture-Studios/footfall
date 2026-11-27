@@ -1,7 +1,9 @@
 # The browser image: Playwright's run-server, which the tester connects to.
-# The tag, the npm install and uv.lock must name the same Playwright release,
-# because run-server refuses a client of another version and the npm package
-# must match the browsers baked into the image. tests/test_images.py checks it.
+# The tag and the npm install name the Playwright release of the driver inside
+# the playwright package that uv.lock pins. playwright-python numbers its own
+# releases. Its 1.65.2 bundles 1.65.1. run-server refuses a client of another
+# minor release. The npm package must match the browsers baked into the image.
+# tests/test_images.py checks it.
 
 FROM mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
 

@@ -488,6 +488,8 @@ async def test_a_version_mismatch_fails_at_once_and_names_both_versions() -> Non
     message = str(caught.value)
     assert "v1.65" in message and "v1.66" in message
     assert "version" in message
+    # The image follows the driver inside the Python package, whose own version can differ.
+    assert "the driver that Footfall's playwright package bundles" in message
     assert "c2VjcmV0" not in message
 
 
