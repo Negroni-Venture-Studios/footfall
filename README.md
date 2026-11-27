@@ -36,6 +36,8 @@ Footfall is at phase 1 of the [design](docs/design.md). That is the sandbox and 
 
 Build the images as [images/README.md](images/README.md) describes. Then start the development stack in [deploy/dev/compose.yaml](deploy/dev/compose.yaml) with the commands at the top of that file. The demo app [Tiny Tasks](demo-app/README.md) is a small to-do list with twelve bugs planted for the testers to find. `footfall test /repo/demo-app` tests it.
 
+Twelve testers ran against it twice on a droplet. Their results are in [docs/phase-1-run.md](docs/phase-1-run.md).
+
 Docker Desktop on a Mac has no gVisor. To develop on a Mac set `FOOTFALL_RUNTIME=runc`. Footfall then runs the containers under test without gVisor and warns you. Never set it on a server.
 
 ## Contributing and security
