@@ -26,7 +26,11 @@ async def test_a_manifest_host_is_reachable(run: LiveRun, proxy_log: ProxyLog) -
     result = await run.probe("listed", "fetch", "https://example.com/", egress=["example.com"])
     fetched = result["https://example.com/"]
     assert fetched["proxy_status"] == 200, fetched
-    assert fetched["status"] == 200, fetched
+    # Any reply from example.com will do. The probe checked the site's certificate, so the
+    # reply came from example.com through the tunnel the proxy allowed. Which status it sends
+    # is example.com's choice. Cloudflare, in front of it, sometimes refuses GitHub's runners
+    # with a 403.
+    assert isinstance(fetched.get("status"), int), fetched
     await proxy_log.wait_for(_host(run.copies["listed"]), "example.com", "allowed")
 
 
