@@ -413,6 +413,55 @@ def test_log_tails_are_capped_at_the_end(h: Harness) -> None:
     assert tail.endswith("the last line\n")
 
 
+# Docker clears a container's network details when it stops. A step that fails at once can
+# stop before the runner reads its address. Only its exit code then says how it went.
+
+
+def test_an_install_that_stops_before_its_address_is_read_reports_its_exit_code(
+    h: Harness,
+) -> None:
+    h.engine.stopped_early.add("install")
+    h.engine.exit_codes["install"] = 3
+    h.engine.output["install"] = "::error title=FORGED::a forged annotation\n"
+    with pytest.raises(RunnerError) as caught:
+        prepare(h, install="sh -c 'exit 3'", seed="python3 seed.py")
+    assert str(caught.value) == "install failed with exit code 3"
+    assert caught.value.log_tail == "::error title=FORGED::a forged annotation\n"
+    # Nothing of it is left to reach the proxy. It was allowed nothing.
+    assert [c for c in h.proxy.calls if c[0] == "allow"] == []
+    assert SEED not in h.engine.names("create")
+    assert_nothing_left(h)
+
+
+def test_an_install_that_stops_at_once_and_succeeds_lets_the_prepare_go_on(h: Harness) -> None:
+    h.engine.stopped_early.add("install")
+    prepare(h, install="true", seed="python3 seed.py")
+    assert SEED in h.engine.names("create")
+    assert h.service.status(RUN) is None
+
+
+def test_an_app_that_stops_before_its_address_is_read_says_so(h: Harness) -> None:
+    prepare(h)
+    h.engine.stopped_early.add("app")
+    with pytest.raises(RunnerError, match="the app copy anna stopped as soon as it started"):
+        h.service.start_app(RUN, "anna", "python3 serve.py", 8000, [])
+    assert [c for c in h.proxy.calls if c[0] == "allow"] == []
+
+
+def test_browsers_that_stop_before_their_address_is_read_say_so(h: Harness) -> None:
+    prepare(h)
+    h.engine.stopped_early.add("browsers")
+    with pytest.raises(RunnerError, match="the browsers stopped as soon as they started"):
+        h.service.start_browsers(RUN, [])
+
+
+def test_a_running_container_with_no_address_is_still_an_engine_fault(h: Harness) -> None:
+    h.engine.fail("address", EngineError("container x has no address on network y"), "install")
+    with pytest.raises(RunnerError, match="has no address"):
+        prepare(h, install="pip install -r requirements.txt")
+    assert ("has_stopped", INSTALL) in h.engine.calls
+
+
 def test_seed_failure_tail_is_redacted(h: Harness) -> None:
     h.engine.exit_codes["seed"] = 1
     h.engine.output["seed"] = f"creating tester / {PASSWORD}\nTraceback: boom\n"

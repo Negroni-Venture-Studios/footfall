@@ -1077,6 +1077,9 @@ class RunnerService:
                 failure: RunnerError | None = None
                 try:
                     address = self._launch_locked(run, name, config, hosts)
+                    if address is None:
+                        # No log tail: the browsers' output can name the path.
+                        raise RunnerError("the browsers stopped as soon as they started")
                 except Exception as error:  # noqa: BLE001  # any kind is replaced, none is lost
                     failure = _without(error, path, "[the browsers' path]")
                 except BaseException:
@@ -1459,12 +1462,22 @@ class RunnerService:
             runtime=self._runtime,
             proxy_name=self._proxy_container,
         )
-        return self._launch_locked(run, _container_name(run.run_id, "app", copy), config, hosts)
+        name = _container_name(run.run_id, "app", copy)
+        address = self._launch_locked(run, name, config, hosts)
+        if address is None:
+            raise RunnerError(
+                f"the app copy {copy} stopped as soon as it started", self._tail(run, name)
+            )
+        return address
 
     # ------------------------------------------------------------ containers
 
-    def _launch_locked(self, run: _Run, name: str, config: dict[str, Any], hosts: list[str]) -> str:
-        """Create and start a container, then allow it `hosts`. Returns its address."""
+    def _launch_locked(
+        self, run: _Run, name: str, config: dict[str, Any], hosts: list[str]
+    ) -> str | None:
+        """Create and start a container, then allow it `hosts`. Returns its address, or None
+        for a container that has already stopped, as a step that fails at once can.
+        """
         earlier = run.containers.get(name)
         if earlier is not None:
             # An earlier container of this name whose allow list could not be revoked: revoke
@@ -1473,7 +1486,15 @@ class RunnerService:
         run.containers[name] = None  # recorded first, so that cleanup finds a half-made one
         self._engine.create(name, config)
         self._engine.start(name)
-        address = self._engine.address(name, run.network)
+        try:
+            address = self._engine.address(name, run.network)
+        except EngineError:
+            # Docker clears a container's network details when it stops. One that has run and
+            # stopped before this read has no address. Nothing of it is left to reach the proxy,
+            # so it is allowed nothing. One still running with none is Docker's fault.
+            if not self._engine.has_stopped(name):
+                raise
+            return None
         run.containers[name] = address
         self._proxy.allow(address, run.run_id, hosts)
         return address
