@@ -118,7 +118,7 @@ async def test_error_round_trip(live: Live) -> None:
     h.engine.exit_codes["install"] = 1
     h.engine.output["install"] = "npm ERR! 404 Not Found - left-pad\n"
     with pytest.raises(RunnerError) as caught:
-        await client.prepare(RUN, h.workspace(), "node22", "npm ci", None, [], {})
+        await client.prepare(RUN, h.workspace(), "node26", "npm ci", None, [], {})
     assert str(caught.value) == "install failed with exit code 1"
     assert caught.value.log_tail == "npm ERR! 404 Not Found - left-pad\n"
 

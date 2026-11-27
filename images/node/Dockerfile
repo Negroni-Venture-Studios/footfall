@@ -2,7 +2,7 @@
 # the root file system read-only, so npm caches into /tmp and installs go into
 # /workspace.
 
-FROM node:22-slim@sha256:be979e5523c76fa4d5ca4ebd3099078f220aa47ec39c48ad5b5df9314debd6eb
+FROM node:26-slim@sha256:abe7e5a82b61a8ef67b315b85497c9e65173387ccf2f4a029248184b8e020be5
 
 # The base image's own node user has uid 1000; every app runs as 10010.
 RUN groupadd --gid 10010 app \

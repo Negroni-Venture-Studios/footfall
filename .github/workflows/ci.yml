@@ -157,10 +157,10 @@ jobs:
       # digests exist.
       - name: Build the four images
         run: |
-          for name in footfall python3.13 node22 browsers; do
+          for name in footfall python3.13 node26 browsers; do
             case "$name" in
               python3.13) dir=python ;;
-              node22) dir=node ;;
+              node26) dir=node ;;
               *) dir="$name" ;;
             esac
             docker build -t "footfall-${name}:dev" -f "images/${dir}/Dockerfile" .

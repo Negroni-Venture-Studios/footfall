@@ -78,7 +78,7 @@ jobs:
           docker build -t footfall:dev -f images/footfall/Dockerfile .
           docker build --target test -t footfall:test -f images/footfall/Dockerfile .
           docker build -t footfall-python3.13:dev -f images/python/Dockerfile .
-          docker build -t footfall-node22:dev -f images/node/Dockerfile .
+          docker build -t footfall-node26:dev -f images/node/Dockerfile .
           docker build -t footfall-browsers:dev -f images/browsers/Dockerfile .
       - name: The browsers image serves nothing without the runner's command
         # Ruling R68: run as it is, it says why and stops, and never opens run-server.

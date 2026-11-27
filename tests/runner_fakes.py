@@ -20,7 +20,7 @@ from footfall.runner.service import RunnerService
 PROXY = "footfall-proxy"
 ORCHESTRATOR = "footfall-orchestrator"
 OUTSIDE_IPS = {PROXY: "10.89.0.2", ORCHESTRATOR: "10.89.0.3"}
-IMAGES = {"python3.13": "footfall-python3.13:dev", "node22": "footfall-node22:dev"}
+IMAGES = {"python3.13": "footfall-python3.13:dev", "node26": "footfall-node26:dev"}
 BROWSERS_IMAGE = "footfall-browsers:dev"
 
 

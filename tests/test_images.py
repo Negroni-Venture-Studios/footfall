@@ -9,6 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from footfall.__main__ import RUNTIME_IMAGES
+from footfall.manifest import RUNTIMES
+
 ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILES = sorted((ROOT / "images").glob("*/Dockerfile"))
 IMAGES = {"footfall", "python", "node", "browsers"}
@@ -88,6 +91,28 @@ def test_python_image_keeps_installs_in_the_workspace() -> None:
 
 def test_node_image_caches_in_tmp() -> None:
     assert "npm_config_cache=/tmp/npm" in (ROOT / "images" / "node" / "Dockerfile").read_text()
+
+
+def test_node_image_runs_the_long_term_support_line_its_runtime_names() -> None:
+    """The node26 runtime runs Node 26 and never moves to another major by itself.
+
+    Node's even majors become long-term support lines and its odd ones never do. Dependabot
+    leaves majors alone. Moving to the next long-term support line renames the runtime.
+    """
+    text = (ROOT / "images" / "node" / "Dockerfile").read_text()
+    (major,) = re.findall(r"^FROM node:(\d+)-slim@sha256:", text, re.MULTILINE)
+    assert int(major) % 2 == 0, "odd Node majors never get long-term support"
+    runtime = f"node{major}"
+    assert runtime in RUNTIMES
+    assert RUNTIME_IMAGES[runtime] == f"footfall-{runtime}:dev"
+    workflows = ROOT / ".github" / "workflows"
+    assert f"python3.13 {runtime} browsers" in (workflows / "ci.yml").read_text()
+    isolation = (workflows / "isolation.yml").read_text()
+    assert f"docker build -t footfall-{runtime}:dev -f images/node/Dockerfile ." in isolation
+    dependabot = (ROOT / ".github" / "dependabot.yml").read_text()
+    docker = dependabot.split('package-ecosystem: "docker"', 1)[1]
+    held = r'- dependency-name: "node"\n\s+update-types: \["version-update:semver-major"\]'
+    assert re.search(held, docker), "Dependabot must leave Node majors to a person"
 
 
 def locked_playwright_version() -> str:

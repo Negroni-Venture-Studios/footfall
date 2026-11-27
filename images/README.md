@@ -12,9 +12,9 @@ Footfall builds four images. They are tagged `dev` when built locally. The base 
 
 The image sets `PIP_USER=1` so that a plain `pip install` lands in `/workspace/.local`. pip inside a virtual environment refuses a user install. An `install` command that makes its own environment must turn the setting off for that pip. `python -m venv .venv && PIP_USER=0 .venv/bin/pip install -r requirements.txt` does that.
 
-## node22
+## node26
 
-`footfall-node22` is the equivalent for Node apps. The runner starts it in the same way as uid 10010 in `/workspace`. The `npm` cache is in `/tmp/npm`.
+`footfall-node26` is the equivalent for Node apps. It runs Node 26, a long-term support release. The runner starts it in the same way as uid 10010 in `/workspace`. The `npm` cache is in `/tmp/npm`.
 
 In both images `/tmp` is a 256 MiB memory file system that holds no runnable files. Every container the runner starts has the same. The npm cache shares it and an install that downloads more than that runs out of space. A build step cannot run a program it has just written to `/tmp`. `/workspace` has neither limit beyond the run's disk budget.
 
